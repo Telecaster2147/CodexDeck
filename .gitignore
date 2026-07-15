@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.log
+.env
 .agents/
 .codex/
 .coverage
