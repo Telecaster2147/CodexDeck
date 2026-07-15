@@ -1,35 +1,15 @@
-"""Command-line parsing and top-level application orchestration."""
+"""Command-line parsing and top-level exception normalization."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
-import time
-from dataclasses import asdict
-from datetime import datetime
+from pathlib import Path
 from typing import Iterable
 
-from .activity import ActivityTracker, SseHealthTracker
-from .config import (
-    DEFAULT_EVENT_LOOKBACK,
-    DEFAULT_IDLE_THRESHOLD,
-    DEFAULT_INTERVAL,
-    DEFAULT_SSE_LOOKBACK,
-    STATE_NETWORK_STALL,
-    VERSION,
-)
-from .models import ConversationActivity, ProcessAssessment, SseHealth
-from .monitoring import collect_assessments
-from .ui import (
-    assessment_to_dict,
-    compact_banner,
-    render_text,
-    run_interactive,
-    visible_cli_assessments,
-)
-from .utils import format_duration
+from .app import AppOptions, run_application
+from .config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, DEFAULT_INTERVAL, VERSION
 
 
 def positive_float(value: str) -> float:
@@ -54,61 +34,42 @@ def pid_value(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="codex-net-health",
-        description="自动发现 Codex 进程并检测对外连接、流量进展和网络卡死迹象。",
+        prog="codexnet",
+        description="按 Codex 实例观察会话生命周期、重连恢复与 TCP 证据。",
     )
     parser.add_argument(
         "--interval",
         type=positive_float,
         default=DEFAULT_INTERVAL,
-        help=f"两次采样之间等待秒数，默认 {DEFAULT_INTERVAL:g}",
+        help=f"刷新间隔秒数，默认 {DEFAULT_INTERVAL:g}",
     )
     parser.add_argument(
         "--idle-threshold",
         type=positive_float,
         default=DEFAULT_IDLE_THRESHOLD,
-        help=f"超过多少秒无业务流量时标记等待上游，默认 {DEFAULT_IDLE_THRESHOLD:g}",
-    )
-    parser.add_argument(
-        "--sse-lookback",
-        type=positive_float,
-        default=float(DEFAULT_SSE_LOOKBACK),
-        help=(
-            "检查最近多少秒内的远程压缩 SSE 超时，"
-            f"默认 {DEFAULT_SSE_LOOKBACK:g}"
-        ),
+        help=f"连接空闲显示阈值秒数，默认 {DEFAULT_IDLE_THRESHOLD:g}",
     )
     parser.add_argument(
         "--event-lookback",
         type=positive_float,
         default=float(DEFAULT_EVENT_LOOKBACK),
-        help=f"关键事件日志窗口秒数，默认 {DEFAULT_EVENT_LOOKBACK:g}",
+        help=f"时间线可见窗口秒数，默认 {DEFAULT_EVENT_LOOKBACK:g}",
     )
+    parser.add_argument("--pid", type=pid_value, action="append", default=[], help="只观察指定 PID，可重复")
     parser.add_argument(
-        "--pid",
-        type=pid_value,
+        "--codex-home",
+        type=Path,
         action="append",
         default=[],
-        help="只检测指定 PID；可以重复使用",
+        help="只观察指定 CODEX_HOME，可重复",
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--watch",
-        action="store_true",
-        help="持续检测（默认行为，保留此参数用于兼容）",
-    )
-    mode.add_argument(
-        "--once",
-        action="store_true",
-        help="只采样并显示一次",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="同时显示启动器和辅助进程；VS Code app-server 始终隐藏",
-    )
-    parser.add_argument("--json", action="store_true", help="输出 JSON")
-    parser.add_argument("--no-color", action="store_true", help="关闭颜色")
+    mode.add_argument("--watch", action="store_true", help="持续观察（默认）")
+    mode.add_argument("--once", action="store_true", help="完成一个采样窗口后退出")
+    parser.add_argument("--flat", action="store_true", help="启动时使用扁平会话视图")
+    parser.add_argument("--all", action="store_true", help="显示启动器、app-server 和辅助进程")
+    parser.add_argument("--json", action="store_true", help="单次输出 JSON，持续模式输出 NDJSON")
+    parser.add_argument("--no-color", action="store_true", help="关闭终端颜色")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     return parser
 
@@ -122,80 +83,29 @@ def required_commands_available() -> None:
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     required_commands_available()
-    selected_pids = set(args.pid) or None
-    use_color = sys.stdout.isatty() and not args.no_color and not args.json
-    sse_tracker = SseHealthTracker(args.sse_lookback)
-
-    watch_mode = not args.once
-    panel_mode = (
-        watch_mode and sys.stdin.isatty() and sys.stdout.isatty() and not args.json
+    options = AppOptions(
+        interval=args.interval,
+        idle_threshold=args.idle_threshold,
+        event_lookback=int(args.event_lookback),
+        selected_pids=set(args.pid) or None,
+        selected_homes=set(args.codex_home) or None,
+        once=args.once,
+        json=args.json,
+        no_color=args.no_color,
+        show_auxiliary=args.all,
+        flat=args.flat,
     )
-    assessments: list[ProcessAssessment] = []
-    sse_health = SseHealth(True, int(args.sse_lookback))
-    activities: dict[str, ConversationActivity] = {}
-    if panel_mode:
-        assessments, sse_health, activities = run_interactive(
-            args, use_color, selected_pids, sse_tracker
-        )
-    else:
-        activity_tracker = ActivityTracker(args.event_lookback)
-        while True:
-            assessments, sse_health = collect_assessments(
-                interval=args.interval,
-                idle_threshold=args.idle_threshold,
-                selected_pids=selected_pids,
-                sse_tracker=sse_tracker,
-            )
-            visible = visible_cli_assessments(assessments, args.all)
-            activities = activity_tracker.update(
-                [item.process for item in visible if item.process.role == "session"]
-            )
-            if args.json:
-                payload = {
-                    "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
-                    "interval_seconds": args.interval,
-                    "process_count": len(visible),
-                    "processes": [assessment_to_dict(item) for item in visible],
-                    "activities": {
-                        session_id: asdict(activity)
-                        for session_id, activity in activities.items()
-                    },
-                    "sse_health": asdict(sse_health),
-                }
-                print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
-            else:
-                render_text(visible, sse_health, args.interval, use_color, args.all)
-                for item in visible:
-                    activity = activities.get(item.process.session_id)
-                    if not activity:
-                        continue
-                    if activity.alert:
-                        print(
-                            f"[{activity.alert}] PID {item.process.pid} "
-                            f"{format_duration(activity.alert_age_seconds)}：{activity.alert_reason}"
-                        )
-                    elif activity.compacting:
-                        print(compact_banner(item.process, activity))
-                    else:
-                        print(f"[上游] PID {item.process.pid}：{activity.phase}")
-            if not watch_mode:
-                break
-            if not assessments:
-                time.sleep(args.interval)
-    if sse_health.has_sse_timeout:
-        return 3
-    if any(activity.alert for activity in activities.values()):
-        return 4
-    return 2 if any(item.health == STATE_NETWORK_STALL for item in assessments) else 0
+    return run_application(options)
 
 
 def run() -> int:
-    """Run the command-line application and normalize top-level failures."""
     try:
         return main()
     except KeyboardInterrupt:
         print("\n检测已停止。", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        return 0
     except RuntimeError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1

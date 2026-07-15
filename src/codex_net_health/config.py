@@ -1,9 +1,6 @@
-"""Application paths, thresholds, states, labels, and terminal constants."""
+"""Application defaults and human-readable status labels."""
 
 from __future__ import annotations
-
-import os
-from pathlib import Path
 
 from . import __version__
 
@@ -11,22 +8,12 @@ from . import __version__
 VERSION = __version__
 DEFAULT_INTERVAL = 2.0
 DEFAULT_IDLE_THRESHOLD = 30.0
-DEFAULT_SSE_LOOKBACK = 15 * 60
 DEFAULT_EVENT_LOOKBACK = 15 * 60
 ACTIVITY_BOOTSTRAP_LOOKBACK = 6 * 60 * 60
-CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-STATE_DB = CODEX_HOME / "state_5.sqlite"
-LOG_DB = CODEX_HOME / "logs_2.sqlite"
-SESSION_INDEX = CODEX_HOME / "session_index.jsonl"
 MAX_SESSION_TAIL = 4 * 1024 * 1024
-
-STATE_ACTIVE = "ACTIVE"
-STATE_HEALTHY_IDLE = "HEALTHY_IDLE"
-STATE_UPSTREAM_WAIT = "UPSTREAM_WAIT"
-STATE_NETWORK_STALL = "NETWORK_STALL"
-STATE_DISCONNECTED = "DISCONNECTED"
-STATE_NO_OUTBOUND = "NO_OUTBOUND"
-STATE_AUXILIARY = "AUXILIARY"
+MAX_EVENTS_PER_SESSION = 500
+COMMAND_TIMEOUT = 1.5
+SQLITE_TIMEOUT = 0.10
 
 ALERT_PRE_REQUEST = "PRE_REQUEST_STALL"
 ALERT_HTTP_RESPONSE = "HTTP_RESPONSE_STALL"
@@ -40,45 +27,56 @@ ALERT_THRESHOLDS = {
     ALERT_KEEPALIVE_ONLY: (120, 300),
 }
 
-ACTIVITY_LABELS = {
-    "TASK_START": "正在准备本地请求",
-    "HTTP_POST": "请求已发送，等待响应",
+EVENT_LABELS = {
+    "TURN_STARTED": "Turn 已开始",
+    "REQUEST_SENT": "请求已发送",
     "RESPONSE_STARTED": "上游已接收请求",
-    "REASONING": "模型正在推理",
-    "MESSAGE": "模型正在生成回复",
-    "TOOL_BUILD": "模型正在组织工具调用",
-    "TOOL_CALL": "工具调用已生成",
-    "TOOL_DONE": "工具已返回，等待模型继续",
-    "KEEPALIVE": "仅收到上游 keepalive",
-    "RESPONSE_DONE": "模型响应完成",
-    "RESPONSE_FAIL": "模型响应失败",
+    "MODEL_PROGRESS": "模型正在生成",
+    "TOOL_RUNNING": "工具正在运行",
+    "TOOL_COMPLETED": "工具已返回",
+    "RECONNECTING": "响应流正在重连",
+    "TRANSPORT_FALLBACK": "正在切换传输方式",
+    "RECOVERED": "连接已恢复",
+    "COMPACTING": "正在压缩上下文",
+    "COMPACT_COMPLETED": "上下文压缩完成",
+    "TURN_COMPLETED": "Turn 已完成",
+    "TURN_FAILED": "模型调用失败",
+    "TURN_ABORTED": "Turn 已中断",
     "TOKEN_USAGE": "上下文用量更新",
-    "TASK_DONE": "当前 turn 已完成",
-    "COMPACT_START": "正在压缩上下文",
-    "COMPACT_DONE": "上下文压缩完成",
-    "COMPACT_FAIL": "上下文压缩失败",
-    "SSE_TIMEOUT": "SSE 空闲超时",
-    "INTERRUPT": "当前 turn 已中断",
+    "KEEPALIVE": "收到 keepalive",
+    "WARNING": "Codex 警告",
+    "OPERATION_ERROR": "操作错误",
+    "PROCESS_EXITED": "进程已退出",
+    "PROCESS_RESUMED": "进程已重新启动",
 }
 
-STATUS_TEXT = {
-    STATE_ACTIVE: "活跃传输",
-    STATE_HEALTHY_IDLE: "连接正常，暂时空闲",
-    STATE_UPSTREAM_WAIT: "连接正常，正在等待上游",
-    STATE_NETWORK_STALL: "疑似网络阻塞",
-    STATE_DISCONNECTED: "采样期间连接断开",
-    STATE_NO_OUTBOUND: "未发现活动外联",
-    STATE_AUXILIARY: "辅助进程，无独立外联",
+LIFECYCLE_LABELS = {
+    "IDLE": "空闲",
+    "STARTING": "正在准备请求",
+    "WAITING_RESPONSE": "正在等待上游",
+    "GENERATING": "模型正在生成",
+    "RUNNING_TOOL": "工具正在运行",
+    "COMPACTING": "正在压缩上下文",
+    "COMPLETED": "已完成",
+    "FAILED": "失败",
+    "ABORTED": "已中断",
 }
 
-STATUS_PRIORITY = {
-    STATE_NETWORK_STALL: 60,
-    STATE_DISCONNECTED: 50,
-    STATE_ACTIVE: 40,
-    STATE_UPSTREAM_WAIT: 30,
-    STATE_HEALTHY_IDLE: 20,
-    STATE_NO_OUTBOUND: 10,
-    STATE_AUXILIARY: 0,
+RECOVERY_LABELS = {
+    "NONE": "",
+    "SUSPECT": "疑似异常",
+    "RECONNECTING": "正在重连",
+    "TRANSPORT_FALLBACK": "切换传输",
+    "RECOVERED": "已恢复",
+}
+
+NETWORK_LABELS = {
+    "UNKNOWN": "网络信息未知",
+    "IDLE": "连接空闲",
+    "ACTIVE": "活跃传输",
+    "SUSPECT": "疑似网络异常",
+    "STALLED": "网络阻塞",
+    "CLOSED": "连接已关闭",
 }
 
 ANSI = {
@@ -88,7 +86,11 @@ ANSI = {
     "green": "\033[32m",
     "yellow": "\033[33m",
     "cyan": "\033[36m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "white": "\033[37m",
     "dim": "\033[2m",
+    "inverse": "\033[7m",
 }
 
 ALT_SCREEN_ENTER = "\033[?1049h"
@@ -98,4 +100,3 @@ CURSOR_SHOW = "\033[?25h"
 SCREEN_HOME_CLEAR = "\033[H\033[2J"
 ERASE_LINE = "\033[2K"
 INVERSE = "\033[7m"
-

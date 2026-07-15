@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-net-health"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Terminal monitor for Codex process, network, and conversation health"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["codex", "network", "monitoring", "terminal", "tui"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: POSIX :: Linux",
@@ -26,6 +26,9 @@ codex-net-health = "codex_net_health.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "codex_net_health.__version__"}
 
 [tool.ruff]
 line-length = 100
