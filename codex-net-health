@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Development checkout launcher for Codex Net Health."""
+
+from pathlib import Path
+import sys
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from codex_net_health.cli import run  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())
