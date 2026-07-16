@@ -75,6 +75,45 @@ class FakeProc:
         return []
 
 
+class FakePacketInspector:
+    def __init__(self) -> None:
+        self.error = ""
+        self.running = True
+        self.starts = 0
+        self.annotations = 0
+        self.closed = False
+
+    def start(self) -> bool:
+        self.starts += 1
+        return True
+
+    def annotate(self, socket_by_pid: dict[int, list[SocketInfo]]) -> None:
+        self.annotations += 1
+        for sockets in socket_by_pid.values():
+            for socket_info in sockets:
+                socket_info.tls_server_name = "api.openai.com"
+                socket_info.tls_alpn_protocols = ("h2",)
+                socket_info.tls_versions = ("TLS 1.3",)
+                socket_info.tls_observed_at = 100.0
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class UnavailablePacketInspector:
+    error = "AF_PACKET 原始套接字不可用：Operation not permitted"
+    running = False
+
+    def start(self) -> bool:
+        return False
+
+    def annotate(self, socket_by_pid: dict[int, list[SocketInfo]]) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def create_instance(
     root: Path,
     pid: int,
@@ -192,6 +231,7 @@ class EngineTests(unittest.TestCase):
             root = Path(temp)
             first, process_one = create_instance(root / "one", 41, "session-one", True)
             second, process_two = create_instance(root / "two", 42, "session-two", False)
+            process_one.cwd = "/launcher/cwd"
             result = DiscoveryResult(
                 [process_one, process_two],
                 {first.instance_id: first, second.instance_id: second},
@@ -216,6 +256,7 @@ class EngineTests(unittest.TestCase):
                 "failure for session-one",
             )
             self.assertNotEqual(sessions["session-two"].lifecycle, LifecycleState.FAILED)
+            self.assertEqual(sessions["session-one"].process.cwd, str(first.paths.codex_home))
             self.assertEqual(discovery.calls, 2)
             self.assertEqual(sockets.calls, 2)
 
@@ -251,6 +292,64 @@ class EngineTests(unittest.TestCase):
             second = engine.sample().sessions[0]
             self.assertEqual(first.network.state, NetworkState.SUSPECT)
             self.assertEqual(second.network.state, NetworkState.STALLED)
+
+    def test_packet_metadata_flows_from_collector_to_network_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(Path(temp) / "one", 57, "session-packet", False)
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+
+            def connected() -> SocketInfo:
+                return SocketInfo(
+                    "ESTAB",
+                    0,
+                    0,
+                    "192.0.2.10:43122",
+                    "198.51.100.20:443",
+                    57,
+                    route="external",
+                )
+
+            packets = FakePacketInspector()
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{57: [connected()]}, {57: [connected()]}]),
+                proc=FakeProc(),
+                packet_inspector=packets,
+            )
+            engine.baseline()
+            connection = engine.sample().sessions[0].network.connections[0]
+            self.assertEqual(packets.starts, 1)
+            self.assertGreaterEqual(packets.annotations, 1)
+            self.assertEqual(connection.tls_server_name, "api.openai.com")
+            self.assertEqual(connection.tls_alpn_protocols, ("h2",))
+            self.assertEqual(connection.tls_versions, ("TLS 1.3",))
+            engine.close()
+            self.assertTrue(packets.closed)
+
+    def test_packet_permission_failure_is_reported_once_per_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(Path(temp) / "one", 58, "session-packet-error", False)
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{58: []}]),
+                proc=FakeProc(),
+                packet_inspector=UnavailablePacketInspector(),
+            )
+            snapshot = engine.sample()
+            self.assertEqual(
+                snapshot.diagnostics,
+                ["网络解包不可用：AF_PACKET 原始套接字不可用：Operation not permitted"],
+            )
+            packet_health = next(item for item in snapshot.collector_health if item.name == "packet")
+            self.assertEqual(packet_health.consecutive_failures, 1)
+            engine.close()
 
     def test_network_progress_records_recovery_after_suspect_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

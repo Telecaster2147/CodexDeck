@@ -83,6 +83,11 @@ class FakeEngine:
 
 
 class DoctorTests(unittest.TestCase):
+    def test_legacy_app_options_position_keeps_doctor_flag(self) -> None:
+        options = make_options()
+        self.assertTrue(options.doctor)
+        self.assertFalse(options.packet_inspection)
+
     def test_parser_accepts_doctor_without_changing_default_mode(self) -> None:
         self.assertIsNone(build_parser().parse_args([]).command)
         args = build_parser().parse_args(["doctor", "--json"])

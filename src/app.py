@@ -41,6 +41,7 @@ class AppOptions:
     history_path: Path | None = None
     history_days: int = 30
     history_max_bytes: int = 128 * 1024 * 1024
+    packet_inspection: bool = False
 
 
 def exit_code(snapshot: MonitorSnapshot) -> int:
@@ -95,6 +96,7 @@ def run_application(options: AppOptions) -> int:
             selected_pids=options.selected_pids,
             selected_homes=options.selected_homes,
             history=history,
+            packet_inspection=options.packet_inspection,
         )
     except Exception:
         if history is not None:

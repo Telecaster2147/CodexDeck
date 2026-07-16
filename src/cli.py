@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--once", action="store_true", help="完成一个采样窗口后退出")
     parser.add_argument("--flat", action="store_true", help="启动时使用扁平会话视图")
     parser.add_argument("--all", action="store_true", help="显示启动器、app-server 和辅助进程")
+    parser.add_argument(
+        "--packet-inspection",
+        action="store_true",
+        help="被动解析 TLS ClientHello 元数据（需要 CAP_NET_RAW 或 root）",
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON，持续监控模式使用 NDJSON")
     parser.add_argument("--session", help="export：按会话 ID 或完整会话 key 导出复盘")
     parser.add_argument(
@@ -143,6 +148,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         no_color=args.no_color,
         show_auxiliary=args.all,
         flat=args.flat,
+        packet_inspection=args.packet_inspection,
         doctor=args.command == "doctor",
         command=args.command or "monitor",
         export_session=args.session,

@@ -429,7 +429,15 @@ def _evidence_renderable(
         table.add_column("RX", justify="right")
         table.add_column("TX", justify="right")
         table.add_column("RETRANS", justify="right")
+        table.add_column("TLS")
         for connection in session.network.connections:
+            tls_parts = []
+            if connection.tls_server_name:
+                tls_parts.append(connection.tls_server_name)
+            if connection.tls_alpn_protocols:
+                tls_parts.append("/".join(connection.tls_alpn_protocols))
+            if connection.tls_versions:
+                tls_parts.append(",".join(version.replace("TLS ", "") for version in connection.tls_versions))
             table.add_row(
                 connection.route,
                 connection.peer,
@@ -437,6 +445,7 @@ def _evidence_renderable(
                 str(connection.received_delta),
                 str(connection.sent_delta),
                 str(connection.retrans_delta),
+                " · ".join(tls_parts) or "-",
             )
         blocks.append(table)
     if session.token_usage:

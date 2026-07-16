@@ -181,6 +181,10 @@ class SocketInfo:
     lastrcv_ms: int | None = None
     rtt_ms: float | None = None
     route: str = "unknown"
+    tls_server_name: str = ""
+    tls_alpn_protocols: tuple[str, ...] = ()
+    tls_versions: tuple[str, ...] = ()
+    tls_observed_at: float | None = None
 
     @property
     def key(self) -> str:
@@ -203,6 +207,10 @@ class ConnectionAssessment:
     idle_seconds: float | None
     health: NetworkState
     reason: str
+    tls_server_name: str = ""
+    tls_alpn_protocols: tuple[str, ...] = ()
+    tls_versions: tuple[str, ...] = ()
+    tls_observed_at: float | None = None
 
 
 @dataclass(frozen=True)

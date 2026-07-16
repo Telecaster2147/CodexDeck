@@ -30,6 +30,7 @@ from models import (
     SessionHealth,
 )
 from network.classifier import assess_process_network
+from network.packet import PacketInspector
 from network.sockets import SocketCollector
 from state_machine import PROGRESS_KINDS, SessionStateMachine
 from utils import CommandError, compact_path, one_line
@@ -47,6 +48,8 @@ class MonitorEngine:
         sockets: SocketCollector | None = None,
         proc: ProcReader | None = None,
         history: HistoryStore | None = None,
+        packet_inspection: bool = False,
+        packet_inspector: PacketInspector | None = None,
     ) -> None:
         self.interval = interval
         self.idle_threshold = idle_threshold
@@ -75,6 +78,13 @@ class MonitorEngine:
         self.socket_stale_since: float | None = None
         self.collectors = CollectorTracker(interval)
         self.history = history
+        self.packet_inspector = packet_inspector or (
+            PacketInspector() if packet_inspection else None
+        )
+        if self.packet_inspector is not None:
+            packet_started = time.monotonic()
+            if self.packet_inspector.start():
+                self.collectors.record("packet", packet_started)
 
     def baseline(self) -> None:
         """Capture a cheap first socket baseline before a completed sample window."""
@@ -126,6 +136,8 @@ class MonitorEngine:
                 self.socket_stale_since = now_monotonic
             stale_age = now_monotonic - self.socket_stale_since
             diagnostics.append(f"TCP 快照已过期 {stale_age:.1f}s：{exc}")
+
+        self._annotate_packet_metadata(socket_by_pid, diagnostics)
 
         by_instance: dict[str, list[ProcessInfo]] = defaultdict(list)
         for process in discovery.processes:
@@ -203,7 +215,7 @@ class MonitorEngine:
                 task = self._latest_task(rollout_path) if rollout_path else ""
                 process = replace(
                     process,
-                    cwd=process.cwd or (record.cwd if record else ""),
+                    cwd=(record.cwd if record and record.cwd else process.cwd),
                     session_id=session_id,
                     session_title=self._bounded(one_line(title), 120),
                     current_task=self._bounded(one_line(task or fallback_task), 240),
@@ -551,12 +563,41 @@ class MonitorEngine:
         }
 
     def close(self) -> None:
+        if self.packet_inspector is not None:
+            self.packet_inspector.close()
+            self.packet_inspector = None
         for store in self.store_cache.values():
             store.close()
         self.store_cache.clear()
         if self.history is not None:
             self.history.close()
             self.history = None
+
+    def _annotate_packet_metadata(
+        self,
+        socket_by_pid: dict[int, list],
+        diagnostics: list[str],
+    ) -> None:
+        """Merge optional passive TLS metadata without affecting socket sampling."""
+
+        if self.packet_inspector is None:
+            return
+        packet_started = time.monotonic()
+        try:
+            self.packet_inspector.annotate(socket_by_pid)
+            error = self.packet_inspector.error
+            if error:
+                self.collectors.record("packet", packet_started, error)
+                diagnostics.append(f"网络解包不可用：{error}")
+            elif self.packet_inspector.running:
+                self.collectors.record("packet", packet_started)
+            else:
+                error = "AF_PACKET 采集线程未运行"
+                self.collectors.record("packet", packet_started, error)
+                diagnostics.append(f"网络解包不可用：{error}")
+        except Exception as exc:
+            self.collectors.record("packet", packet_started, exc)
+            diagnostics.append(f"网络解包采集异常：{exc}")
 
     def pin_session(self, session: SessionHealth | None) -> None:
         """Retain the selected session timeline while the TUI references it."""
