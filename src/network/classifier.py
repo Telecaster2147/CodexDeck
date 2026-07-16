@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..models import ConnectionAssessment, NetworkEvidence, NetworkState, SocketInfo
+from models import ConnectionAssessment, NetworkEvidence, NetworkState, SocketInfo
 
 
 def idle_seconds(socket: SocketInfo) -> float | None:

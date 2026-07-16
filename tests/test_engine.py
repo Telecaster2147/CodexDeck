@@ -12,11 +12,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex_net_health.codex.paths import ResolvedInstance  # noqa: E402
-from codex_net_health.codex.processes import DiscoveryResult  # noqa: E402
-from codex_net_health.engine import MonitorEngine  # noqa: E402
-from codex_net_health.app import exit_code  # noqa: E402
-from codex_net_health.models import (  # noqa: E402
+from codex.paths import ResolvedInstance  # noqa: E402
+from codex.processes import DiscoveryResult  # noqa: E402
+from engine import MonitorEngine  # noqa: E402
+from app import exit_code  # noqa: E402
+from models import (  # noqa: E402
     CodexPaths,
     LifecycleState,
     NetworkState,
@@ -24,7 +24,7 @@ from codex_net_health.models import (  # noqa: E402
     ProcessInfo,
     SocketInfo,
 )
-from codex_net_health.utils import CommandError  # noqa: E402
+from utils import CommandError  # noqa: E402
 
 
 class FakeDiscovery:

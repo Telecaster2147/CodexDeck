@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from ..config import SQLITE_TIMEOUT
-from ..models import CodexPaths, SourceCapabilities
+from config import SQLITE_TIMEOUT
+from models import CodexPaths, SourceCapabilities
 
 
 THREAD_COLUMNS = {

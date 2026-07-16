@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..models import CodexPaths, ProcessIdentity
+from models import CodexPaths, ProcessIdentity
 
 
 @dataclass(frozen=True)

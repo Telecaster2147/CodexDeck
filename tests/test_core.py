@@ -8,8 +8,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex_net_health.codex.events import normalize_rollout_record  # noqa: E402
-from codex_net_health.models import (  # noqa: E402
+from codex.events import normalize_rollout_record  # noqa: E402
+from models import (  # noqa: E402
     Confidence,
     LifecycleState,
     NetworkEvidence,
@@ -20,9 +20,9 @@ from codex_net_health.models import (  # noqa: E402
     RecoveryState,
     SocketInfo,
 )
-from codex_net_health.network.classifier import assess_process_network  # noqa: E402
-from codex_net_health.network.sockets import parse_ss_output  # noqa: E402
-from codex_net_health.state_machine import SessionStateMachine  # noqa: E402
+from network.classifier import assess_process_network  # noqa: E402
+from network.sockets import parse_ss_output  # noqa: E402
+from state_machine import SessionStateMachine  # noqa: E402
 
 
 def process(session_id: str = "session-1") -> ProcessInfo:
@@ -135,8 +135,8 @@ class EventNormalizationTests(unittest.TestCase):
         self.assertEqual(events[0].kind, "OPERATION_ERROR")
 
     def test_sse_terminal_failure_has_error_message(self) -> None:
-        from codex_net_health.codex.events import normalize_log
-        from codex_net_health.codex.state_store import LogRecord
+        from codex.events import normalize_log
+        from codex.state_store import LogRecord
 
         body = (
             'SSE event: {"type":"response.failed","response":'

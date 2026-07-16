@@ -6,16 +6,18 @@ import json
 import re
 import time
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime
 from pathlib import Path
 
-from .codex.events import normalize_log
-from .codex.paths import ProcReader, open_rollout_paths
-from .codex.processes import DiscoveryResult, ProcessDiscovery
-from .codex.rollout import RolloutReader, latest_user_task, rollout_identity
-from .codex.state_store import StateStore
-from .models import (
+from codex.events import normalize_log
+from codex.paths import ProcReader, open_rollout_paths
+from codex.processes import DiscoveryResult, ProcessDiscovery
+from codex.rollout import RolloutReader, latest_user_task, rollout_identity
+from codex.state_store import StateStore
+from diagnostics import CollectorTracker
+from history import HistoryStore
+from models import (
     CodexPaths,
     Confidence,
     InstanceSnapshot,
@@ -23,13 +25,14 @@ from .models import (
     NetworkEvidence,
     NetworkState,
     NormalizedEvent,
+    ProtocolCapabilities,
     ProcessInfo,
     SessionHealth,
 )
-from .network.classifier import assess_process_network
-from .network.sockets import SocketCollector
-from .state_machine import PROGRESS_KINDS, SessionStateMachine
-from .utils import CommandError, compact_path, one_line
+from network.classifier import assess_process_network
+from network.sockets import SocketCollector
+from state_machine import PROGRESS_KINDS, SessionStateMachine
+from utils import CommandError, compact_path, one_line
 
 
 class MonitorEngine:
@@ -43,6 +46,7 @@ class MonitorEngine:
         discovery: ProcessDiscovery | None = None,
         sockets: SocketCollector | None = None,
         proc: ProcReader | None = None,
+        history: HistoryStore | None = None,
     ) -> None:
         self.interval = interval
         self.idle_threshold = idle_threshold
@@ -69,6 +73,8 @@ class MonitorEngine:
         self.last_socket_by_pid: dict[int, list] = {}
         self.discovery_stale_since: float | None = None
         self.socket_stale_since: float | None = None
+        self.collectors = CollectorTracker(interval)
+        self.history = history
 
     def baseline(self) -> None:
         """Capture a cheap first socket baseline before a completed sample window."""
@@ -88,11 +94,14 @@ class MonitorEngine:
         started = time.monotonic()
         now_monotonic = started
         diagnostics: list[str] = []
+        process_started = time.monotonic()
         try:
             discovery = self.discovery.discover(self.selected_pids, self.selected_homes)
+            self.collectors.record("process", process_started)
             self.last_discovery = discovery
             self.discovery_stale_since = None
         except CommandError as exc:
+            self.collectors.record("process", process_started, exc)
             if self.last_discovery is None:
                 raise RuntimeError(str(exc)) from exc
             discovery = self.last_discovery
@@ -102,12 +111,15 @@ class MonitorEngine:
             diagnostics.append(f"进程列表已过期 {stale_age:.1f}s：{exc}")
 
         pids = {process.pid for process in discovery.processes}
+        socket_started = time.monotonic()
         try:
             socket_by_pid = self.sockets.snapshot(pids)
+            self.collectors.record("socket", socket_started)
             self.last_socket_by_pid = socket_by_pid
             sockets_stale = False
             self.socket_stale_since = None
         except CommandError as exc:
+            self.collectors.record("socket", socket_started, exc)
             socket_by_pid = self.last_socket_by_pid
             sockets_stale = True
             if self.socket_stale_since is None:
@@ -130,6 +142,7 @@ class MonitorEngine:
             instance_rollouts: set[str] = set()
             if resolved.method == "unresolved":
                 instance_diagnostics.append("进程环境与活动文件不可读，路径按默认值推测")
+            state_started = time.monotonic()
             store = self._store_for(instance_id, resolved.paths)
             process_keys = {process.stable_key for process in processes}
             if self.log_process_keys.get(instance_id) != process_keys:
@@ -164,6 +177,11 @@ class MonitorEngine:
                     )
                 )
             records = store.threads(sessions_by_pid.values())
+            self.collectors.record(
+                f"state_db:{instance_id}",
+                state_started,
+                None if store.capabilities.threads else "缺少 threads capability",
+            )
             names = self._session_names(instance_id, resolved.paths.session_index)
             enriched: list[ProcessInfo] = []
             for process in processes:
@@ -205,8 +223,14 @@ class MonitorEngine:
             }
             events_by_session: dict[str, list[NormalizedEvent]] = defaultdict(list)
             cutoff = int(time.time()) - self.machine.lookback_seconds
+            log_started = time.monotonic()
             logs = store.logs_since(
                 [process.pid for process in enriched], self.log_cursors[instance_id], cutoff
+            )
+            self.collectors.record(
+                f"log_db:{instance_id}",
+                log_started,
+                None if store.capabilities.logs else "缺少 logs capability",
             )
             if logs:
                 self.log_cursors[instance_id] = max(record.log_id for record in logs)
@@ -219,6 +243,7 @@ class MonitorEngine:
                     events_by_session[session_id].extend(normalize_log(record))
 
             sessions = []
+            rollout_started = time.monotonic()
             for process in enriched:
                 if process.role != "session" or not process.session_id:
                     continue
@@ -295,6 +320,13 @@ class MonitorEngine:
                     session = self.machine.derive(session_key, process, network)
                 sessions.append(session)
                 self.previous_sockets[process.stable_key] = after
+            self.collectors.record(f"rollout:{instance_id}", rollout_started)
+            collector_health = [
+                item
+                for item in self.collectors.snapshot()
+                if item.name in {"process", "socket"}
+                or item.name.endswith(f":{instance_id}")
+            ]
 
             instance_snapshots.append(
                 InstanceSnapshot(
@@ -304,6 +336,8 @@ class MonitorEngine:
                     display_sqlite_home=compact_path(resolved.paths.sqlite_home),
                     discovery_method=resolved.method,
                     capabilities=store.capabilities,
+                    protocol_capabilities=self._merge_protocol_capabilities(sessions),
+                    collector_health=collector_health,
                     diagnostics=instance_diagnostics,
                     unknown_event_types=self.rollouts.unknown_counts(instance_rollouts),
                     rollout_context_truncated=(
@@ -349,7 +383,7 @@ class MonitorEngine:
             for key, value in self.rollout_path_cache.items()
             if key in active_process_keys
         }
-        return MonitorSnapshot(
+        snapshot = MonitorSnapshot(
             generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             interval_seconds=self.interval,
             instances=sorted(instance_snapshots, key=lambda item: item.display_codex_home),
@@ -365,7 +399,37 @@ class MonitorEngine:
                 if self.socket_stale_since is not None
                 else None
             ),
+            collector_health=self.collectors.snapshot(),
         )
+        if self.history is not None:
+            history_started = time.monotonic()
+            try:
+                self.history.record_snapshot(snapshot)
+                self.collectors.record("history", history_started)
+            except Exception as exc:
+                self.collectors.record("history", history_started, exc)
+                diagnostics.append(f"历史库写入失败：{exc}")
+            snapshot.collection_duration_seconds = time.monotonic() - started
+            snapshot.collector_health = self.collectors.snapshot()
+        return snapshot
+
+    @staticmethod
+    def _merge_protocol_capabilities(
+        sessions: list[SessionHealth],
+    ) -> ProtocolCapabilities:
+        rank = {"unavailable": 0, "derived": 1, "direct": 2}
+        merged = {}
+        for descriptor in fields(ProtocolCapabilities):
+            statuses = [
+                getattr(session.protocol_capabilities, descriptor.name)
+                for session in sessions
+            ]
+            merged[descriptor.name] = max(
+                statuses,
+                key=lambda status: rank[status.mode.value],
+                default=descriptor.default_factory(),
+            )
+        return ProtocolCapabilities(**merged)
 
     def _fallback_rollout(
         self,
@@ -490,6 +554,9 @@ class MonitorEngine:
         for store in self.store_cache.values():
             store.close()
         self.store_cache.clear()
+        if self.history is not None:
+            self.history.close()
+            self.history = None
 
     def pin_session(self, session: SessionHealth | None) -> None:
         """Retain the selected session timeline while the TUI references it."""

@@ -7,12 +7,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex_net_health.app import (  # noqa: E402
+from app import (  # noqa: E402
     AppOptions,
     _validate_explicit_filters,
     exit_code,
 )
-from codex_net_health.models import (  # noqa: E402
+from models import (  # noqa: E402
     CodexPaths,
     InstanceSnapshot,
     LifecycleState,

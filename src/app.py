@@ -7,11 +7,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .engine import MonitorEngine
-from .models import LifecycleState, MonitorSnapshot, NetworkState
-from .presentation.json_output import render_json
-from .presentation.text import render_text
-from .presentation.tui import run_tui
+from engine import MonitorEngine
+from history import HistoryStore
+from models import LifecycleState, MonitorSnapshot, NetworkState, SessionHealth
+from presentation.doctor import doctor_exit_code, render_doctor_json, render_doctor_text
+from presentation.export import (
+    current_incidents_export,
+    render_export_json,
+    session_export,
+)
+from presentation.json_output import render_json
+from presentation.metrics import render_prometheus
+from presentation.text import render_text
+from presentation.tui import run_tui
 
 
 @dataclass(frozen=True)
@@ -26,6 +34,13 @@ class AppOptions:
     no_color: bool
     show_auxiliary: bool
     flat: bool
+    doctor: bool = False
+    command: str = "monitor"
+    export_session: str | None = None
+    current_incidents: bool = False
+    history_path: Path | None = None
+    history_days: int = 30
+    history_max_bytes: int = 128 * 1024 * 1024
 
 
 def exit_code(snapshot: MonitorSnapshot) -> int:
@@ -63,13 +78,28 @@ def _write_json_diagnostics(snapshot: MonitorSnapshot) -> None:
 
 
 def run_application(options: AppOptions) -> int:
-    engine = MonitorEngine(
-        interval=options.interval,
-        idle_threshold=options.idle_threshold,
-        event_lookback=options.event_lookback,
-        selected_pids=options.selected_pids,
-        selected_homes=options.selected_homes,
+    history = (
+        HistoryStore(
+            options.history_path,
+            max_days=options.history_days,
+            max_bytes=options.history_max_bytes,
+        )
+        if options.history_path
+        else None
     )
+    try:
+        engine = MonitorEngine(
+            interval=options.interval,
+            idle_threshold=options.idle_threshold,
+            event_lookback=options.event_lookback,
+            selected_pids=options.selected_pids,
+            selected_homes=options.selected_homes,
+            history=history,
+        )
+    except Exception:
+        if history is not None:
+            history.close()
+        raise
     try:
         return _run_application(engine, options)
     finally:
@@ -77,6 +107,39 @@ def run_application(options: AppOptions) -> int:
 
 
 def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
+    command = "doctor" if options.doctor else options.command
+    if command == "doctor":
+        snapshot = engine.sample()
+        _validate_explicit_filters(options, snapshot)
+        output = render_doctor_json(snapshot) if options.json else render_doctor_text(snapshot)
+        print(output, flush=True)
+        return doctor_exit_code(snapshot)
+
+    if command == "metrics":
+        snapshot = engine.sample()
+        _validate_explicit_filters(options, snapshot)
+        print(render_prometheus(snapshot), end="", flush=True)
+        return 0
+
+    if command == "export":
+        snapshot = engine.sample()
+        _validate_explicit_filters(options, snapshot)
+        if options.current_incidents:
+            payload = current_incidents_export(
+                snapshot.sessions,
+                generated_at=snapshot.generated_at,
+            )
+        else:
+            session = _select_export_session(snapshot, options.export_session or "")
+            machine_key = f"{session.instance_id}:{session.session_id}"
+            payload = session_export(
+                session,
+                engine.machine.retained_events(machine_key),
+                generated_at=snapshot.generated_at,
+            )
+        print(render_export_json(payload), flush=True)
+        return 0
+
     interactive = (
         not options.once
         and not options.json
@@ -123,3 +186,17 @@ def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
         next_sample += options.interval
         if next_sample <= time.monotonic():
             next_sample = time.monotonic() + options.interval
+
+
+def _select_export_session(snapshot: MonitorSnapshot, selector: str) -> SessionHealth:
+    matches = [
+        session
+        for session in snapshot.sessions
+        if selector in {session.session_id, session.key}
+    ]
+    if not matches:
+        raise RuntimeError(f"未找到指定会话：{selector}")
+    if len(matches) > 1:
+        homes = ", ".join(sorted({session.instance_id for session in matches}))
+        raise RuntimeError(f"会话 ID 在多个 Codex Home 中重复：{homes}；请使用完整会话 key")
+    return matches[0]

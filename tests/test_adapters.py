@@ -12,11 +12,11 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex_net_health.codex.paths import resolve_instance  # noqa: E402
-from codex_net_health.codex.processes import ProcessDiscovery  # noqa: E402
-from codex_net_health.codex.rollout import RolloutReader  # noqa: E402
-from codex_net_health.codex.state_store import StateStore  # noqa: E402
-from codex_net_health.models import CodexPaths, ProcessIdentity  # noqa: E402
+from codex.paths import resolve_instance  # noqa: E402
+from codex.processes import ProcessDiscovery  # noqa: E402
+from codex.rollout import RolloutReader  # noqa: E402
+from codex.state_store import StateStore  # noqa: E402
+from models import CodexPaths, ProcessIdentity  # noqa: E402
 
 
 class FakeProc:
@@ -257,7 +257,7 @@ class RolloutTests(unittest.TestCase):
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
             reader = RolloutReader()
-            with patch("codex_net_health.codex.rollout.MAX_SESSION_TAIL", 100):
+            with patch("codex.rollout.MAX_SESSION_TAIL", 100):
                 reader.read(path)
             self.assertTrue(reader.has_truncated_context({str(path)}))
 

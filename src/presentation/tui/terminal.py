@@ -10,7 +10,7 @@ import termios
 import tty
 import unicodedata
 
-from ...config import (
+from config import (
     ALT_SCREEN_ENTER,
     ALT_SCREEN_LEAVE,
     CURSOR_HIDE,
@@ -44,11 +44,26 @@ class RawTerminal:
         first = first_byte.decode(errors="ignore")
         if first != "\x1b":
             return first
-        ready, _, _ = select.select([self.fd], [], [], 0.02)
+        return first + _read_escape_tail(self.fd)
+
+
+def _read_escape_tail(fd: int, timeout: float = 0.02) -> str:
+    """Read one complete CSI/SS3 sequence without consuming the next key."""
+    output = bytearray()
+    while len(output) < 32:
+        ready, _, _ = select.select([fd], [], [], timeout)
         if not ready:
-            return first
-        tail = os.read(self.fd, 2).decode(errors="ignore")
-        return first + tail
+            break
+        byte = os.read(fd, 1)
+        if not byte:
+            break
+        output.extend(byte)
+        value = byte[0]
+        if len(output) == 1 and value not in {ord("["), ord("O")}:
+            break
+        if len(output) > 1 and 0x40 <= value <= 0x7E:
+            break
+    return output.decode(errors="ignore")
 
 
 ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -87,10 +102,12 @@ def clip_ansi(text: str, width: int) -> str:
     return "".join(output)
 
 
-def emit_frame(lines: list[str], width: int, height: int) -> None:
+def emit_frame(lines: list[str], width: int, height: int, clear: bool = True) -> None:
     visible = lines[:height] + [""] * max(0, height - len(lines))
-    output = [SCREEN_HOME_CLEAR]
-    for line in visible:
-        output.append(ERASE_LINE + clip_ansi(line, width) + "\r\n")
+    output = [SCREEN_HOME_CLEAR] if clear else []
+    # Address rows directly. Writing a newline on the terminal's bottom row can
+    # scroll the whole alternate screen and make the fixed header disappear.
+    for row, line in enumerate(visible, start=1):
+        output.append(f"\033[{row};1H{ERASE_LINE}{clip_ansi(line, width)}")
     sys.stdout.write("".join(output))
     sys.stdout.flush()

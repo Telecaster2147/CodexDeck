@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-from .config import COMMAND_TIMEOUT
+from config import COMMAND_TIMEOUT
 
 
 class CommandError(RuntimeError):

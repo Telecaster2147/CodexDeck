@@ -6,8 +6,8 @@ import ipaddress
 import os
 import re
 
-from ..models import SocketInfo
-from ..utils import CommandRunner
+from models import SocketInfo
+from utils import CommandRunner
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, int | None]:

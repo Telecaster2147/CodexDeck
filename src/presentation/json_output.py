@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from ..models import MonitorSnapshot, json_value
+from models import MonitorSnapshot, json_value
 
 
 SCHEMA_VERSION = 1
@@ -13,16 +13,25 @@ NULLABLE_STRING_FIELDS = {
     "alert_level",
     "alert_reason",
     "additional_details",
+    "agent_path",
+    "collaboration_mode",
+    "completion_status",
     "current_task",
     "cwd",
     "detail",
     "model",
+    "nickname",
+    "parent_thread_id",
     "reason",
     "reasoning_effort",
+    "result",
+    "role",
     "rollout_path",
     "session_id",
     "session_title",
     "source_id",
+    "source",
+    "trace_id",
     "turn_id",
     "wait_channel",
 }

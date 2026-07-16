@@ -21,14 +21,28 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-codexnet = "codex_net_health.cli:run"
-codex-net-health = "codex_net_health.cli:run"
+codexnet = "cli:run"
+codex-net-health = "cli:run"
+
+[tool.setuptools]
+py-modules = [
+  "app",
+  "cli",
+  "config",
+  "diagnostics",
+  "engine",
+  "history",
+  "models",
+  "state_machine",
+  "utils",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["codex*", "network*", "presentation*"]
 
 [tool.setuptools.dynamic]
-version = {attr = "codex_net_health.__version__"}
+version = {attr = "config.VERSION"}
 
 [tool.ruff]
 line-length = 100
@@ -36,5 +50,5 @@ target-version = "py310"
 
 [tool.mypy]
 python_version = "3.10"
-packages = ["codex_net_health"]
+files = ["src"]
 mypy_path = "src"

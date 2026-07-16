@@ -7,9 +7,9 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..config import MAX_SESSION_TAIL
-from ..models import NormalizedEvent
-from ..utils import message_text
+from config import MAX_SESSION_TAIL
+from models import NormalizedEvent
+from utils import message_text
 from .events import normalize_rollout_record
 
 

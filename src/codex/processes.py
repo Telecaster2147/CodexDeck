@@ -8,8 +8,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..models import ProcessInfo
-from ..utils import CommandRunner
+from models import ProcessInfo
+from utils import CommandRunner
 from .paths import ProcReader, ResolvedInstance, resolve_instance
 
 

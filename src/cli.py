@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-from .app import AppOptions, run_application
-from .config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, DEFAULT_INTERVAL, VERSION
+from app import AppOptions, run_application
+from config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, DEFAULT_INTERVAL, VERSION
 
 
 def positive_float(value: str) -> float:
@@ -32,10 +32,26 @@ def pid_value(value: str) -> int:
     return pid
 
 
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是整数") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("必须大于 0")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codexnet",
         description="按 Codex 实例观察会话生命周期、重连恢复与 TCP 证据。",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("doctor", "export", "metrics"),
+        help="doctor：诊断；export：导出复盘；metrics：输出 Prometheus 指标",
     )
     parser.add_argument(
         "--interval",
@@ -68,7 +84,36 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--once", action="store_true", help="完成一个采样窗口后退出")
     parser.add_argument("--flat", action="store_true", help="启动时使用扁平会话视图")
     parser.add_argument("--all", action="store_true", help="显示启动器、app-server 和辅助进程")
-    parser.add_argument("--json", action="store_true", help="单次输出 JSON，持续模式输出 NDJSON")
+    parser.add_argument("--json", action="store_true", help="输出 JSON，持续监控模式使用 NDJSON")
+    parser.add_argument("--session", help="export：按会话 ID 或完整会话 key 导出复盘")
+    parser.add_argument(
+        "--current-incidents",
+        action="store_true",
+        help="export：导出当前未解决事件清单",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("json",),
+        default="json",
+        help="export 输出格式，当前仅支持 json",
+    )
+    parser.add_argument(
+        "--history",
+        type=Path,
+        help="把关键事件和聚合指标写入独立 SQLite 历史库",
+    )
+    parser.add_argument(
+        "--history-days",
+        type=positive_int,
+        default=30,
+        help="历史保留天数，默认 30",
+    )
+    parser.add_argument(
+        "--history-max-mib",
+        type=positive_float,
+        default=128.0,
+        help="历史库空间上限 MiB，默认 128",
+    )
     parser.add_argument("--no-color", action="store_true", help="关闭终端颜色")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     return parser
@@ -82,6 +127,10 @@ def required_commands_available() -> None:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
+    if args.command == "export" and bool(args.session) == bool(args.current_incidents):
+        raise RuntimeError("export 必须且只能指定 --session 或 --current-incidents")
+    if args.command != "export" and (args.session or args.current_incidents):
+        raise RuntimeError("--session 和 --current-incidents 仅用于 export")
     required_commands_available()
     options = AppOptions(
         interval=args.interval,
@@ -94,6 +143,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         no_color=args.no_color,
         show_auxiliary=args.all,
         flat=args.flat,
+        doctor=args.command == "doctor",
+        command=args.command or "monitor",
+        export_session=args.session,
+        current_incidents=args.current_incidents,
+        history_path=args.history,
+        history_days=args.history_days,
+        history_max_bytes=int(args.history_max_mib * 1024 * 1024),
     )
     return run_application(options)
 
