@@ -14,3 +14,4 @@ dist/
 build/
 *.egg-info/
 DESIGN_DECISIONS.md
+AGENTS.md
