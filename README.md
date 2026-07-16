@@ -16,7 +16,8 @@
 - 根据官方 thread 与 agent path 展示 subagent 层级和运行状态
 - 比较 TCP 队列、收发字节、ACK 和重传；连续两个异常窗口后才确认阻塞
 - 一条异常连接不会覆盖同进程中仍在传输的活跃连接
-- 提供分组 TUI、文本输出、单次 JSON 和连续 NDJSON
+- 可选被动解析 TLS ClientHello，关联 SNI、ALPN 和协商版本到对应 Codex TCP 连接
+- 提供基于 Textual 的响应式 TUI、文本输出、单次 JSON 和连续 NDJSON
 - 提供 `doctor` 数据源诊断、会话复盘导出和低基数 Prometheus 指标
 - 可选独立 SQLite 历史库，保存关键事件与 10 秒/60 秒聚合桶
 - 告警具有打开、升级、确认和恢复生命周期，并可在 TUI 中确认
@@ -30,7 +31,7 @@
 - `ss`，通常由 `iproute2` 提供
 - 对当前用户 Codex 进程的 `/proc` 和本地 Codex 数据具有读取权限
 
-本项目运行时只使用 Python 标准库，不修改 Codex 配置、rollout 或 SQLite 数据库。
+交互界面使用 Textual，采集与状态判断仍只依赖 Python 标准库和系统命令。项目不修改 Codex 配置、rollout 或 SQLite 数据库。
 
 ## 安装
 
@@ -43,9 +44,8 @@ pipx install .
 开发环境：
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e .
+uv sync
+uv run codexnet
 ```
 
 安装后提供两个等价命令：
@@ -92,6 +92,30 @@ codexnet doctor --json
 
 `doctor` 立即执行一次只读采样，不等待两秒基线窗口，也不会修改 Codex 数据或配置。
 
+需要额外确认 TLS 连接目标时，可显式启用 Linux 原始套接字采集：
+
+```bash
+codexnet --packet-inspection
+codexnet doctor --packet-inspection --json
+```
+
+该开关默认关闭，运行账户需要 `CAP_NET_RAW` 或 root。采集器只解析 ClientHello 的 SNI、ALPN、
+TLS 版本和时间，并按当前 TCP 五元组短暂关联；不保留应用请求、响应或 TLS 密文。若系统不允许
+打开原始套接字，`doctor` 和快照的 collector 诊断会显示原因，其他采集器继续工作。
+
+### 网络解包范围
+
+| 字段 | 来源 | 用途 |
+| --- | --- | --- |
+| `tls_server_name` | TLS SNI | 说明该连接请求的服务名 |
+| `tls_alpn_protocols` | TLS ALPN | 显示客户端提供的应用协议 |
+| `tls_versions` | TLS supported_versions | 显示客户端提供的 TLS 版本 |
+| `tls_observed_at` | 本地采集时间 | 说明握手元数据的观察时间 |
+
+解析器支持 Ethernet/VLAN、IPv4/IPv6、TCP 分段和跨 TLS record 的 ClientHello。它跳过 IP
+分片，单流重组上限为 `64 KiB`、流状态保留 `15` 秒，已关联元数据最多保留 `512` 条、每条最长
+`5` 分钟。网络证据只用于解释连接状态；会话生命周期仍以 rollout、日志和 SQLite 数据为准。
+
 导出当前未解决事件，或按会话 ID/完整会话 key 导出复盘：
 
 ```bash
@@ -113,8 +137,8 @@ codexnet metrics
 网络端点。显式开启独立历史库：
 
 ```bash
-codexnet --history ~/.local/state/codexnet/history.sqlite
-codexnet --once --history /tmp/codexnet-history.sqlite --history-days 14 --history-max-mib 64
+codexnet --history HISTORY.sqlite
+codexnet --once --history HISTORY.sqlite --history-days 14 --history-max-mib 64
 ```
 
 历史功能默认关闭，不写入 Codex 自有 SQLite；关键事件按原始记录保存，会话采样按 10 秒、
@@ -124,8 +148,8 @@ codexnet --once --history /tmp/codexnet-history.sqlite --history-days 14 --histo
 
 ```bash
 codexnet --pid 12345
-codexnet --codex-home ~/.codex
-codexnet --codex-home ~/work/codex-a --codex-home ~/work/codex-b
+codexnet --codex-home CODEX_HOME_A
+codexnet --codex-home CODEX_HOME_A --codex-home CODEX_HOME_B
 ```
 
 显示辅助进程或使用扁平视图：
@@ -147,6 +171,7 @@ codexnet --flat
 | `--once` | 完成一个采样窗口后退出 |
 | `--flat` | 启动时使用扁平会话视图 |
 | `--all` | 包含启动器、app-server 和辅助组件 |
+| `--packet-inspection` | 被动解析 TLS ClientHello 元数据，要求 `CAP_NET_RAW` 或 root |
 | `--json` | 单次模式输出 JSON，持续模式输出 NDJSON |
 | `--no-color` | 关闭终端颜色 |
 | `--history PATH` | 开启独立 SQLite 历史库 |
@@ -155,17 +180,18 @@ codexnet --flat
 
 ## TUI
 
-TUI 默认按 Codex 实例展开：
+TUI 默认先隔离不同 `CODEX_HOME`，再按每个会话的真实工作区展开：
 
 ```text
- CODEX NET HEALTH  v0.1.0                              LIVE  20:25:21
-  实例 2  会话 3  失败 0  告警 0  阻塞 0  采集 18ms
+ CODEXNET  /  OVERVIEW                              v0.1.0  20:25:21
+  ● LIVE   HOMES 2   SESSIONS 3   FAIL 0   ALERT 0   STALL 0
 ────────────────────────────────────────────────────────────────────
-  ▼ ~/.codex  2 会话
-▶ │ 当前会话 · 8s                          [已选中 · 模型正在生成]
-  │ 另一个会话 · 24s                               [正在等待上游]
-  ▼ ~/work/codex-b  1 会话  DB ~/runtime/codex-b
-  │ 数据处理 · 3s                                       [正在重连]
+  ▼ workspace-a                          │ SESSION INSPECTOR
+    CODEX_HOME CODEX_HOME_A · 1 session  │ ● Analysis session
+▌ ●  Analysis session · 模型正在生成      │ 模型正在生成
+  ▼ workspace-b                          │ NETWORK
+    CODEX_HOME CODEX_HOME_B · 1 session  │ 活跃传输 · 正在接收数据
+  ↻  Background session · 正在重连        │ WORKSPACE workspace-a
 ```
 
 交互键：
@@ -175,10 +201,9 @@ TUI 默认按 Codex 实例展开：
 | `↑` / `↓`、`j` / `k` | 移动选择 |
 | `PgUp` / `PgDn`、`Ctrl-U` / `Ctrl-D` | 按页移动 |
 | `Home` / `End` | 跳到当前视图首尾 |
-| `Enter` | 进入 Home 或会话详情 |
-| `Space` | 在 Overview 折叠或展开实例 |
+| `Enter` | 折叠/展开工作区，或在窄屏进入会话详情 |
 | `1` / `2` / `3` | 切换 Timeline / Turns / Evidence |
-| `c` | 在 Home Detail 打开多 Home 对比 |
+| `c` | 打开多 `CODEX_HOME` 对比 |
 | `x` | 在会话详情确认最新活动告警 |
 | `/` | 按标题、任务、模型、会话 ID 或错误信息搜索 |
 | `Tab` | 跳到下一个失败、严重停顿或网络阻塞会话 |
@@ -189,7 +214,7 @@ TUI 默认按 Codex 实例展开：
 | `Esc` | 返回上一级 |
 | `q` | 退出 |
 
-导航分为 `Overview → Home Detail → Session Detail` 三层。Home Detail 可打开多 Home 对比，比较活跃会话、失败、重连、阻塞、数据完整度、TTFT 和 rate limit。Session Detail 顶部常驻网络和生命周期状态，并提供 Timeline、Turns、Evidence 三种内容模式。Timeline 同时显示告警生命周期；Turns 汇总耗时、TTFT、工具与 token；Evidence 展示告警、错误、rate limit、TCP、数据源诊断和 subagent 树。列表仅用整行反色标记当前选择，事件摘要按失败、警告、恢复、工具和请求阶段使用不同颜色。
+TUI 使用 Textual 的持久多面板结构。默认组标题显示会话工作区，副标题显示对应 `CODEX_HOME`，因此同一 home 下从不同项目启动的会话不会混组。宽终端中，工作区/会话导航固定在左侧，Inspector 固定在右侧；窄终端自动切换为列表与详情钻取模式，`Esc` 返回。Inspector 顶部常驻网络和生命周期状态，并提供 Timeline、Turns、Evidence 三种内容模式。Timeline 同时显示告警生命周期；Turns 汇总耗时、TTFT、工具与 token；Evidence 展示工作区、数据目录、告警、错误、rate limit、TCP、数据源诊断和 subagent 树。搜索、焦点、鼠标滚动、终端恢复、尺寸变化、Footer 快捷键和模态窗口均由 Textual 管理。
 
 ## 状态语义
 
@@ -221,7 +246,7 @@ TUI 默认按 Codex 实例展开：
 1. 读取每个 Codex 进程的环境变量和 cwd。
 2. 从进程打开的 rollout 与 SQLite 文件反推路径。
 3. 通过进程父子关系关联启动器和辅助组件。
-4. 使用默认 `~/.codex`，同时在路径证据不足时显示数据不完整提示。
+4. 使用 Codex 默认 home，同时在路径证据不足时显示数据不完整提示。
 
 相对 `CODEX_SQLITE_HOME` 按对应 Codex 进程的 cwd 解析，与 Codex 自身行为一致。SQLite 文件会先进行只读 schema 能力检查，缺少可选数据源不会中断其他实例。
 
@@ -265,7 +290,8 @@ src/
 │   └── events.py              # 官方协议与诊断日志标准化
 ├── network/
 │   ├── sockets.py             # ss 采集和解析
-│   └── classifier.py          # TCP 证据判断
+│   ├── classifier.py          # TCP 证据判断
+│   └── packet.py              # AF_PACKET 与 TLS ClientHello 元数据解析
 └── presentation/
     ├── text.py
     ├── json_output.py
@@ -274,8 +300,8 @@ src/
     ├── metrics.py
     └── tui/
         ├── controller.py
-        ├── views.py
-        └── terminal.py
+        ├── textual_app.py
+        └── codexnet.tcss
 ```
 
 依赖方向为：`cli/presentation -> app -> engine -> codex/network -> models`。底层采集器不依赖终端界面。
@@ -287,8 +313,8 @@ python3 -m unittest discover -s tests -v
 python3 -m compileall -q src
 ```
 
-测试覆盖多 home、相对 SQLite 路径、schema 能力、rollout 半行、Turn/工具/TTFT、token/rate limit、subagent、doctor、重连恢复、终态 errmsg、500 条保留、网络聚合、两窗口阻塞、JSON schema 和三级 TUI。
+测试覆盖多 home、相对 SQLite 路径、schema 能力、rollout 半行、Turn/工具/TTFT、token/rate limit、subagent、doctor、重连恢复、终态 errmsg、500 条保留、网络聚合、两窗口阻塞、TLS ClientHello 的 IPv4/IPv6/VLAN、TCP/TLS record 重组、权限降级、JSON schema，以及 Textual Pilot 下的宽屏、窄屏、标签、搜索、Help 和终端尺寸下限。
 
 ## 数据说明
 
-监视器不会写入 Codex 数据。终端和 JSON 可能包含会话标题、任务摘要、文件路径、网络端点以及脱敏后的错误信息。向外分享输出前应检查这些内容。
+监视器不会写入 Codex 数据。终端和 JSON 可能包含会话标题、任务摘要、文件路径、网络端点、TLS 服务名以及脱敏后的错误信息。向外分享输出前应检查这些内容。
