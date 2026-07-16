@@ -678,12 +678,12 @@ class SessionStateMachine:
 
     @staticmethod
     def _capabilities(events: list[NormalizedEvent]) -> ProtocolCapabilities:
-        direct = lambda source="rollout": CapabilityStatus(
-            CapabilityMode.DIRECT, source, Confidence.HIGH
-        )
-        derived = lambda source="rollout": CapabilityStatus(
-            CapabilityMode.DERIVED, source, Confidence.HIGH
-        )
+        def direct(source: str = "rollout") -> CapabilityStatus:
+            return CapabilityStatus(CapabilityMode.DIRECT, source, Confidence.HIGH)
+
+        def derived(source: str = "rollout") -> CapabilityStatus:
+            return CapabilityStatus(CapabilityMode.DERIVED, source, Confidence.HIGH)
+
         unavailable = CapabilityStatus()
         turn_events = [item for item in events if item.kind in {"TURN_STARTED", *TERMINAL_KINDS}]
         tool_events = [item for item in events if item.kind in {"TOOL_RUNNING", "TOOL_COMPLETED"}]
