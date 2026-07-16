@@ -1,11 +1,43 @@
 #!/usr/bin/env python3
 """Development checkout launcher for Codex Net Health."""
 
+import os
 from pathlib import Path
+import shutil
 import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_VENV = PROJECT_ROOT / ".venv"
+PROJECT_PYTHON = PROJECT_VENV / "bin" / "python"
+
+
+def _activate_project_environment() -> None:
+    """Re-exec inside this checkout's environment before importing dependencies."""
+    if Path(sys.prefix).resolve() == PROJECT_VENV.resolve():
+        return
+    if PROJECT_PYTHON.is_file():
+        os.execv(
+            str(PROJECT_PYTHON),
+            [str(PROJECT_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+    uv = shutil.which("uv")
+    if uv:
+        os.execv(
+            uv,
+            [
+                uv,
+                "run",
+                "--project",
+                str(PROJECT_ROOT),
+                "python",
+                str(Path(__file__).resolve()),
+                *sys.argv[1:],
+            ],
+        )
+
+
+_activate_project_environment()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from cli import run  # noqa: E402

@@ -18,7 +18,9 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: System :: Monitoring",
 ]
-dependencies = []
+dependencies = [
+    "textual>=8.2.8",
+]
 
 [project.scripts]
 codexnet = "cli:run"
@@ -40,6 +42,9 @@ py-modules = [
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["codex*", "network*", "presentation*"]
+
+[tool.setuptools.package-data]
+"presentation.tui" = ["*.tcss"]
 
 [tool.setuptools.dynamic]
 version = {attr = "config.VERSION"}

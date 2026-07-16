@@ -78,25 +78,3 @@ NETWORK_LABELS = {
     "STALLED": "网络阻塞",
     "CLOSED": "连接已关闭",
 }
-
-ANSI = {
-    "reset": "\033[0m",
-    "bold": "\033[1m",
-    "red": "\033[31m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-    "cyan": "\033[36m",
-    "blue": "\033[34m",
-    "magenta": "\033[35m",
-    "white": "\033[37m",
-    "dim": "\033[2m",
-    "inverse": "\033[7m",
-}
-
-ALT_SCREEN_ENTER = "\033[?1049h"
-ALT_SCREEN_LEAVE = "\033[?1049l"
-CURSOR_HIDE = "\033[?25l"
-CURSOR_SHOW = "\033[?25h"
-SCREEN_HOME_CLEAR = "\033[H\033[2J"
-ERASE_LINE = "\033[2K"
-INVERSE = "\033[7m"

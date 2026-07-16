@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -100,6 +101,20 @@ def options(command: str, **values: object) -> AppOptions:
 
 
 class CliFeatureTests(unittest.TestCase):
+    def test_checkout_launcher_uses_project_environment(self) -> None:
+        system_python = Path("/usr/bin/python3")
+        if not system_python.exists():
+            self.skipTest("system Python is unavailable")
+        result = subprocess.run(
+            [str(system_python), str(PROJECT_ROOT / "codex-net-health"), "--version"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"^codexnet 0\.\d+\.\d+\s*$")
+
     def test_parser_exposes_export_metrics_and_history(self) -> None:
         args = build_parser().parse_args(
             ["export", "--session", "abc", "--history", "/tmp/history.sqlite"]
