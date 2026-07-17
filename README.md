@@ -1,6 +1,6 @@
 # Codex Net Health
 
-`codexnet` 是面向 Linux 终端的 Codex 会话、恢复过程和网络状态监视器。它以只读方式组合 Codex rollout 协议事件、结构化日志、进程信息与 TCP 指标，帮助判断会话是在正常生成、运行工具、等待上游、重连恢复，还是已经发生终态失败。
+`codexnet` 是面向 Linux 终端的多会话 Codex 运维与异常解释器。它以只读方式组合 rollout 协议、结构化日志、进程、SQLite、TCP 和配置证据，集中显示所有工作区当前在做什么、哪些会话等待用户操作，以及异常结论的来源和新鲜度。
 
 当前版本：`0.1.0`。
 
@@ -8,7 +8,9 @@
 
 - 自动发现当前用户运行的 Codex 会话、启动器、app-server 和辅助组件
 - 同时观察不同 `CODEX_HOME` 和 `CODEX_SQLITE_HOME`，默认按实例分组
-- 优先解析 Codex 官方 rollout 事件，识别 turn、模型输出、工具、compact、重连和失败
+- 优先解析 Codex 官方 rollout 事件，识别 turn、推理摘要、工具、文件变更、compact、重连和失败
+- Overview 直接显示当前工具、命令摘要、文件影响、subagent 与 action required
+- Activity 展示语义里程碑；Diagnosis 展示证据链、数据质量、瓶颈和历史窗口趋势
 - 单次 SSE idle timeout 显示为 `RECONNECTING`，恢复后记录 `RECOVERED`
 - 每个终态模型失败显示结构化错误类型和完整脱敏 errmsg
 - 汇总 Turn 耗时、TTFT、工具执行时间，以及 reconnect/fallback 恢复次数
@@ -18,9 +20,15 @@
 - 一条异常连接不会覆盖同进程中仍在传输的活跃连接
 - 可选被动解析 TLS ClientHello，关联 SNI、ALPN 和协商版本到对应 Codex TCP 连接
 - 提供基于 Textual 的响应式 TUI、文本输出、单次 JSON 和连续 NDJSON
+- TUI 每 100ms 增量读取活动 rollout 事件，完整进程与网络采样仍保持默认 2 秒
+- rollout 即使只增长 partial/ignored record，也会更新只读活动证据而不追加 Activity
+- 每 2 秒读取 `/proc` CPU、I/O、context switch 和递归 child tree 差值
+- 区分 `QUIET_ACTIVE`、`WAITING_UPSTREAM`、`QUIET_UNKNOWN`、`STALL_SUSPECT` 与 `OBSERVER_BLIND`
+- 可选读取官方 TUI session log 的 outbound typed `Compact`，从提交时标注 requested
+- 可选接收最小 PreCompact/PostCompact hook 事件，完整展示 requested/running/terminal
 - 提供 `doctor` 数据源诊断、会话复盘导出和低基数 Prometheus 指标
 - 可选独立 SQLite 历史库，保存关键事件与 10 秒/60 秒聚合桶
-- 告警具有打开、升级、确认和恢复生命周期，并可在 TUI 中确认
+- 告警保留打开、升级、确认和恢复生命周期，供导出和内部状态追踪
 - 每个会话在内存中保留最近 500 条标准化事件
 
 ## 环境要求
@@ -103,6 +111,26 @@ codexnet doctor --packet-inspection --json
 TLS 版本和时间，并按当前 TCP 五元组短暂关联；不保留应用请求、响应或 TLS 密文。若系统不允许
 打开原始套接字，`doctor` 和快照的 collector 诊断会显示原因，其他采集器继续工作。
 
+如需从官方 TUI 提交 `/compact` 的时刻开始观察，可在启动 Codex 时显式设置：
+
+```bash
+CODEX_TUI_RECORD_SESSION=1
+CODEX_TUI_SESSION_LOG_PATH=SESSION_LOG.jsonl
+```
+
+CodexNet 从对应进程环境发现该文件，只保留方向、typed op、session/turn 和时间戳；其他 prompt、
+工具参数与输出在解析入口即丢弃。`doctor` 会报告是否启用、路径、可读性和 freshness。
+
+PreCompact/PostCompact hook 可把 stdin 中的官方 hook payload 交给最小接收命令：
+
+```bash
+codexnet hook-event --hook-events CODEXNET_HOOKS.jsonl
+codexnet --hook-events CODEXNET_HOOKS.jsonl
+```
+
+接收文件权限为 `0600`，仅保存 event、session、turn、trigger、timestamp 和 outcome。CodexNet
+不会自行修改 Codex hook 或 `config.toml`。
+
 ### 网络解包范围
 
 | 字段 | 来源 | 用途 |
@@ -175,54 +203,74 @@ codexnet --flat
 | `--json` | 单次模式输出 JSON，持续模式输出 NDJSON |
 | `--no-color` | 关闭终端颜色 |
 | `--history PATH` | 开启独立 SQLite 历史库 |
+| `--hook-events PATH` | 读取 CodexNet 最小 compact hook NDJSON |
 | `--history-days DAYS` | 历史保留天数，默认 `30` |
 | `--history-max-mib MIB` | 历史库空间上限，默认 `128` MiB |
 
 ## TUI
 
-TUI 默认先隔离不同 `CODEX_HOME`，再按每个会话的真实工作区展开：
+TUI 的首屏是跨会话 Overview，目标是直接回答哪个工作区正在执行什么、哪个会话需要用户操作，以及哪里发生失败、恢复或阻塞：
 
 ```text
- CODEXNET  /  OVERVIEW                              v0.1.0  20:25:21
-  ● LIVE   HOMES 2   SESSIONS 3   FAIL 0   ALERT 0   STALL 0
-────────────────────────────────────────────────────────────────────
-  ▼ workspace-a                          │ SESSION INSPECTOR
-    CODEX_HOME CODEX_HOME_A · 1 session  │ ● Analysis session
-▌ ●  Analysis session · 模型正在生成      │ 模型正在生成
-  ▼ workspace-b                          │ NETWORK
-    CODEX_HOME CODEX_HOME_B · 1 session  │ 活跃传输 · 正在接收数据
-  ↻  Background session · 正在重连        │ WORKSPACE workspace-a
+ CODEXNET   SESSIONS 3   ISSUES 1   OPERATIONAL
+
+ ▼ workspace-a
+   CODEX_HOME CODEX_HOME_A · 2 sessions · 1 action required
+ ? Review changes  ATTENTION · Allow command? · 18s
+   context 98%
+ ● Test session  SHELL · pytest tests/test_core.py · 42s
+   1 tool running · 2 files
 ```
+
+会话行的优先级是 attention、失败、恢复/阻塞、工具/文件/subagent、模型请求和空闲。审批、权限确认、用户问答、MCP elicitation 与登录操作使用独立 `AttentionState`，不会覆盖生命周期、恢复或网络状态。`Tab` 会在 action required、失败、严重停顿和网络阻塞会话之间跳转。
 
 交互键：
 
 | 按键 | 操作 |
 | --- | --- |
 | `↑` / `↓`、`j` / `k` | 移动选择 |
-| `PgUp` / `PgDn`、`Ctrl-U` / `Ctrl-D` | 按页移动 |
-| `Home` / `End` | 跳到当前视图首尾 |
 | `Enter` | 折叠/展开工作区，或在窄屏进入会话详情 |
-| `1` / `2` / `3` | 切换 Timeline / Turns / Evidence |
-| `c` | 打开多 `CODEX_HOME` 对比 |
-| `x` | 在会话详情确认最新活动告警 |
-| `/` | 按标题、任务、模型、会话 ID 或错误信息搜索 |
-| `Tab` | 跳到下一个失败、严重停顿或网络阻塞会话 |
-| `f` | 切换事件时间线自动跟随 |
+| `1` / `2` | 切换 Activity / Diagnosis |
+| `,` | 打开可点击的显示设置 |
+| `/` | 搜索会话、模型、工作区或错误 |
+| `Tab` | 跳到下一个需要关注的会话 |
+| `f` | 切换当前 Activity 的自动跟随，不持久化 |
 | `g` | 切换分组和扁平视图 |
 | `a` | 显示或隐藏辅助进程 |
-| `?` | 打开快捷键帮助 |
+| `r` | 立即执行完整采样 |
+| `?` | 打开快捷键与运行参数帮助 |
 | `Esc` | 返回上一级 |
 | `q` | 退出 |
 
-TUI 使用 Textual 的持久多面板结构。默认组标题显示会话工作区，副标题显示对应 `CODEX_HOME`，因此同一 home 下从不同项目启动的会话不会混组。宽终端中，工作区/会话导航固定在左侧，Inspector 固定在右侧；窄终端自动切换为列表与详情钻取模式，`Esc` 返回。Inspector 顶部常驻网络和生命周期状态，并提供 Timeline、Turns、Evidence 三种内容模式。Timeline 同时显示告警生命周期；Turns 汇总耗时、TTFT、工具与 token；Evidence 展示工作区、数据目录、告警、错误、rate limit、TCP、数据源诊断和 subagent 树。搜索、焦点、鼠标滚动、终端恢复、尺寸变化、Footer 快捷键和模态窗口均由 Textual 管理。
+Inspector 只有两个页面：
+
+- **Activity**：展示请求、工具、文件、action required、失败/恢复、compact 和 subagent 等语义里程碑。Operational 模式默认隐藏 keepalive、token/rate-limit 快照、普通 `MODEL_PROGRESS`、reasoning 和成功工具原文。已完成 compact 折叠为一条摘要，领域事件和导出仍保留开始/完成两阶段。
+- **Diagnosis**：按结论、原因、证据链、provenance、freshness、数据质量、capacity、Turn 瓶颈、异常 TCP、agent tree 和历史趋势组织。未知协议显示 `UNPARSED` 的类型、长度、hash 与截断状态；Diagnostic 模式可查看脱敏预览，但主界面不解析或倾倒序列化 JSON。
+
+Overview 与固定 health strip 会显示 phase age、semantic silence、最近 evidence 和 observation
+结论。1 秒时钟只重算显示 age，不调用进程发现、SQLite、`ss`、packet 或 history，也不向
+Activity 追加 heartbeat。静默判断不会把 process alive、spinner 或 TCP established 描述成模型进展。
+
+Compact 使用独立 operation lifecycle：`requested`、`candidate`、`running`、`completed`、
+`failed`、`aborted`。运行中的 requested/running 始终可见；成功 terminal 后 Operational 模式才
+折叠成包含开始时间、duration、trigger、source 和 confidence 的摘要。Diagnostic 模式保留每个
+edge 和多源 evidence chain；completion-only 不会虚构 start。
+
+设置仅保留 `Operational` / `Diagnostic` 模式、工作区分组和辅助进程。偏好保存在 `$XDG_CONFIG_HOME/codexnet/settings.json`；follow 只属于当前视图。每个 `CODEX_HOME` 的 `config.toml` 中 `model_auto_compact_token_limit` 作为配置边界显示，实际 compact 仍只由 rollout/log 协议确认。
+
+启用独立历史库后，Diagnosis 显示 15m、1h、24h 窗口的 TTFT、工具耗时与静默 p50/p95、失败率、重连、恢复耗时，以及 compact 的 manual/auto、retry、failure、duration 和 context before/after 汇总。每项都带样本数；样本不足时只显示 `n=`，不输出伪精确趋势。
+
+宽度至少 96 列时保持 Overview 与 Inspector 双面板；更窄时使用列表/详情钻取；低于 50×12 显示尺寸提示。稳定刷新原地更新导航与 Activity，保留焦点、选择和滚动位置。
 
 ## 状态语义
 
-界面分别维护三类状态，而不是用一条 TCP 连接覆盖整个会话：
+界面分别维护四类状态，而不是用一条 TCP 连接或交互等待覆盖整个会话：
 
 - **生命周期**：`IDLE`、`STARTING`、`WAITING_RESPONSE`、`GENERATING`、`RUNNING_TOOL`、`COMPACTING`、`COMPLETED`、`FAILED`、`ABORTED`
 - **恢复状态**：`SUSPECT`、`RECONNECTING`、`TRANSPORT_FALLBACK`、`RECOVERED`
+- **用户操作**：`APPROVAL`、`PERMISSIONS`、`USER_INPUT`、`MCP_ELICITATION`、`AUTH_ELICITATION`
 - **网络证据**：`UNKNOWN`、`IDLE`、`ACTIVE`、`SUSPECT`、`STALLED`、`CLOSED`
+- **静默判断**：`NORMAL`、`QUIET_ACTIVE`、`WAITING_UPSTREAM`、`QUIET_UNKNOWN`、`STALL_SUSPECT`、`OBSERVER_BLIND`
 
 单次 timeout、历史 timeout、正常连接关闭和已经恢复的重试不会被标记为当前失败。`FAILED` 只来自 Codex 终态错误或明确的失败事件。
 
@@ -287,6 +335,9 @@ src/
 │   ├── processes.py           # 进程发现和家族关联
 │   ├── state_store.py         # 只读 SQLite 能力和批量查询
 │   ├── rollout.py             # 增量 JSONL 与半行处理
+│   ├── process_activity.py    # /proc process tree CPU/I/O 差值
+│   ├── tui_session_log.py     # typed Compact 白名单解析
+│   ├── hook_events.py         # 最小 compact hook receiver/reader
 │   └── events.py              # 官方协议与诊断日志标准化
 ├── network/
 │   ├── sockets.py             # ss 采集和解析
@@ -309,11 +360,14 @@ src/
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q src
+uvx ruff check src tests
+uv run python -m unittest discover -s tests -v
 ```
 
-测试覆盖多 home、相对 SQLite 路径、schema 能力、rollout 半行、Turn/工具/TTFT、token/rate limit、subagent、doctor、重连恢复、终态 errmsg、500 条保留、网络聚合、两窗口阻塞、TLS ClientHello 的 IPv4/IPv6/VLAN、TCP/TLS record 重组、权限降级、JSON schema，以及 Textual Pilot 下的宽屏、窄屏、标签、搜索、Help 和终端尺寸下限。
+测试覆盖多 home、相对 SQLite 路径、schema 能力、rollout 半行与无语义增长、`/proc` CPU/I/O/child
+差值、五类静默判断、Turn/工具/TTFT、typed Compact、Pre/PostCompact、manual/auto/remote、
+retry/failure/abort、completion-only、500 条保留、网络聚合、两窗口阻塞、TLS ClientHello、JSON
+schema，以及 Textual Pilot 下的宽屏、窄屏、稳定时钟、滚动/focus 和终端尺寸下限。
 
 ## 数据说明
 
