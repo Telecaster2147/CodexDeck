@@ -175,6 +175,110 @@ class StateStoreTests(unittest.TestCase):
 
 
 class RolloutTests(unittest.TestCase):
+    def test_manual_compact_empty_task_is_detected_across_incremental_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {"input_tokens": 216_402},
+                            "model_context_window": 353_400,
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "turn_aborted", "turn_id": "old"},
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            reader = RolloutReader()
+            reader.read(path)
+
+            with path.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": "2026-07-17T00:00:02Z",
+                            "type": "event_msg",
+                            "payload": {"type": "task_started", "turn_id": "compact-turn"},
+                        }
+                    )
+                    + "\n"
+                )
+            started = reader.read(path)
+
+            self.assertEqual(
+                [event.kind for event in started],
+                ["TURN_STARTED", "COMPACT_CANDIDATE"],
+            )
+
+            with path.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": "2026-07-17T00:01:02Z",
+                            "type": "compacted",
+                            "payload": {"window_number": 2},
+                        }
+                    )
+                    + "\n"
+                )
+            completed = reader.read(path)
+            self.assertEqual(
+                [event.kind for event in completed],
+                ["COMPACTING", "COMPACT_COMPLETED"],
+            )
+            compacting, compacted = completed
+            self.assertEqual(compacting.timestamp, 1784246402.0)
+            self.assertEqual(compacting.metadata["trigger"], "manual")
+            self.assertAlmostEqual(compacting.metadata["context_ratio"], 216_402 / 353_400)
+            self.assertEqual(compacted.metadata["trigger"], "manual")
+
+    def test_user_message_prevents_empty_task_compact_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {"input_tokens": 216_402},
+                            "model_context_window": 353_400,
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "turn_complete", "turn_id": "old"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "继续工作"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:03Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "normal-turn"},
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+            events = RolloutReader().read(path)
+
+            self.assertEqual(
+                [event.kind for event in events],
+                ["TOKEN_USAGE", "TURN_COMPLETED", "TURN_STARTED"],
+            )
     def test_partial_jsonl_record_is_completed_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "rollout.jsonl"
@@ -213,7 +317,12 @@ class RolloutTests(unittest.TestCase):
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
             reader = RolloutReader()
-            reader.read(path)
+            events = reader.read(path)
+            self.assertEqual([event.kind for event in events], ["UNPARSED_PAYLOAD"])
+            self.assertEqual(events[0].unparsed.source_type, "event_msg:future_protocol_event")
+            self.assertEqual(len(events[0].unparsed.sha256), 64)
+            self.assertIsNotNone(events[0].observed_at)
+            self.assertEqual(events[0].source_timestamp, events[0].timestamp)
             self.assertEqual(
                 reader.unknown_counts({str(path)}),
                 {"event_msg:future_protocol_event": 1},

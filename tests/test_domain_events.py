@@ -48,6 +48,47 @@ def normalized(timestamp: float, item_type: str, source_id: str, **payload):
 
 
 class ProtocolAggregationTests(unittest.TestCase):
+    def test_tool_summary_retains_command_arguments_output_and_files(self) -> None:
+        events = normalize_rollout_record(
+            {
+                "timestamp": 10.0,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "call-rich",
+                    "name": "exec",
+                    "input": (
+                        'await tools.exec_command({"cmd":"uv run tests",'
+                        '"workdir":"/workspace/project"});\n'
+                        'const patch = "*** Begin Patch\\n*** Update File: '
+                        '/workspace/project/src/app.py\\n*** End Patch";'
+                    ),
+                },
+            },
+            "tool:start",
+        )
+        events += normalize_rollout_record(
+            {
+                "timestamp": 12.0,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-rich",
+                    "output": "3 tests passed",
+                },
+            },
+            "tool:end",
+        )
+        machine = SessionStateMachine(900)
+        machine.ingest("key", events)
+
+        tool = machine.derive("key", process(), NetworkEvidence(), 13.0).tool_executions[0]
+
+        self.assertEqual(tool.command, "uv run tests")
+        self.assertEqual(tool.cwd, "/workspace/project")
+        self.assertEqual(tool.output, "3 tests passed")
+        self.assertEqual(tool.files, ("/workspace/project/src/app.py",))
+
     def test_direct_turn_tool_timing_and_ttft_are_aggregated(self) -> None:
         events = []
         events += normalized(

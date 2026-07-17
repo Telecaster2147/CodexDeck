@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T06:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"/compact","turn_id":"TURN_ABORT"}}
+{"timestamp":"2026-01-01T06:00:01Z","type":"event_msg","payload":{"type":"task_aborted","turn_id":"TURN_ABORT","reason":"interrupt"}}

@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"context_tokens":240000,"model_context_window":300000}}}
+{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"TURN_PREVIOUS"}}
+{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"task_started","turn_id":"TURN_COMPACT"}}
+{"timestamp":"2026-01-01T00:00:12Z","type":"compacted","payload":{"turn_id":"TURN_COMPACT"}}

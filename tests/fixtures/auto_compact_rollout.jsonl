@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T01:00:00Z","type":"event_msg","payload":{"type":"item_started","turn_id":"TURN_AUTO","item":{"id":"ITEM_COMPACT","type":"context_compaction","trigger":"auto"}}}
+{"timestamp":"2026-01-01T01:00:08Z","type":"event_msg","payload":{"type":"context_compacted","turn_id":"TURN_AUTO","trigger":"auto"}}

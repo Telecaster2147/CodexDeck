@@ -7,6 +7,7 @@ import json
 import time
 from collections import defaultdict
 from copy import deepcopy
+from dataclasses import replace
 
 from config import (
     ALERT_HTTP_RESPONSE,
@@ -20,16 +21,24 @@ from config import (
 )
 from models import (
     AgentNode,
+    AttentionRequest,
+    AttentionState,
     AlertOccurrence,
     AlertStatus,
     AlertTransition,
     CapabilityMode,
     CapabilityStatus,
     Confidence,
+    CompactionEvidence,
+    CompactionSummary,
+    CurrentOperationSummary,
+    DiagnosisFinding,
+    EventTelemetrySummary,
     FailureInfo,
     LifecycleState,
     NetworkEvidence,
     NormalizedEvent,
+    ObservationPulse,
     ProcessInfo,
     ProtocolCapabilities,
     Provenance,
@@ -37,6 +46,8 @@ from models import (
     RateLimitWindow,
     RecoveryState,
     SessionHealth,
+    SilenceAssessment,
+    SilenceState,
     TokenUsageSummary,
     ToolExecutionSummary,
     TurnSummary,
@@ -46,8 +57,12 @@ from models import (
 PROGRESS_KINDS = {
     "RESPONSE_STARTED",
     "MODEL_PROGRESS",
+    "REASONING_SUMMARY",
+    "PLAN_UPDATED",
     "TOOL_RUNNING",
     "TOOL_COMPLETED",
+    "FILE_CHANGE_APPLIED",
+    "FILE_CHANGE_FAILED",
     "COMPACTING",
     "COMPACT_COMPLETED",
     "TURN_COMPLETED",
@@ -55,6 +70,41 @@ PROGRESS_KINDS = {
     "TURN_ABORTED",
 }
 TERMINAL_KINDS = {"TURN_COMPLETED", "TURN_FAILED", "TURN_ABORTED"}
+ACTIVE_TURN_KINDS = {
+    "COMPACT_REQUESTED",
+    "REQUEST_SENT",
+    "RESPONSE_STARTED",
+    "MODEL_PROGRESS",
+    "REASONING_SUMMARY",
+    "PLAN_UPDATED",
+    "TOOL_RUNNING",
+    "TOOL_COMPLETED",
+    "FILE_CHANGE_APPLIED",
+    "FILE_CHANGE_FAILED",
+    "COMPACTING",
+    "COMPACT_COMPLETED",
+}
+CURRENT_TURN_KINDS = ACTIVE_TURN_KINDS | {"ACTION_REQUIRED"}
+LIFECYCLE_PHASE_KINDS = ACTIVE_TURN_KINDS | TERMINAL_KINDS | {"TURN_STARTED"}
+DISPLAY_PHASE_KINDS = LIFECYCLE_PHASE_KINDS | {
+    "RECONNECTING",
+    "TRANSPORT_FALLBACK",
+    "RECOVERED",
+    "PROCESS_RESUMED",
+}
+ATTENTION_CLEAR_KINDS = PROGRESS_KINDS | {
+    "ACTION_RESOLVED",
+    "TURN_STARTED",
+    "ITEM_COMPLETED",
+    "PROCESS_EXITED",
+}
+NON_SEMANTIC_KINDS = {
+    "KEEPALIVE",
+    "TOKEN_USAGE",
+    "RATE_LIMIT",
+    "MODEL_CONFIG",
+    "UNPARSED_PAYLOAD",
+}
 
 
 class SessionStateMachine:
@@ -64,6 +114,7 @@ class SessionStateMachine:
         self.seen: dict[str, set[str]] = defaultdict(set)
         self.pending_recovery: dict[str, RecoveryState] = {}
         self.alerts: dict[str, list[AlertOccurrence]] = defaultdict(list)
+        self.compactions: dict[str, list[CompactionSummary]] = defaultdict(list)
 
     @staticmethod
     def _alert_id(key: str, kind: str, opened_at: float) -> str:
@@ -96,6 +147,151 @@ class SessionStateMachine:
         """Return the complete bounded event history, independent of UI lookback."""
 
         return tuple(self.events.get(key, ()))
+
+    def _record_compaction(self, key: str, event: NormalizedEvent) -> None:
+        metadata = event.metadata
+        context_tokens = self._int(metadata.get("context_tokens"))
+        context_window = self._int(metadata.get("context_window"))
+        auto_compact_token_limit = self._int(metadata.get("auto_compact_token_limit"))
+        trigger = str(metadata.get("trigger") or "")
+        history = self.compactions[key]
+        edge = {
+            "COMPACT_REQUESTED": "requested",
+            "COMPACT_CANDIDATE": "candidate",
+            "COMPACTING": "started",
+            "COMPACT_PROGRESS": "progress",
+            "COMPACT_COMPLETED": "completed",
+            "COMPACT_FAILED": "failed",
+            "TURN_FAILED": "failed",
+            "COMPACT_ABORTED": "aborted",
+            "TURN_ABORTED": "aborted",
+        }[event.kind]
+        evidence = CompactionEvidence(
+            edge=edge,
+            timestamp=event.timestamp,
+            source=event.source,
+            observed_at=event.observed_at,
+            confidence=event.confidence,
+            direct=not event.derived,
+            detail=event.detail or event.summary,
+        )
+        current = next(
+            (
+                item
+                for item in reversed(history)
+                if item.status not in {"completed", "failed", "aborted", "dismissed"}
+                and (not event.turn_id or not item.turn_id or item.turn_id == event.turn_id)
+            ),
+            None,
+        )
+        if current is None and history and edge in {"completed", "failed", "aborted"}:
+            latest = history[-1]
+            terminal_at = latest.terminal_at
+            if latest.status == edge and terminal_at is not None and abs(
+                terminal_at - event.timestamp
+            ) <= 1.0:
+                current = latest
+        if current is None:
+            operation_id = hashlib.sha256(
+                f"{key}:{event.turn_id}:{trigger}:{edge}:{event.timestamp}".encode()
+            ).hexdigest()[:16]
+            current = CompactionSummary(
+                operation_id=operation_id,
+                trigger=trigger or "unknown",
+                turn_id=event.turn_id,
+            )
+            history.append(current)
+        evidence_items = list(current.evidence)
+        if not any(
+            item.edge == evidence.edge
+            and item.source == evidence.source
+            and abs(item.timestamp - evidence.timestamp) <= 0.001
+            for item in evidence_items
+        ):
+            evidence_items.append(evidence)
+        confidence_rank = {Confidence.LOW: 0, Confidence.MEDIUM: 1, Confidence.HIGH: 2}
+        confidence = max(
+            (item.confidence for item in evidence_items),
+            key=confidence_rank.__getitem__,
+            default=event.confidence,
+        )
+        updates: dict[str, object] = {
+            "trigger": trigger or current.trigger or "unknown",
+            "turn_id": event.turn_id or current.turn_id,
+            "source": current.source or event.source,
+            "confidence": confidence,
+            "context_tokens": context_tokens or current.context_tokens,
+            "context_window": context_window or current.context_window,
+            "auto_compact_token_limit": (
+                auto_compact_token_limit or current.auto_compact_token_limit
+            ),
+            "reconstructed": current.reconstructed or bool(metadata.get("reconstructed")),
+            "evidence": tuple(sorted(evidence_items, key=lambda item: item.timestamp)),
+        }
+        if edge == "requested":
+            updates.update(
+                status="requested",
+                requested_at=min(
+                    value
+                    for value in (current.requested_at, event.timestamp)
+                    if value is not None
+                ),
+            )
+        elif edge == "candidate":
+            updates.update(status="candidate", started_at=current.started_at or event.timestamp)
+        elif edge == "started":
+            started_at = min(
+                value for value in (current.started_at, event.timestamp) if value is not None
+            )
+            updates.update(status="running", started_at=started_at)
+        elif edge == "progress":
+            updates.update(
+                status=current.status,
+                retry_count=current.retry_count + int(bool(metadata.get("retry"))),
+            )
+        elif edge == "completed":
+            updates.update(
+                status="completed",
+                completed_at=event.timestamp,
+                context_tokens_after=self._int(metadata.get("context_tokens_after")),
+            )
+        elif edge == "failed":
+            updates.update(status="failed", failed_at=event.timestamp, failure=event.failure)
+        else:
+            updates.update(status="aborted", aborted_at=event.timestamp)
+        history[history.index(current)] = replace(current, **updates)
+        if len(history) > 20:
+            del history[:-20]
+
+    def observe_compaction(
+        self,
+        key: str,
+        *,
+        timestamp: float,
+        source: str,
+        detail: str,
+        turn_id: str = "",
+    ) -> None:
+        """Attach low-level progress evidence without appending a timeline event."""
+
+        history = self.compactions.get(key, [])
+        if not history or history[-1].status not in {"requested", "candidate", "running"}:
+            return
+        self._record_compaction(
+            key,
+            NormalizedEvent(
+                timestamp=timestamp,
+                kind="COMPACT_PROGRESS",
+                summary="compact 活动证据",
+                detail=detail,
+                source=source,
+                confidence=Confidence.MEDIUM,
+                turn_id=turn_id or history[-1].turn_id,
+                source_id=f"compact-progress:{source}:{timestamp}",
+                derived=True,
+                observed_at=timestamp,
+            ),
+        )
 
     def _reconcile_alert(self, key: str, state: SessionHealth, now: float) -> None:
         history = self.alerts[key]
@@ -153,6 +349,57 @@ class SessionStateMachine:
             if dedupe_key in self.seen[key]:
                 continue
             self.seen[key].add(dedupe_key)
+            compact_kinds = {
+                "COMPACT_REQUESTED",
+                "COMPACT_CANDIDATE",
+                "COMPACTING",
+                "COMPACT_PROGRESS",
+                "COMPACT_COMPLETED",
+                "COMPACT_FAILED",
+                "COMPACT_ABORTED",
+            }
+            open_compact = bool(
+                self.compactions[key]
+                and self.compactions[key][-1].status
+                not in {"completed", "failed", "aborted", "dismissed"}
+            )
+            if event.kind in compact_kinds or (
+                open_compact and event.kind in {"TURN_FAILED", "TURN_ABORTED"}
+            ):
+                self._record_compaction(key, event)
+            elif open_compact and event.kind in {"RECONNECTING", "TRANSPORT_FALLBACK"}:
+                self._record_compaction(
+                    key,
+                    replace(
+                        event,
+                        kind="COMPACT_PROGRESS",
+                        metadata={
+                            **event.metadata,
+                            "retry": event.kind == "RECONNECTING",
+                        },
+                        derived=True,
+                    ),
+                )
+            if event.kind == "TOKEN_USAGE" and self.compactions[key]:
+                compact = self.compactions[key][-1]
+                context_after = self._int(event.metadata.get("context_tokens"))
+                if (
+                    compact.status == "completed"
+                    and compact.completed_at is not None
+                    and compact.context_tokens_after is None
+                    and context_after is not None
+                    and 0 <= event.timestamp - compact.completed_at <= 120
+                ):
+                    self.compactions[key][-1] = replace(
+                        compact,
+                        context_tokens_after=context_after,
+                    )
+            if event.kind in compact_kinds and any(
+                existing.kind == event.kind
+                and abs(existing.timestamp - event.timestamp) <= 1.0
+                for existing in reversed(bucket[-8:])
+            ):
+                continue
             if event.kind == "TURN_FAILED" and event.turn_id:
                 duplicate_index = next(
                     (
@@ -173,6 +420,16 @@ class SessionStateMachine:
                     if new_size > old_size:
                         bucket[duplicate_index] = event
                     continue
+            if (
+                self.compactions[key]
+                and self.compactions[key][-1].status == "candidate"
+                and event.kind not in compact_kinds
+                and event.kind
+                not in {"TOKEN_USAGE", "MODEL_CONFIG", "KEEPALIVE", "TURN_STARTED"}
+            ):
+                self.compactions[key][-1] = replace(
+                    self.compactions[key][-1], status="dismissed"
+                )
             recovery = self.pending_recovery.get(key)
             if (
                 recovery
@@ -188,6 +445,7 @@ class SessionStateMachine:
                     confidence=Confidence.HIGH,
                     turn_id=event.turn_id,
                     source_id=f"recovered:{dedupe_key}",
+                    observed_at=event.observed_at,
                 )
                 bucket.append(recovered)
                 self.seen[key].add(recovered.source_id)
@@ -400,6 +658,30 @@ class SessionStateMachine:
                     status="failed" if failed else "completed",
                     exit_code=exit_code,
                     completion_status=completion,
+                    command=str(
+                        event.metadata.get("command")
+                        or (start.metadata.get("command") if start else "")
+                    ),
+                    cwd=str(
+                        event.metadata.get("cwd")
+                        or (start.metadata.get("cwd") if start else "")
+                    ),
+                    arguments=str(
+                        event.metadata.get("arguments")
+                        or (start.metadata.get("arguments") if start else "")
+                    ),
+                    output=str(event.metadata.get("output") or ""),
+                    files=tuple(
+                        dict.fromkeys(
+                            [
+                                str(path)
+                                for path in (
+                                    (start.metadata.get("files") if start else []) or []
+                                )
+                            ]
+                            + [str(path) for path in (event.metadata.get("files") or [])]
+                        )
+                    ),
                     provenance=Provenance(
                         event.source,
                         min(event.confidence, start.confidence) if start else event.confidence,
@@ -424,6 +706,11 @@ class SessionStateMachine:
                         else start.timestamp
                     ),
                     status="running",
+                    command=str(start.metadata.get("command") or ""),
+                    cwd=str(start.metadata.get("cwd") or ""),
+                    arguments=str(start.metadata.get("arguments") or ""),
+                    output=str(start.metadata.get("output") or ""),
+                    files=tuple(str(path) for path in (start.metadata.get("files") or [])),
                     provenance=Provenance(
                         start.source, start.confidence, start.derived, complete=False
                     ),
@@ -441,6 +728,13 @@ class SessionStateMachine:
                         ),
                         started_at=start.timestamp,
                         status="running",
+                        command=str(start.metadata.get("command") or ""),
+                        cwd=str(start.metadata.get("cwd") or ""),
+                        arguments=str(start.metadata.get("arguments") or ""),
+                        output=str(start.metadata.get("output") or ""),
+                        files=tuple(
+                            str(path) for path in (start.metadata.get("files") or [])
+                        ),
                         provenance=Provenance(
                             start.source, start.confidence, derived=True, complete=False
                         ),
@@ -716,6 +1010,278 @@ class SessionStateMachine:
             subagent_path=direct()
             if any(item.metadata.get("agent_path") for item in agent_events)
             else unavailable,
+            action_required=direct()
+            if any(item.kind == "ACTION_REQUIRED" for item in events)
+            else unavailable,
+        )
+
+    @staticmethod
+    def _operation_summary(
+        state: SessionHealth,
+        events: list[NormalizedEvent],
+    ) -> CurrentOperationSummary:
+        if state.attention_request:
+            request = state.attention_request
+            return CurrentOperationSummary(
+                "attention",
+                request.summary,
+                request.detail,
+                request.started_at,
+                provenance=request.provenance,
+            )
+        if state.current_failure:
+            failure = state.current_failure
+            return CurrentOperationSummary(
+                "failure",
+                "失败",
+                failure.message,
+                failure.timestamp,
+                provenance=Provenance(failure.source, Confidence.HIGH),
+            )
+        active_compaction = next(
+            (
+                item
+                for item in reversed(state.compactions)
+                if item.status in {"requested", "candidate", "running"}
+            ),
+            None,
+        )
+        if active_compaction:
+            status = {
+                "requested": "compact requested",
+                "candidate": "compact candidate",
+                "running": "compact running",
+            }[active_compaction.status]
+            return CurrentOperationSummary(
+                "compact",
+                status,
+                active_compaction.trigger,
+                active_compaction.requested_at or active_compaction.started_at,
+                provenance=Provenance(
+                    active_compaction.source or "state-machine",
+                    active_compaction.confidence,
+                    derived=active_compaction.reconstructed,
+                ),
+            )
+        if state.recovery != RecoveryState.NONE or state.network.state.value in {
+            "SUSPECT",
+            "STALLED",
+        }:
+            recovery = SessionStateMachine._latest(
+                events, "RECONNECTING", "TRANSPORT_FALLBACK", "RECOVERED"
+            )
+            detail = state.network.reason or (recovery.detail if recovery else "")
+            return CurrentOperationSummary(
+                "recovery",
+                state.phase,
+                detail,
+                recovery.timestamp if recovery else state.phase_since,
+                provenance=(
+                    recovery.provenance
+                    if recovery
+                    else Provenance("socket-classifier", Confidence.MEDIUM, derived=True)
+                ),
+            )
+        running = next(
+            (tool for tool in reversed(state.tool_executions) if tool.status == "running"),
+            None,
+        )
+        if running:
+            detail = running.command or running.display_name
+            if detail:
+                detail = " ".join(detail.split())
+                if len(detail) > 96:
+                    detail = detail[:95] + "…"
+            return CurrentOperationSummary(
+                running.category or "tool",
+                running.display_name,
+                detail,
+                running.started_at,
+                tool_count=sum(tool.status == "running" for tool in state.tool_executions),
+                file_count=len(running.files),
+                provenance=running.provenance,
+            )
+        file_event = SessionStateMachine._latest(
+            events, "FILE_CHANGE_APPLIED", "FILE_CHANGE_FAILED"
+        )
+        if (
+            file_event
+            and state.lifecycle in {LifecycleState.GENERATING, LifecycleState.RUNNING_TOOL}
+            and state.phase_since == file_event.timestamp
+        ):
+            files = file_event.metadata.get("files")
+            files = files if isinstance(files, list) else []
+            return CurrentOperationSummary(
+                "write",
+                file_event.summary,
+                file_event.detail,
+                file_event.timestamp,
+                file_count=len(files),
+                provenance=file_event.provenance,
+            )
+        all_agents: list[AgentNode] = []
+        pending_agents = list(state.agents)
+        while pending_agents:
+            agent = pending_agents.pop()
+            all_agents.append(agent)
+            pending_agents.extend(agent.children)
+        active_agent = next(
+            (
+                agent
+                for agent in reversed(all_agents)
+                if agent.status not in {"completed", "closed", "failed", "error"}
+            ),
+            None,
+        )
+        if active_agent:
+            return CurrentOperationSummary(
+                "agent",
+                "Subagent",
+                active_agent.role or active_agent.nickname or active_agent.agent_path,
+                active_agent.spawned_at,
+                agent=active_agent.nickname or active_agent.agent_path,
+                provenance=active_agent.provenance,
+            )
+        return CurrentOperationSummary(
+            state.lifecycle.value.lower(),
+            state.phase,
+            "",
+            state.phase_since,
+            provenance=Provenance("state-machine", Confidence.MEDIUM, derived=True),
+        )
+
+    @staticmethod
+    def _diagnosis_findings(
+        state: SessionHealth,
+        events: list[NormalizedEvent],
+        now: float,
+    ) -> list[DiagnosisFinding]:
+        operation = state.current_operation
+        evidence_event = SessionStateMachine._latest(
+            events,
+            "ACTION_REQUIRED",
+            "TURN_FAILED",
+            "RECONNECTING",
+            "TRANSPORT_FALLBACK",
+            "RECOVERED",
+            "TOOL_RUNNING",
+            "MODEL_PROGRESS",
+            "REQUEST_SENT",
+        )
+        freshness = None
+        if evidence_event:
+            freshness = max(0.0, now - (evidence_event.observed_at or evidence_event.timestamp))
+        severity = "info"
+        action = ""
+        if state.attention_request:
+            severity = "warning"
+            action = "切换到对应 Codex 会话完成交互"
+        elif state.current_failure or state.network.state.value == "STALLED":
+            severity = "error"
+        elif state.recovery not in {RecoveryState.NONE, RecoveryState.RECOVERED}:
+            severity = "warning"
+        reason = operation.detail or state.network.reason or state.phase
+        evidence = []
+        if evidence_event:
+            evidence.append(f"{evidence_event.kind} · {evidence_event.source}")
+        if state.network.reason:
+            evidence.append(f"TCP · {state.network.reason}")
+        findings = [
+            DiagnosisFinding(
+                severity,
+                operation.label,
+                reason,
+                tuple(evidence),
+                operation.provenance,
+                freshness,
+                action,
+            )
+        ]
+        if state.silence.state != SilenceState.NORMAL:
+            findings.append(
+                DiagnosisFinding(
+                    state.silence.severity,
+                    state.silence.state.value,
+                    state.silence.reason,
+                    tuple(
+                        item
+                        for item in (
+                            f"last semantic · {state.observation.last_semantic_kind}"
+                            if state.observation.last_semantic_kind
+                            else "",
+                            f"last evidence · {state.observation.last_evidence_source}"
+                            if state.observation.last_evidence_source
+                            else "",
+                        )
+                        if item
+                    ),
+                    state.silence.provenance,
+                    (
+                        max(0.0, now - state.observation.last_evidence_at)
+                        if state.observation.last_evidence_at is not None
+                        else None
+                    ),
+                )
+            )
+        if state.compactions:
+            compact = state.compactions[-1]
+            if compact.terminal_at is not None and compact.started_at is None:
+                findings.append(
+                    DiagnosisFinding(
+                        "warning",
+                        "compact protocol drift",
+                        "收到 compact terminal edge，但当前保留窗口没有可信 start",
+                        tuple(
+                            f"{item.edge} · {item.source}" for item in compact.evidence
+                        ),
+                        Provenance(
+                            compact.source or "compact-state-machine",
+                            compact.confidence,
+                            derived=True,
+                            complete=False,
+                        ),
+                    )
+                )
+        if state.observation.auto_compact_expected:
+            findings.append(
+                DiagnosisFinding(
+                    "info",
+                    "AUTO_COMPACT_EXPECTED",
+                    state.observation.auto_compact_reason,
+                    provenance=Provenance(
+                        "config.toml+token_usage",
+                        Confidence.MEDIUM,
+                        derived=True,
+                    ),
+                )
+            )
+        return findings
+
+    @staticmethod
+    def _event_telemetry(events: list[NormalizedEvent]) -> EventTelemetrySummary:
+        delays = sorted(
+            event.freshness_seconds
+            for event in events
+            if event.freshness_seconds is not None
+        )
+
+        def percentile(fraction: float) -> float | None:
+            if not delays:
+                return None
+            position = (len(delays) - 1) * fraction
+            lower = int(position)
+            upper = min(lower + 1, len(delays) - 1)
+            weight = position - lower
+            return delays[lower] * (1.0 - weight) + delays[upper] * weight
+
+        unparsed = sum(event.kind == "UNPARSED_PAYLOAD" for event in events)
+        return EventTelemetrySummary(
+            total_events=len(events),
+            observed_events=len(delays),
+            unparsed_events=unparsed,
+            unknown_rate=unparsed / len(events) if events else 0.0,
+            observation_p50_seconds=percentile(0.50),
+            observation_p95_seconds=percentile(0.95),
         )
 
     def derive(
@@ -724,11 +1290,24 @@ class SessionStateMachine:
         process: ProcessInfo,
         network: NetworkEvidence,
         now: float | None = None,
+        observation: ObservationPulse | None = None,
     ) -> SessionHealth:
         now = time.time() if now is None else now
         all_events = self.events.get(key, [])
         visible_cutoff = now - self.lookback_seconds
         visible = [event for event in all_events if event.timestamp >= visible_cutoff]
+        model_config = self._latest(all_events, "MODEL_CONFIG")
+        if model_config:
+            model = str(model_config.metadata.get("model") or "")
+            reasoning_effort = str(
+                model_config.metadata.get("reasoning_effort") or ""
+            )
+            if model or reasoning_effort:
+                process = replace(
+                    process,
+                    model=model or process.model,
+                    reasoning_effort=reasoning_effort or process.reasoning_effort,
+                )
         state = SessionHealth(
             process.instance_id,
             process.session_id,
@@ -737,10 +1316,16 @@ class SessionStateMachine:
             events=visible,
         )
         if not all_events:
+            state.observation = self._finalize_observation(
+                state, all_events, observation or ObservationPulse(), now
+            )
+            state.silence = self._silence_assessment(state, now)
+            state.current_operation = self._operation_summary(state, all_events)
+            state.diagnosis = self._diagnosis_findings(state, all_events, now)
             self._reconcile_alert(key, state, now)
             return state
 
-        latest_failure = self._latest(all_events, "TURN_FAILED")
+        latest_failure = self._latest(all_events, "TURN_FAILED", "COMPACT_FAILED")
         state.latest_failure = latest_failure.failure if latest_failure else None
 
         process_resume = self._latest(all_events, "PROCESS_RESUMED")
@@ -751,17 +1336,63 @@ class SessionStateMachine:
         ]
         task_start = self._latest(state_events, "TURN_STARTED")
         task_terminal = self._latest(state_events, *TERMINAL_KINDS)
-        current_turn = bool(
-            task_start
-            and (not task_terminal or task_start.timestamp > task_terminal.timestamp)
-        )
+        latest_active = self._latest(state_events, *CURRENT_TURN_KINDS)
+        if task_start:
+            current_turn = not task_terminal or task_start.timestamp > task_terminal.timestamp
+        else:
+            current_turn = bool(
+                latest_active
+                and (
+                    not task_terminal
+                    or latest_active.timestamp > task_terminal.timestamp
+                )
+            )
         relevant = [
             event
             for event in state_events
             if not task_start or event.timestamp >= task_start.timestamp
         ]
-        latest = relevant[-1] if relevant else state_events[-1]
-        failure_event = self._latest(relevant, "TURN_FAILED")
+        lifecycle_event = self._latest(relevant, *LIFECYCLE_PHASE_KINDS)
+        compact_start = self._latest(relevant, "COMPACTING")
+        compact_end = self._latest(
+            relevant,
+            "COMPACT_COMPLETED",
+            "COMPACT_FAILED",
+            "COMPACT_ABORTED",
+            *TERMINAL_KINDS,
+        )
+        compacting = bool(
+            compact_start
+            and (
+                compact_end is None
+                or compact_start.timestamp > compact_end.timestamp
+            )
+        )
+        failure_event = self._latest(relevant, "TURN_FAILED", "COMPACT_FAILED")
+        compact_abort = self._latest(relevant, "COMPACT_ABORTED")
+        attention_event = self._latest(relevant, "ACTION_REQUIRED")
+        attention_clear = self._latest(relevant, *ATTENTION_CLEAR_KINDS)
+        if attention_event and (
+            attention_clear is None or attention_event.timestamp > attention_clear.timestamp
+        ):
+            attention_name = str(
+                attention_event.metadata.get("attention_state") or "USER_INPUT"
+            )
+            try:
+                state.attention = AttentionState(attention_name)
+            except ValueError:
+                state.attention = AttentionState.USER_INPUT
+            state.attention_request = AttentionRequest(
+                state=state.attention,
+                request_id=str(attention_event.metadata.get("request_id") or ""),
+                call_id=str(attention_event.metadata.get("call_id") or ""),
+                turn_id=attention_event.turn_id,
+                summary=attention_event.summary,
+                detail=attention_event.detail,
+                started_at=attention_event.timestamp,
+                observed_at=attention_event.observed_at,
+                provenance=attention_event.provenance,
+            )
         process_exit = self._latest(all_events, "PROCESS_EXITED")
         if process_exit and process_exit is all_events[-1]:
             # Process termination is historical lifecycle evidence, not a turn failure.
@@ -780,18 +1411,25 @@ class SessionStateMachine:
         elif failure_event and (not task_start or failure_event.timestamp >= task_start.timestamp):
             state.lifecycle = LifecycleState.FAILED
             state.current_failure = failure_event.failure
-        elif latest.kind == "TURN_ABORTED":
+        elif compact_abort and (not task_start or compact_abort.timestamp >= task_start.timestamp):
             state.lifecycle = LifecycleState.ABORTED
-        elif latest.kind == "TURN_COMPLETED":
-            state.lifecycle = LifecycleState.COMPLETED
-        elif current_turn:
-            if latest.kind in {"COMPACTING"}:
+        elif current_turn and lifecycle_event:
+            if compacting:
                 state.lifecycle = LifecycleState.COMPACTING
-            elif latest.kind == "TOOL_RUNNING":
+            elif lifecycle_event.kind == "TOOL_RUNNING":
                 state.lifecycle = LifecycleState.RUNNING_TOOL
-            elif latest.kind in {"MODEL_PROGRESS", "RESPONSE_STARTED", "TOOL_COMPLETED"}:
+            elif lifecycle_event.kind in {
+                "MODEL_PROGRESS",
+                "REASONING_SUMMARY",
+                "PLAN_UPDATED",
+                "RESPONSE_STARTED",
+                "TOOL_COMPLETED",
+                "FILE_CHANGE_APPLIED",
+                "FILE_CHANGE_FAILED",
+                "COMPACT_COMPLETED",
+            }:
                 state.lifecycle = LifecycleState.GENERATING
-            elif latest.kind == "REQUEST_SENT":
+            elif lifecycle_event.kind == "REQUEST_SENT":
                 state.lifecycle = LifecycleState.WAITING_RESPONSE
             else:
                 state.lifecycle = LifecycleState.STARTING
@@ -817,10 +1455,19 @@ class SessionStateMachine:
 
         if state.process_exited and process_exit:
             phase_event = process_exit
+        elif task_terminal and not current_turn:
+            phase_event = task_terminal
+        elif compacting:
+            phase_event = compact_start
         else:
-            phase_event = task_terminal if task_terminal and not current_turn else latest
-        state.phase = EVENT_LABELS.get(phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value])
-        state.phase_since = phase_event.timestamp
+            phase_event = self._latest(relevant, *DISPLAY_PHASE_KINDS)
+        if phase_event:
+            state.phase = EVENT_LABELS.get(
+                phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value]
+            )
+            state.phase_since = phase_event.timestamp
+        else:
+            state.phase = LIFECYCLE_LABELS[state.lifecycle.value]
         token_event = self._latest(all_events, "TOKEN_USAGE")
         rate_event = self._latest(all_events, "TOKEN_USAGE", "RATE_LIMIT")
         state.token_used, state.token_limit = self._tokens(token_event)
@@ -832,11 +1479,31 @@ class SessionStateMachine:
         state.rate_limits = self._rate_limits(rate_event)
         state.tool_executions = self._tool_summaries(all_events)
         state.turns = self._turn_summaries(all_events, state.tool_executions, process)
+        state.compactions = deepcopy(self.compactions.get(key, []))
         state.agents = self._agent_tree(all_events)
         state.protocol_capabilities = self._capabilities(all_events)
+        state.event_telemetry = self._event_telemetry(all_events)
+        state.observation = self._finalize_observation(
+            state, all_events, observation or ObservationPulse(), now
+        )
+        state.silence = self._silence_assessment(state, now)
+        state.current_operation = self._operation_summary(state, all_events)
+        state.diagnosis = self._diagnosis_findings(state, all_events, now)
 
         if current_turn:
             self._derive_alert(state, relevant, now)
+        if (
+            state.silence.state == SilenceState.STALL_SUSPECT
+            and state.silence.severity == "severe"
+            and not state.alert
+        ):
+            state.alert = "SILENCE_STALL"
+            state.alert_level = "严重"
+            state.alert_reason = state.silence.reason
+            state.alert_age_seconds = max(
+                0,
+                int(now - (state.observation.last_semantic_at or now)),
+            )
         agent_errors = []
         pending_agents = list(state.agents)
         while pending_agents:
@@ -852,6 +1519,184 @@ class SessionStateMachine:
         self._reconcile_alert(key, state, now)
         return state
 
+    @classmethod
+    def _finalize_observation(
+        cls,
+        state: SessionHealth,
+        events: list[NormalizedEvent],
+        pulse: ObservationPulse,
+        now: float,
+    ) -> ObservationPulse:
+        semantic = next(
+            (event for event in reversed(events) if event.kind not in NON_SEMANTIC_KINDS),
+            None,
+        )
+        turn_start = cls._latest(events, "TURN_STARTED")
+        token_event = cls._latest(events, "TOKEN_USAGE")
+        auto_limit = cls._int(
+            token_event.metadata.get("auto_compact_token_limit") if token_event else None
+        )
+        auto_expected = bool(
+            auto_limit is not None
+            and state.token_used is not None
+            and state.token_used >= auto_limit
+        )
+        last_semantic_at = pulse.last_semantic_at
+        last_semantic_kind = pulse.last_semantic_kind
+        last_semantic_source = pulse.last_semantic_source
+        if semantic and (last_semantic_at is None or semantic.timestamp >= last_semantic_at):
+            last_semantic_at = semantic.timestamp
+            last_semantic_kind = semantic.kind
+            last_semantic_source = semantic.source
+        evidence = [
+            (
+                last_semantic_at,
+                last_semantic_source or "protocol",
+                EVENT_LABELS.get(last_semantic_kind, last_semantic_kind),
+            ),
+            (pulse.last_rollout_growth_at, "rollout", "rollout 文件增长"),
+            (pulse.last_process_activity_at, "process", pulse.process_activity.detail),
+            (pulse.last_network_progress_at, "network", "TCP RX/TX/ACK 有进展"),
+            (pulse.last_log_activity_at, "log", "structured log 有新记录"),
+        ]
+        available = [item for item in evidence if item[0] is not None]
+        latest = max(available, key=lambda item: float(item[0])) if available else None
+        return replace(
+            pulse,
+            sampled_at=pulse.sampled_at or now,
+            turn_started_at=turn_start.timestamp if turn_start else pulse.turn_started_at,
+            phase_started_at=state.phase_since or pulse.phase_started_at,
+            last_transition_at=state.phase_since or pulse.last_transition_at,
+            last_semantic_at=last_semantic_at,
+            last_semantic_kind=last_semantic_kind,
+            last_semantic_source=last_semantic_source,
+            last_evidence_at=float(latest[0]) if latest else pulse.last_evidence_at,
+            last_evidence_source=str(latest[1]) if latest else pulse.last_evidence_source,
+            last_evidence_detail=str(latest[2]) if latest else pulse.last_evidence_detail,
+            auto_compact_expected=auto_expected,
+            auto_compact_reason=(
+                f"context {state.token_used} 已达到 auto compact boundary {auto_limit}"
+                if auto_expected
+                else ""
+            ),
+        )
+
+    @staticmethod
+    def _silence_assessment(state: SessionHealth, now: float) -> SilenceAssessment:
+        pulse = state.observation
+        semantic_at = pulse.last_semantic_at or state.phase_since
+        if state.lifecycle in {
+            LifecycleState.IDLE,
+            LifecycleState.COMPLETED,
+            LifecycleState.FAILED,
+            LifecycleState.ABORTED,
+        } or semantic_at is None:
+            return SilenceAssessment(assessed_at=now)
+        silence_age = max(0.0, now - semantic_at)
+        evidence_age = (
+            max(0.0, now - pulse.last_evidence_at)
+            if pulse.last_evidence_at is not None
+            else None
+        )
+        if pulse.collector_stale:
+            return SilenceAssessment(
+                SilenceState.OBSERVER_BLIND,
+                pulse.collector_stale_reason or "监测证据不足",
+                now,
+                semantic_at,
+                pulse.last_evidence_at,
+                "warning",
+                Provenance("collector-health", Confidence.HIGH, derived=True, complete=False),
+            )
+        if silence_age < 30:
+            return SilenceAssessment(
+                SilenceState.NORMAL,
+                "最近仍有语义事件",
+                now,
+                semantic_at,
+                pulse.last_evidence_at,
+                "info",
+            )
+        recent_activity = evidence_age is not None and evidence_age <= 10
+        if recent_activity and pulse.last_evidence_at and pulse.last_evidence_at > semantic_at:
+            return SilenceAssessment(
+                SilenceState.QUIET_ACTIVE,
+                "暂无新语义事件，但进程仍有可观察活动",
+                now,
+                semantic_at,
+                pulse.last_evidence_at,
+                "info",
+                Provenance(
+                    pulse.last_evidence_source or "observation",
+                    Confidence.MEDIUM,
+                    derived=True,
+                ),
+            )
+        if (
+            state.lifecycle == LifecycleState.WAITING_RESPONSE
+            and state.network.state.value == "IDLE"
+            and not pulse.process_activity.active
+            and silence_age >= 30
+        ):
+            return SilenceAssessment(
+                SilenceState.WAITING_UPSTREAM,
+                "正在等待上游响应",
+                now,
+                semantic_at,
+                pulse.last_evidence_at,
+                "info",
+                Provenance("state-machine", Confidence.MEDIUM, derived=True),
+            )
+        thresholds = {
+            LifecycleState.STARTING: 60,
+            LifecycleState.WAITING_RESPONSE: 90,
+            LifecycleState.GENERATING: 120,
+            LifecycleState.RUNNING_TOOL: 90,
+            LifecycleState.COMPACTING: 120,
+        }
+        threshold = thresholds.get(state.lifecycle, 120)
+        if pulse.silence_baseline_samples >= 3 and pulse.silence_p95_seconds is not None:
+            threshold = max(threshold, pulse.silence_p95_seconds * 1.5)
+        phase_age = max(0.0, now - (state.phase_since or semantic_at))
+        if phase_age >= threshold and pulse.quiet_full_samples >= 2:
+            severe_thresholds = {
+                LifecycleState.STARTING: 180,
+                LifecycleState.WAITING_RESPONSE: 180,
+                LifecycleState.GENERATING: 300,
+                LifecycleState.RUNNING_TOOL: 240,
+                LifecycleState.COMPACTING: 300,
+            }
+            severe_threshold = severe_thresholds.get(state.lifecycle, 300)
+            if pulse.silence_baseline_samples >= 3 and pulse.silence_p95_seconds is not None:
+                severe_threshold = max(severe_threshold, pulse.silence_p95_seconds * 3)
+            return SilenceAssessment(
+                SilenceState.STALL_SUSPECT,
+                "疑似停滞，连续采样未发现 rollout、process、network 或 log 活动",
+                now,
+                semantic_at,
+                pulse.last_evidence_at,
+                "severe" if phase_age >= severe_threshold else "warning",
+                Provenance("silence-assessment", Confidence.MEDIUM, derived=True),
+            )
+        if silence_age >= 30:
+            return SilenceAssessment(
+                SilenceState.QUIET_UNKNOWN,
+                "内部阶段暂时不可见",
+                now,
+                semantic_at,
+                pulse.last_evidence_at,
+                "info",
+                Provenance("silence-assessment", Confidence.LOW, derived=True),
+            )
+        return SilenceAssessment(
+            SilenceState.NORMAL,
+            "语义事件暂时安静",
+            now,
+            semantic_at,
+            pulse.last_evidence_at,
+            "info",
+        )
+
     def _derive_alert(
         self,
         state: SessionHealth,
@@ -864,16 +1709,34 @@ class SessionStateMachine:
         model = self._latest(
             events,
             "MODEL_PROGRESS",
+            "REASONING_SUMMARY",
+            "PLAN_UPDATED",
             "TOOL_RUNNING",
+            "FILE_CHANGE_APPLIED",
+            "FILE_CHANGE_FAILED",
             "TURN_COMPLETED",
             "TURN_FAILED",
         )
         tool_done = self._latest(events, "TOOL_COMPLETED")
         keepalive = self._latest(events, "KEEPALIVE")
+        request_progress = self._latest(
+            events,
+            "REQUEST_SENT",
+            "RESPONSE_STARTED",
+            "MODEL_PROGRESS",
+            "REASONING_SUMMARY",
+            "PLAN_UPDATED",
+            "TOOL_RUNNING",
+            "TOOL_COMPLETED",
+            "FILE_CHANGE_APPLIED",
+            "FILE_CHANGE_FAILED",
+            "COMPACTING",
+            "COMPACT_COMPLETED",
+        )
         alert = ""
         since = 0.0
         reason = ""
-        if turn_start and not request:
+        if turn_start and not request_progress:
             alert, since, reason = ALERT_PRE_REQUEST, turn_start.timestamp, "turn 已开始但尚未进入模型请求"
         elif request and (not response or response.timestamp < request.timestamp):
             alert = ALERT_HTTP_RESPONSE
@@ -914,3 +1777,4 @@ class SessionStateMachine:
                 self.seen.pop(key, None)
                 self.pending_recovery.pop(key, None)
                 self.alerts.pop(key, None)
+                self.compactions.pop(key, None)

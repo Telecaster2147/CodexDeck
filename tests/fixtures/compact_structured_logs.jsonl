@@ -1,0 +1,2 @@
+{"id":1,"timestamp":1767247200.0,"level":"INFO","target":"codex_http_client::transport","thread_id":"SESSION_REMOTE","process_uuid":"pid:10:PROCESS","body":"run_remote_compact{request_id=REQUEST_ID}: POST to /responses"}
+{"id":2,"timestamp":1767247202.0,"level":"WARN","target":"codex_core::responses_retry","thread_id":"SESSION_REMOTE","process_uuid":"pid:10:PROCESS","body":"stream disconnected - retrying request"}

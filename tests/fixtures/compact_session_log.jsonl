@@ -1,0 +1,3 @@
+{"timestamp":"2026-01-01T03:00:00Z","direction":"from_tui","kind":"op","op":{"type":"user_input","text":"PROMPT_MUST_NOT_SURVIVE"},"session_id":"SESSION_ID"}
+{"timestamp":"2026-01-01T03:00:01Z","direction":"from_tui","kind":"op","op":{"type":"Compact"},"session_id":"SESSION_ID","turn_id":"TURN_MANUAL"}
+{"timestamp":"2026-01-01T03:00:02Z","direction":"to_tui","kind":"event","event":{"type":"agent_message","text":"RESPONSE_MUST_NOT_SURVIVE"},"session_id":"SESSION_ID"}

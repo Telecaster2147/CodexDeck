@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T05:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"/compact","turn_id":"TURN_FAILURE"}}
+{"timestamp":"2026-01-01T05:00:01Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"TURN_FAILURE","error":{"message":"COMPACT_ERROR","codex_error_info":"server_error"}}}
