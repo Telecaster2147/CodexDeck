@@ -12,6 +12,7 @@ from config import MAX_SESSION_TAIL
 from models import Confidence, NormalizedEvent
 from utils import message_text
 from .events import is_compact_command, normalize_rollout_record, parse_timestamp
+from .terminal import TerminalUpdate, extract_terminal_updates
 
 
 KNOWN_IGNORED_TYPES = {
@@ -76,6 +77,7 @@ class RolloutActivity:
 class RolloutReadResult:
     events: tuple[NormalizedEvent, ...]
     activity: RolloutActivity
+    terminal_updates: tuple[TerminalUpdate, ...] = ()
 
 
 def _record_shape(record: dict[str, object]) -> tuple[str, str, dict[str, object]]:
@@ -220,6 +222,7 @@ class RolloutReader:
         complete = payload[: last_newline + 1]
         cursor.partial = payload[last_newline + 1 :]
         events: list[NormalizedEvent] = []
+        terminal_updates: list[TerminalUpdate] = []
         complete_record_count = 0
         ignored_record_count = 0
         base_offset = read_start - len(previous_partial)
@@ -235,6 +238,13 @@ class RolloutReader:
             if isinstance(record, dict):
                 complete_record_count += 1
                 source_id = f"rollout:{stat.st_ino}:{line_offset}"
+                terminal_updates.extend(
+                    extract_terminal_updates(
+                        record,
+                        source_id,
+                        parse_timestamp(record.get("timestamp")) or observed_at,
+                    )
+                )
                 record_type, item_type, item = _record_shape(record)
                 explicit_compact = (
                     (record_type == "event_msg" and item_type == "user_message")
@@ -434,6 +444,7 @@ class RolloutReader:
                 truncated=truncated,
                 copy_truncated=copy_truncated,
             ),
+            tuple(terminal_updates),
         )
 
     def unknown_counts(self, paths: set[str]) -> dict[str, int]:

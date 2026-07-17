@@ -81,6 +81,14 @@ class CapabilityMode(StringEnum):
     UNAVAILABLE = "unavailable"
 
 
+class TerminalCapability(StringEnum):
+    STREAMING = "STREAMING"
+    FILE_TAIL = "FILE_TAIL"
+    POLL_TRANSCRIPT = "POLL_TRANSCRIPT"
+    FINAL_TRANSCRIPT = "FINAL_TRANSCRIPT"
+    METADATA_ONLY = "METADATA_ONLY"
+
+
 @dataclass(frozen=True)
 class Provenance:
     source: str
@@ -554,6 +562,38 @@ class ToolExecutionSummary:
 
 
 @dataclass(frozen=True)
+class TerminalChunk:
+    source_id: str
+    observed_at: float
+    stream: str = "combined"
+    text: str = ""
+    sequence: int = 0
+    complete: bool = True
+
+
+@dataclass(frozen=True)
+class TerminalSessionSummary:
+    terminal_id: str
+    root_call_id: str = ""
+    process_id: str = ""
+    turn_id: str = ""
+    command: str = ""
+    cwd: str = ""
+    status: str = "unknown"
+    exit_code: int | None = None
+    capability: TerminalCapability = TerminalCapability.METADATA_ONLY
+    started_at: float | None = None
+    completed_at: float | None = None
+    last_output_at: float | None = None
+    retained_bytes: int = 0
+    dropped_bytes: int = 0
+    upstream_truncated: bool = False
+    stale: bool = False
+    source: str = "rollout"
+    chunks: tuple[TerminalChunk, ...] = ()
+
+
+@dataclass(frozen=True)
 class TurnSummary:
     turn_id: str
     started_at: float | None = None
@@ -693,6 +733,7 @@ class SessionHealth:
     turns: list[TurnSummary] = field(default_factory=list)
     compactions: list[CompactionSummary] = field(default_factory=list)
     tool_executions: list[ToolExecutionSummary] = field(default_factory=list)
+    terminal_sessions: list[TerminalSessionSummary] = field(default_factory=list)
     agents: list[AgentNode] = field(default_factory=list)
     protocol_capabilities: ProtocolCapabilities = field(default_factory=ProtocolCapabilities)
     process_exited: bool = False
