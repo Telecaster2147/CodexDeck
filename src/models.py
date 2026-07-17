@@ -536,6 +536,7 @@ class ToolExecutionSummary:
     turn_id: str = ""
     category: str = "tool"
     display_name: str = "tool"
+    tool_name: str = ""
     started_at: float | None = None
     completed_at: float | None = None
     duration_seconds: float | None = None

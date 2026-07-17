@@ -17,6 +17,31 @@ from .state_store import LogRecord
 NON_TURN_FAILURES = {"active_turn_not_steerable", "thread_rollback_failed"}
 COMPACT_COMMAND = re.compile(r"^/compact(?:\s+.*)?$", re.IGNORECASE)
 
+TOOL_OUTPUT_TYPES = {
+    "custom_tool_call_output",
+    "function_call_output",
+    "local_shell_call_output",
+    "exec_command_end",
+    "mcp_tool_call_end",
+    "dynamic_tool_call_end",
+}
+
+TOOL_LABELS = {
+    "exec": "Shell 命令",
+    "exec_command": "Shell 命令",
+    "local_shell_call": "Shell 命令",
+    "apply_patch": "应用补丁",
+    "patch_apply": "应用补丁",
+    "write_file": "写入文件",
+    "read_file": "读取文件",
+    "update_plan": "更新计划",
+    "wait": "等待后台任务",
+    "write_stdin": "后台任务交互",
+    "web_search": "网页搜索",
+    "search_query": "网页搜索",
+    "image_generation": "生成图片",
+}
+
 
 def parse_timestamp(value: object) -> float:
     if isinstance(value, (int, float)):
@@ -311,25 +336,73 @@ def _tool_metadata(payload: dict[str, Any], item_type: str) -> dict[str, Any]:
     files = _patch_files(input_value)
     output, background = _background_tool_output(output_value)
     metadata = {**_timing(payload), **background}
-    call_id = payload.get("call_id") or payload.get("id") or item.get("id") or item.get("call_id")
+    call_id = (
+        payload.get("call_id")
+        or payload.get("id")
+        or item.get("id")
+        or item.get("call_id")
+    )
+    nested_tools = _nested_tool_names(input_value)
+    server = _bounded_metadata_text(payload.get("server") or item.get("server"), 160)
+    explicit_name = str(
+        payload.get("name")
+        or item.get("name")
+        or payload.get("tool")
+        or item.get("tool")
+        or ""
+    ).strip()
+    fallback_name = not explicit_name
+    tool_names: list[str] = []
+    if explicit_name.lower() == "exec" and nested_tools:
+        tool_names = nested_tools
+    elif explicit_name:
+        tool_names = [explicit_name]
+    elif nested_tools:
+        tool_names = nested_tools
+    elif command:
+        tool_names = ["exec_command"]
+    elif files:
+        tool_names = ["apply_patch"]
+    elif item_type not in TOOL_OUTPUT_TYPES:
+        tool_names = [re.sub(r"_(?:begin|end|output)$", "", item_type).strip("_")]
+    tool_names = list(dict.fromkeys(name for name in tool_names if name))
+    tool_name = " + ".join(tool_names)
+    display_parts = [TOOL_LABELS.get(name.lower(), name) for name in tool_names]
+    display_name = " + ".join(display_parts)
+    if server and tool_name and "mcp" in item_type.lower():
+        display_name = f"MCP {server}/{tool_name}"
+    normalized_names = {name.lower() for name in tool_names}
+    explicit_category = str(payload.get("tool_type") or item.get("type") or "")
+    if server or "mcp" in item_type.lower():
+        category = "mcp"
+    elif command or normalized_names & {"exec", "exec_command", "local_shell_call"}:
+        category = "shell"
+    elif files or normalized_names & {"apply_patch", "patch_apply", "write_file"}:
+        category = "write"
+    elif "update_plan" in normalized_names:
+        category = "plan"
+    elif any("web" in name or "search" in name for name in normalized_names):
+        category = "web"
+    elif any("image" in name for name in normalized_names):
+        category = "image"
+    elif normalized_names & {"wait", "write_stdin"}:
+        category = "background"
+    else:
+        category = explicit_category or "tool"
     metadata.update(
         {
             "call_id": str(call_id or ""),
-            "category": str(payload.get("tool_type") or item.get("type") or item_type),
-            "display_name": str(
-                payload.get("name")
-                or payload.get("command")
-                or item.get("name")
-                or item.get("command")
-                or item_type
-            ),
+            "category": category,
+            "tool_name": tool_name,
+            "display_name": display_name,
+            "display_name_is_fallback": fallback_name,
             "command": command,
             "cwd": cwd,
             "arguments": _bounded_metadata_text(input_value),
             "output": output,
             "files": files,
-            "nested_tools": _nested_tool_names(input_value),
-            "server": _bounded_metadata_text(payload.get("server") or item.get("server"), 160),
+            "nested_tools": nested_tools,
+            "server": server,
             "tool": _bounded_metadata_text(payload.get("tool") or item.get("tool"), 160),
         }
     )

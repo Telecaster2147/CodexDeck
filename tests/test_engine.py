@@ -396,6 +396,12 @@ class EngineTests(unittest.TestCase):
 
             self.assertEqual(running.sessions[0].lifecycle, LifecycleState.RUNNING_TOOL)
             self.assertEqual(running.sessions[0].phase, "工具正在运行")
+            self.assertEqual(running.sessions[0].current_operation.label, "写入文件")
+            self.assertEqual(running.sessions[0].current_operation.category, "write")
+            self.assertEqual(
+                running.sessions[0].tool_executions[-1].tool_name,
+                "write_file",
+            )
             self.assertEqual(discovery.calls, discovery_calls)
             self.assertEqual(sockets.calls, socket_calls)
 
@@ -416,6 +422,14 @@ class EngineTests(unittest.TestCase):
             completed = engine.refresh_events(running)
 
             self.assertEqual(completed.sessions[0].phase, "工具已返回")
+            self.assertEqual(
+                completed.sessions[0].tool_executions[-1].display_name,
+                "写入文件",
+            )
+            self.assertEqual(
+                completed.sessions[0].tool_executions[-1].tool_name,
+                "write_file",
+            )
             self.assertEqual(discovery.calls, discovery_calls)
             self.assertEqual(sockets.calls, socket_calls)
             engine.close()

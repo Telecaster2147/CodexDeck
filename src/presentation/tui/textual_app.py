@@ -88,6 +88,12 @@ def session_status(session: SessionHealth) -> str:
             "AUTH_ELICITATION": "等待登录操作",
         }
         return labels.get(session.attention.value, "等待用户操作")
+    if (
+        session.lifecycle == LifecycleState.RUNNING_TOOL
+        and session.current_operation.category != "idle"
+        and session.current_operation.label
+    ):
+        return f"{session.phase or '工具正在运行'} · {session.current_operation.label}"
     if session.phase and (
         session.phase != LIFECYCLE_LABELS[LifecycleState.IDLE.value]
         or session.lifecycle == LifecycleState.IDLE
@@ -162,6 +168,15 @@ def workspace_groups(sessions: Iterable[SessionHealth]) -> list[tuple[str, list[
     return sorted(groups.items(), key=lambda item: item[0].casefold())
 
 
+def _tool_name_is_fallback(metadata: dict[str, object]) -> bool:
+    name = str(metadata.get("display_name") or "")
+    return bool(
+        metadata.get("display_name_is_fallback")
+        or name.endswith("_output")
+        or "tool_call_output" in name
+    )
+
+
 def event_severity(kind: str) -> tuple[str, str]:
     if kind in {
         "TURN_FAILED",
@@ -202,6 +217,11 @@ def timeline_entries(
 ) -> list[object]:
     preferences = preferences or TuiPreferences()
     tools = {item.call_id: item for item in session.tool_executions}
+    tool_starts = {
+        str(event.metadata.get("call_id")): event
+        for event in session.events
+        if event.kind == "TOOL_RUNNING" and event.metadata.get("call_id")
+    }
     entries: list[object] = []
     for event in session.events:
         hidden = {
@@ -223,20 +243,36 @@ def timeline_entries(
             continue
         call_id = str(event.metadata.get("call_id") or "")
         tool = tools.get(call_id)
-        if tool and event.kind in {"TOOL_RUNNING", "TOOL_COMPLETED"}:
+        start = tool_starts.get(call_id)
+        if event.kind in {"TOOL_RUNNING", "TOOL_COMPLETED"} and (tool or start):
+            start_metadata = start.metadata if start else {}
+            fallback_name = _tool_name_is_fallback(event.metadata)
+
+            def resolved(name: str, summary_value: object = "") -> object:
+                if summary_value not in (None, "", (), []):
+                    return summary_value
+                current = event.metadata.get(name)
+                if name in {"category", "display_name", "tool_name"} and fallback_name:
+                    current = None
+                return current or start_metadata.get(name)
+
             metadata = {
                 **event.metadata,
-                "category": tool.category,
-                "display_name": tool.display_name,
-                "command": event.metadata.get("command") or tool.command,
-                "cwd": event.metadata.get("cwd") or tool.cwd,
-                "arguments": event.metadata.get("arguments") or tool.arguments,
-                "output": event.metadata.get("output") or tool.output,
-                "files": event.metadata.get("files") or list(tool.files),
+                "category": resolved("category", tool.category if tool else ""),
+                "display_name": resolved(
+                    "display_name", tool.display_name if tool else ""
+                ),
+                "tool_name": resolved("tool_name", tool.tool_name if tool else ""),
+                "command": resolved("command", tool.command if tool else ""),
+                "cwd": resolved("cwd", tool.cwd if tool else ""),
+                "arguments": resolved("arguments", tool.arguments if tool else ""),
+                "output": resolved("output", tool.output if tool else ""),
+                "files": resolved("files", list(tool.files) if tool else []),
+                "nested_tools": resolved("nested_tools"),
             }
             detail = event.detail
-            if not detail or detail.endswith("_output"):
-                detail = tool.display_name
+            if not detail or _tool_name_is_fallback({"display_name": detail}):
+                detail = str(metadata.get("display_name") or metadata.get("tool_name") or "")
             event = replace(event, detail=detail, metadata=metadata)
         if event.kind.startswith("COMPACT") and auto_compact_token_limit:
             event = replace(
@@ -801,7 +837,9 @@ def _timeline_signature(event: object) -> tuple[object, ...]:
 
 
 def _trace_tag(kind: str, metadata: dict[str, object]) -> str:
-    name = str(metadata.get("display_name") or "").lower()
+    name = " ".join(
+        str(metadata.get(key) or "") for key in ("tool_name", "display_name")
+    ).lower()
     category = str(metadata.get("category") or "").lower()
     nested_tools = [str(item) for item in (metadata.get("nested_tools") or [])]
     if kind == "ACTION_REQUIRED":
@@ -872,6 +910,26 @@ def _timeline_line(
     metadata = _value(event, "metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     tag = _trace_tag(kind, metadata)
+    if kind in {"TOOL_RUNNING", "TOOL_COMPLETED"}:
+        tool_label = str(
+            metadata.get("display_name")
+            or metadata.get("tool_name")
+            or detail
+            or "工具"
+        )
+        failed = (
+            metadata.get("exit_code") not in (None, 0)
+            or str(metadata.get("completion_status") or "").lower()
+            in {"failed", "error", "errored"}
+        )
+        if kind == "TOOL_RUNNING":
+            summary = f"正在调用 {tool_label}"
+        elif failed:
+            summary = f"{tool_label} 调用失败"
+        else:
+            summary = f"{tool_label} 调用完成"
+        if detail == tool_label or _tool_name_is_fallback({"display_name": detail}):
+            detail = ""
     table = Table.grid(expand=True, padding=0)
     table.add_column(width=8, no_wrap=True)
     table.add_column(width=3, no_wrap=True)
@@ -899,9 +957,12 @@ def _timeline_line(
         )
 
     command = _trace_excerpt(metadata.get("command"), max_lines=4, max_chars=700)
+    tool_name = str(metadata.get("tool_name") or "")
     cwd = str(metadata.get("cwd") or "")
     files = [str(path) for path in (metadata.get("files") or [])]
     nested_tools = [str(name) for name in (metadata.get("nested_tools") or []) if name]
+    if tool_name:
+        add_detail("TOOL", tool_name, "#7dd3fc")
     if command:
         add_detail("CMD", f"$ {command}", "#e2e8f0")
     if cwd:

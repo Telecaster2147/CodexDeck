@@ -630,20 +630,38 @@ class SessionStateMachine:
                 "error",
                 "errored",
             }
+            raw_output_name = str(event.metadata.get("display_name") or "")
+            output_name_is_fallback = bool(
+                event.metadata.get("display_name_is_fallback")
+                or raw_output_name.endswith("_output")
+                or "tool_call_output" in raw_output_name
+            )
+            event_display_name = raw_output_name
+            event_tool_name = str(event.metadata.get("tool_name") or "")
+            display_name = (
+                str(start.metadata.get("display_name") or "")
+                if start and (output_name_is_fallback or not event_display_name)
+                else event_display_name
+            )
+            tool_name = (
+                str(start.metadata.get("tool_name") or "")
+                if start and (output_name_is_fallback or not event_tool_name)
+                else event_tool_name
+            )
             summaries.append(
                 ToolExecutionSummary(
                     call_id=identity,
                     turn_id=event.turn_id or (start.turn_id if start else ""),
                     category=str(
-                        event.metadata.get("category")
+                        (
+                            start.metadata.get("category")
+                            if start and output_name_is_fallback
+                            else event.metadata.get("category")
+                        )
                         or (start.metadata.get("category") if start else "tool")
                     ),
-                    display_name=str(
-                        event.metadata.get("display_name")
-                        or (start.metadata.get("display_name") if start else "")
-                        or event.detail
-                        or "tool"
-                    ),
+                    display_name=str(display_name or event.detail or "tool"),
+                    tool_name=tool_name,
                     started_at=(
                         float(start.metadata["started_at"])
                         if start and isinstance(start.metadata.get("started_at"), (int, float))
@@ -700,6 +718,7 @@ class SessionStateMachine:
                     turn_id=start.turn_id,
                     category=str(start.metadata.get("category") or "tool"),
                     display_name=str(start.metadata.get("display_name") or start.detail or "tool"),
+                    tool_name=str(start.metadata.get("tool_name") or ""),
                     started_at=(
                         float(start.metadata["started_at"])
                         if isinstance(start.metadata.get("started_at"), (int, float))
@@ -726,6 +745,7 @@ class SessionStateMachine:
                         display_name=str(
                             start.metadata.get("display_name") or start.detail or "tool"
                         ),
+                        tool_name=str(start.metadata.get("tool_name") or ""),
                         started_at=start.timestamp,
                         status="running",
                         command=str(start.metadata.get("command") or ""),

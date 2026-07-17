@@ -500,14 +500,23 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 "TOOL_RUNNING",
                 "工具正在运行",
                 source_id="start",
-                metadata={"call_id": "call-1", "display_name": "exec"},
+                metadata={
+                    "call_id": "call-1",
+                    "display_name": "Shell 命令",
+                    "tool_name": "exec_command",
+                    "command": "uv run tests",
+                },
             ),
             NormalizedEvent(
                 3.0,
                 "TOOL_COMPLETED",
                 "工具已返回",
                 source_id="done",
-                metadata={"call_id": "call-1", "display_name": "exec"},
+                metadata={
+                    "call_id": "call-1",
+                    "display_name": "custom_tool_call_output",
+                    "display_name_is_fallback": True,
+                },
             ),
         ]
 
@@ -516,6 +525,13 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([_kind(item) for item in operational], ["TOOL_COMPLETED"])
         self.assertEqual(operational[0].metadata["duration_seconds"], 2.0)
+        self.assertEqual(operational[0].metadata["display_name"], "Shell 命令")
+        self.assertEqual(operational[0].metadata["tool_name"], "exec_command")
+        rendered = render_plain(_timeline_line(operational[0]))
+        self.assertIn("Shell 命令 调用完成", rendered)
+        self.assertIn("TOOL", rendered)
+        self.assertIn("exec_command", rendered)
+        self.assertNotIn("custom_tool_call_output", rendered)
         self.assertEqual(
             [_kind(item) for item in diagnostic], ["TOOL_RUNNING", "TOOL_COMPLETED"]
         )
@@ -712,6 +728,16 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session_status(session), "正在压缩上下文")
         self.assertEqual(session_marker(session)[0], "C")
+
+        session.lifecycle = LifecycleState.RUNNING_TOOL
+        session.phase = "工具正在运行"
+        session.current_operation = CurrentOperationSummary(
+            "write",
+            "写入文件",
+            "workspace-a/result.txt",
+        )
+
+        self.assertEqual(session_status(session), "工具正在运行 · 写入文件")
 
     def test_state_symbols_remain_distinct_without_color(self) -> None:
         session = make_snapshot(1).sessions[0]

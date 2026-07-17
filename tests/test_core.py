@@ -218,8 +218,14 @@ class EventNormalizationTests(unittest.TestCase):
         self.assertEqual(metadata["cwd"], "/workspace/project")
         self.assertEqual(metadata["files"], ["/workspace/project/src/app.py"])
         self.assertEqual(metadata["nested_tools"], ["exec_command", "apply_patch"])
+        self.assertEqual(metadata["tool_name"], "exec_command + apply_patch")
+        self.assertEqual(metadata["display_name"], "Shell 命令 + 应用补丁")
+        self.assertEqual(metadata["category"], "shell")
         output = events[1].metadata
         self.assertEqual(output["output"], "")
+        self.assertEqual(output["tool_name"], "")
+        self.assertEqual(output["display_name"], "")
+        self.assertTrue(output["display_name_is_fallback"])
         self.assertTrue(output["background_running"])
         self.assertEqual(output["background_cell_id"], "199")
         self.assertEqual(output["background_wait_seconds"], 10.0)
@@ -257,6 +263,41 @@ class EventNormalizationTests(unittest.TestCase):
             events[0].metadata["change_types"]["/workspace/project/src/app.py"],
             "update",
         )
+
+    def test_tool_names_are_specific_for_plan_and_mcp_calls(self) -> None:
+        plan = normalize_rollout_record(
+            {
+                "timestamp": 10.0,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "call-plan",
+                    "name": "update_plan",
+                    "input": '{"plan":[]}',
+                },
+            },
+            "plan",
+        )[0]
+        mcp = normalize_rollout_record(
+            {
+                "timestamp": 11.0,
+                "type": "event_msg",
+                "payload": {
+                    "type": "mcp_tool_call_begin",
+                    "call_id": "call-mcp",
+                    "server": "filesystem",
+                    "tool": "read_file",
+                },
+            },
+            "mcp",
+        )[0]
+
+        self.assertEqual(plan.metadata["tool_name"], "update_plan")
+        self.assertEqual(plan.metadata["display_name"], "更新计划")
+        self.assertEqual(plan.metadata["category"], "plan")
+        self.assertEqual(mcp.metadata["tool_name"], "read_file")
+        self.assertEqual(mcp.metadata["display_name"], "MCP filesystem/read_file")
+        self.assertEqual(mcp.metadata["category"], "mcp")
 
     def test_real_compaction_log_shapes_mark_start_and_completion(self) -> None:
         start = normalize_log(
