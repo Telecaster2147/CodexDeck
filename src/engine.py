@@ -19,6 +19,7 @@ from codex.processes import DiscoveryResult, ProcessDiscovery
 from codex.rollout import RolloutActivity, RolloutReader, latest_user_task, rollout_identity
 from codex.state_store import StateStore
 from codex.tui_session_log import TuiSessionLogReader, configured_session_log_path
+from codex.terminal import RegularFileTailCollector, TerminalStore
 from diagnostics import CollectorTracker
 from history import HistoryStore
 from models import (
@@ -84,6 +85,10 @@ class MonitorEngine:
         self.rollout_path_cache: dict[str, tuple[Path | None, str]] = {}
         self.store_cache: dict[str, StateStore] = {}
         self.live_sessions: dict[str, SessionHealth] = {}
+        self.terminals = TerminalStore()
+        self.terminal_files = RegularFileTailCollector(
+            getattr(self.proc, "root", Path("/proc"))
+        )
         self.retired_sessions: dict[str, tuple[SessionHealth, float]] = {}
         self.instance_templates: dict[str, InstanceSnapshot] = {}
         self.pinned_session_key = ""
@@ -384,6 +389,7 @@ class MonitorEngine:
                     continue
                 incoming = events_by_session.get(process.session_id, [])
                 incoming.extend(hook_events_by_session.get(process.session_id, []))
+                session_key = f"{instance_id}:{process.session_id}"
                 rollout_activity = RolloutActivity(
                     process.rollout_path,
                     time.time(),
@@ -394,6 +400,16 @@ class MonitorEngine:
                     )
                     rollout_activity = rollout_result.activity
                     incoming.extend(rollout_result.events)
+                    self.terminals.apply(session_key, rollout_result.terminal_updates)
+                self.terminals.apply(
+                    session_key,
+                    self.terminal_files.read(
+                        session_key,
+                        process.cwd,
+                        process.activity.children,
+                        time.time(),
+                    ),
+                )
                 instance_rollout_activity.append(
                     self._rollout_activity_value(rollout_activity)
                 )
@@ -402,7 +418,6 @@ class MonitorEngine:
                     codex_config.auto_compact_token_limit,
                     codex_config.auto_compact_token_limit_scope,
                 )
-                session_key = f"{instance_id}:{process.session_id}"
                 if session_key in self.retired_sessions:
                     incoming.append(
                         NormalizedEvent(
@@ -536,6 +551,7 @@ class MonitorEngine:
                         network,
                         observation=observation,
                     )
+                session.terminal_sessions = self.terminals.summaries(session_key)
                 sessions.append(session)
                 self.previous_sockets[process.stable_key] = after
             self.collectors.record(f"rollout:{instance_id}", rollout_started)
@@ -733,6 +749,8 @@ class MonitorEngine:
                     continue
                 rollout_activity = RolloutActivity(process.rollout_path, time.time())
                 rollout_events: tuple[NormalizedEvent, ...] = ()
+                terminal_changed = False
+                key = f"{session.instance_id}:{session.session_id}"
                 if process.rollout_path:
                     rollout_paths.add(process.rollout_path)
                     rollout_result = self.rollouts.read_with_activity(
@@ -740,6 +758,9 @@ class MonitorEngine:
                     )
                     rollout_activity = rollout_result.activity
                     rollout_events = rollout_result.events
+                    terminal_changed = self.terminals.apply(
+                        key, rollout_result.terminal_updates
+                    )
                 rollout_activity_values.append(
                     self._rollout_activity_value(rollout_activity)
                 )
@@ -774,14 +795,13 @@ class MonitorEngine:
                         if session_id == session.session_id
                     )
                 incoming.extend(hook_events_by_session.get(session.session_id, []))
-                if incoming or rollout_activity.changed:
+                if incoming or rollout_activity.changed or terminal_changed:
                     changed = True
                     incoming = self._with_compact_config(
                         incoming,
                         instance.auto_compact_token_limit,
                         instance.auto_compact_token_limit_scope,
                     )
-                    key = f"{session.instance_id}:{session.session_id}"
                     self.machine.ingest(key, incoming)
                     observation = self._observation_pulse(
                         session,
@@ -838,6 +858,7 @@ class MonitorEngine:
                             default=None,
                         ),
                     )
+                session.terminal_sessions = self.terminals.summaries(key)
                 refreshed_sessions.append(session)
                 refreshed_processes[process.stable_key] = session.process
 

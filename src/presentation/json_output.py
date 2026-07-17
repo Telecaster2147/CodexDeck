@@ -52,6 +52,10 @@ def _normalize_nulls(value: object, field: str = "") -> object:
 
 def snapshot_dict(snapshot: MonitorSnapshot, *, show_auxiliary: bool = False) -> dict[str, object]:
     instances = _normalize_nulls(json_value(snapshot.instances))
+    for instance in instances:
+        for session in instance["sessions"]:
+            for terminal in session.get("terminal_sessions", []):
+                terminal.pop("chunks", None)
     if not show_auxiliary:
         for instance in instances:
             instance["processes"] = [

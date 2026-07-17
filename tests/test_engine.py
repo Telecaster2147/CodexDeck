@@ -481,6 +481,93 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(sockets.calls, socket_calls)
             engine.close()
 
+    def test_fast_refresh_appends_background_terminal_poll_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 46, "session-terminal", False
+            )
+            discovery = FakeDiscovery(
+                DiscoveryResult([process], {instance.instance_id: instance})
+            )
+            sockets = FakeSockets([{}, {}])
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=discovery,
+                sockets=sockets,
+                proc=FakeProc(),
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            discovery_calls = discovery.calls
+            socket_calls = sockets.calls
+            rollout = Path(snapshot.sessions[0].process.rollout_path)
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+            def append(payload: dict[str, object]) -> None:
+                with rollout.open("a") as handle:
+                    handle.write(
+                        json.dumps(
+                            {"timestamp": timestamp, "type": "response_item", "payload": payload}
+                        )
+                        + "\n"
+                    )
+
+            append(
+                {
+                    "type": "function_call",
+                    "call_id": "call-start",
+                    "name": "exec_command",
+                    "arguments": json.dumps(
+                        {"cmd": "server --watch", "workdir": "/workspace-a"}
+                    ),
+                }
+            )
+            append(
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-start",
+                    "output": (
+                        "Script running with cell ID 777\n"
+                        "Wall time 1 seconds\nOutput:\nready\n"
+                    ),
+                }
+            )
+            running = engine.refresh_events(snapshot)
+
+            self.assertEqual(len(running.sessions[0].terminal_sessions), 1)
+            terminal = running.sessions[0].terminal_sessions[0]
+            self.assertEqual(terminal.process_id, "777")
+            self.assertEqual(terminal.status, "running")
+            self.assertEqual(terminal.chunks[0].text, "ready")
+
+            append(
+                {
+                    "type": "function_call",
+                    "call_id": "call-poll",
+                    "name": "write_stdin",
+                    "arguments": json.dumps({"session_id": 777, "chars": ""}),
+                }
+            )
+            append(
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-poll",
+                    "output": "request complete\n",
+                }
+            )
+            refreshed = engine.refresh_events(running)
+
+            terminal = refreshed.sessions[0].terminal_sessions[0]
+            self.assertEqual(
+                "".join(chunk.text for chunk in terminal.chunks),
+                "readyrequest complete\n",
+            )
+            self.assertEqual(discovery.calls, discovery_calls)
+            self.assertEqual(sockets.calls, socket_calls)
+            engine.close()
+
     def test_session_log_typed_compact_is_seen_on_fast_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

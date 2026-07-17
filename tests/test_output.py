@@ -23,6 +23,9 @@ from models import (  # noqa: E402
     RateLimitSummary,
     RateLimitWindow,
     SessionHealth,
+    TerminalCapability,
+    TerminalChunk,
+    TerminalSessionSummary,
     TokenUsageSummary,
     ToolExecutionSummary,
     TurnSummary,
@@ -119,6 +122,28 @@ def snapshot_with_metrics() -> MonitorSnapshot:
 
 
 class OutputTests(unittest.TestCase):
+    def test_json_exposes_terminal_summary_without_transcript_body(self) -> None:
+        result = snapshot()
+        result.sessions[0].terminal_sessions = [
+            TerminalSessionSummary(
+                "terminal-1",
+                process_id="321",
+                command="server --watch",
+                status="running",
+                capability=TerminalCapability.POLL_TRANSCRIPT,
+                retained_bytes=12,
+                chunks=(TerminalChunk("source", 1.0, text="TOKEN=secret\n"),),
+            )
+        ]
+
+        terminal = json.loads(render_json(result, pretty=False))["instances"][0]["sessions"][0][
+            "terminal_sessions"
+        ][0]
+
+        self.assertEqual(terminal["process_id"], "321")
+        self.assertEqual(terminal["capability"], "POLL_TRANSCRIPT")
+        self.assertNotIn("chunks", terminal)
+
     def test_attention_is_present_in_json_text_and_metrics(self) -> None:
         result = snapshot()
         session = result.sessions[0]
