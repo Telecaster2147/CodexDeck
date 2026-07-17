@@ -657,6 +657,8 @@ class MonitorEngine:
         }
         retained_keys = set(self.retired_sessions)
         self.machine.prune(active_session_keys | retained_keys)
+        self.terminals.prune(active_session_keys | retained_keys)
+        self.terminal_files.prune(active_session_keys)
         self.rollout_path_cache = {
             key: value
             for key, value in self.rollout_path_cache.items()
@@ -1170,6 +1172,8 @@ class MonitorEngine:
                 now,
                 observation=session.observation,
             )
+            self.terminals.mark_stale(key)
+            retained.terminal_sessions = self.terminals.summaries(key)
             self.retired_sessions[key] = (retained, now)
 
         expiry = now - self.machine.lookback_seconds

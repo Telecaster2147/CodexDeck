@@ -13,17 +13,19 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.paths import ResolvedInstance  # noqa: E402
+from codex.paths import ProcReader, ResolvedInstance  # noqa: E402
 from codex.processes import DiscoveryResult  # noqa: E402
 from engine import MonitorEngine  # noqa: E402
 from history import HistoryStore  # noqa: E402
 from app import exit_code  # noqa: E402
 from models import (  # noqa: E402
     CodexPaths,
+    ChildProcessActivity,
     LifecycleState,
     NetworkState,
     ProcessIdentity,
     ProcessInfo,
+    ProcessTreeActivity,
     SocketInfo,
 )
 from utils import CommandError  # noqa: E402
@@ -75,6 +77,17 @@ class FailingSockets:
 class FakeProc:
     def fd_targets(self, pid: int):
         return []
+
+
+class FixedProcessActivity:
+    def __init__(self, activity: ProcessTreeActivity) -> None:
+        self.activity = activity
+
+    def snapshot(self, identity: ProcessIdentity) -> ProcessTreeActivity:
+        return self.activity
+
+    def prune(self, active_identities: set[str]) -> None:
+        return None
 
 
 class SessionLogProc(FakeProc):
@@ -239,6 +252,56 @@ def create_instance(
 
 
 class EngineTests(unittest.TestCase):
+    def test_full_sample_tails_child_stdout_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance, process = create_instance(
+                root / "one", 38, "session-file-tail", False
+            )
+            log = root / "one" / "server.log"
+            log.write_text("ready\n")
+            proc_root = root / "proc"
+            fd_dir = proc_root / "4242" / "fd"
+            fd_dir.mkdir(parents=True)
+            (fd_dir / "1").symlink_to(log)
+            child = ChildProcessActivity(
+                ProcessIdentity(4242, 99), command="server", state="S", active=True
+            )
+            activity = ProcessTreeActivity(
+                available=True,
+                sampled_at=time.time(),
+                child_count=1,
+                children=(child,),
+            )
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult([process], {instance.instance_id: instance})
+                ),
+                sockets=FakeSockets([{}, {}, {}]),
+                proc=ProcReader(proc_root),
+                process_activity=FixedProcessActivity(activity),
+            )
+            engine.baseline()
+            first = engine.sample()
+
+            terminal = first.sessions[0].terminal_sessions[0]
+            self.assertEqual(terminal.capability.value, "FILE_TAIL")
+            self.assertEqual(terminal.process_id, "os:4242:99")
+            self.assertEqual(terminal.chunks[0].text, "ready\n")
+
+            with log.open("a") as handle:
+                handle.write("request\n")
+            second = engine.sample()
+
+            self.assertEqual(
+                "".join(chunk.text for chunk in second.sessions[0].terminal_sessions[0].chunks),
+                "ready\nrequest\n",
+            )
+            engine.close()
+
     def test_history_windows_are_attached_to_instance_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -841,6 +904,41 @@ class EngineTests(unittest.TestCase):
             )
             active = DiscoveryResult([process], {instance.instance_id: instance})
             empty = DiscoveryResult([], {})
+            rollout = next(instance.paths.sessions_dir.glob("*.jsonl"))
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with rollout.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": timestamp,
+                            "type": "response_item",
+                            "payload": {
+                                "type": "function_call",
+                                "call_id": "call-exited",
+                                "name": "exec_command",
+                                "arguments": json.dumps({"cmd": "server --watch"}),
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": timestamp,
+                            "type": "response_item",
+                            "payload": {
+                                "type": "function_call_output",
+                                "call_id": "call-exited",
+                                "output": (
+                                    "Script running with cell ID 888\n"
+                                    "Wall time 1 seconds\nOutput:\nready\n"
+                                ),
+                            },
+                        }
+                    )
+                    + "\n"
+                )
             engine = MonitorEngine(
                 0.1,
                 30,
@@ -850,13 +948,17 @@ class EngineTests(unittest.TestCase):
                 proc=FakeProc(),
             )
             engine.baseline()
-            self.assertFalse(engine.sample().sessions[0].process_exited)
+            active_snapshot = engine.sample()
+            self.assertFalse(active_snapshot.sessions[0].process_exited)
+            self.assertEqual(active_snapshot.sessions[0].terminal_sessions[0].process_id, "888")
             exited = engine.sample()
             self.assertTrue(exited.sessions[0].process_exited)
             self.assertEqual(exited.sessions[0].network.state, NetworkState.CLOSED)
             self.assertTrue(
                 any(event.kind == "PROCESS_EXITED" for event in exited.sessions[0].events)
             )
+            self.assertEqual(exited.sessions[0].terminal_sessions[0].process_id, "888")
+            self.assertTrue(exited.sessions[0].terminal_sessions[0].stale)
             self.assertEqual(exit_code(exited), 0)
             engine.close()
 

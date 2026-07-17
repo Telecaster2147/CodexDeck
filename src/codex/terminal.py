@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from utils import redact_sensitive
 MAX_TERMINAL_BYTES = 2 * 1024 * 1024
 MAX_TERMINAL_CHUNKS = 4_000
 MAX_TERMINALS_PER_SESSION = 16
+MAX_GLOBAL_TERMINAL_BYTES = 16 * 1024 * 1024
 
 _OSC = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.DOTALL)
 _STRING_ESCAPE = re.compile(r"\x1b[PX^_].*?\x1b\\", re.DOTALL)
@@ -237,6 +239,11 @@ def extract_terminal_updates(
 
     if output_value is not None:
         text, stream, output_process, exit_code, truncated = _output_fields(output_value)
+        declared_exit = payload.get("exit_code")
+        if declared_exit is None:
+            declared_exit = item.get("exit_code")
+        if exit_code is None and isinstance(declared_exit, (int, float)):
+            exit_code = int(declared_exit)
         process_id = process_id or output_process
         running = bool(output_process and exit_code is None)
         return (
@@ -466,6 +473,7 @@ class TerminalStore:
             self.seen_sources[session_key].add(update.source_id)
             changed = True
         self._trim_sessions(session_key)
+        self._trim_global()
         return changed
 
     def _trim_sessions(self, session_key: str) -> None:
@@ -495,10 +503,49 @@ class TerminalStore:
             )
         ]
 
+    def _trim_global(self) -> None:
+        terminals = [
+            terminal
+            for values in self.sessions.values()
+            for terminal in values.values()
+        ]
+        total = sum(terminal.retained_bytes for terminal in terminals)
+        if total <= MAX_GLOBAL_TERMINAL_BYTES:
+            return
+        ordered = sorted(
+            terminals,
+            key=lambda item: (
+                item.status == "running",
+                item.last_output_at or item.completed_at or item.started_at or 0.0,
+            ),
+        )
+        while total > MAX_GLOBAL_TERMINAL_BYTES and ordered:
+            progressed = False
+            for terminal in ordered:
+                if not terminal.chunks:
+                    continue
+                removed = terminal.chunks.popleft()
+                size = len(removed.text.encode("utf-8", errors="replace"))
+                terminal.retained_bytes = max(0, terminal.retained_bytes - size)
+                terminal.dropped_bytes += size
+                total -= size
+                progressed = True
+                if total <= MAX_GLOBAL_TERMINAL_BYTES:
+                    break
+            if not progressed:
+                break
+
     def mark_stale(self, session_key: str) -> None:
         for terminal in self.sessions.get(session_key, {}).values():
             if terminal.status == "running":
                 terminal.stale = True
+
+    def prune(self, retained_session_keys: set[str]) -> None:
+        for session_key in set(self.sessions) - retained_session_keys:
+            self.sessions.pop(session_key, None)
+            self.call_ids.pop(session_key, None)
+            self.process_ids.pop(session_key, None)
+            self.seen_sources.pop(session_key, None)
 
 
 @dataclass
@@ -506,6 +553,7 @@ class _FileCursor:
     device: int
     inode: int
     offset: int = 0
+    partial: bytes = b""
 
 
 class RegularFileTailCollector:
@@ -578,6 +626,7 @@ class RegularFileTailCollector:
                     self.cursors[cursor_key] = cursor
                 elif size < cursor.offset:
                     cursor.offset = 0
+                    cursor.partial = b""
                 if size <= cursor.offset:
                     continue
                 try:
@@ -590,6 +639,9 @@ class RegularFileTailCollector:
                     continue
                 if not payload:
                     continue
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                decoded = decoder.decode(cursor.partial + payload, final=False)
+                cursor.partial = decoder.getstate()[0]
                 streams = {1: "stdout", 2: "stderr"}
                 stream = (
                     streams[next(iter(fds))]
@@ -605,7 +657,7 @@ class RegularFileTailCollector:
                         cwd=workspace,
                         status="running",
                         stream=stream,
-                        output=sanitize_terminal_text(payload.decode("utf-8", errors="replace")),
+                        output=sanitize_terminal_text(decoded),
                         capability=TerminalCapability.FILE_TAIL,
                         terminal_candidate=True,
                         upstream_truncated=upstream_truncated,
@@ -618,3 +670,8 @@ class RegularFileTailCollector:
             if key[0] != session_key or key in active_keys
         }
         return tuple(updates)
+
+    def prune(self, retained_session_keys: set[str]) -> None:
+        self.cursors = {
+            key: cursor for key, cursor in self.cursors.items() if key[0] in retained_session_keys
+        }
