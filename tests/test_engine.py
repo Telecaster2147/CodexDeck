@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from codex.paths import ResolvedInstance  # noqa: E402
 from codex.processes import DiscoveryResult  # noqa: E402
 from engine import MonitorEngine  # noqa: E402
+from history import HistoryStore  # noqa: E402
 from app import exit_code  # noqa: E402
 from models import (  # noqa: E402
     CodexPaths,
@@ -73,6 +75,17 @@ class FailingSockets:
 class FakeProc:
     def fd_targets(self, pid: int):
         return []
+
+
+class SessionLogProc(FakeProc):
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def environ(self, pid: int):
+        return {
+            "CODEX_TUI_RECORD_SESSION": "1",
+            "CODEX_TUI_SESSION_LOG_PATH": str(self.path),
+        }
 
 
 class FakePacketInspector:
@@ -226,6 +239,60 @@ def create_instance(
 
 
 class EngineTests(unittest.TestCase):
+    def test_history_windows_are_attached_to_instance_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance, process = create_instance(root / "one", 39, "session-history", False)
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            history = HistoryStore(root / "history.sqlite", max_days=None, max_bytes=None)
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{}, {}]),
+                proc=FakeProc(),
+                history=history,
+            )
+
+            engine.baseline()
+            snapshot = engine.sample()
+
+            self.assertEqual(
+                [window.label for window in snapshot.instances[0].history_windows],
+                ["15m", "1h", "24h"],
+            )
+            self.assertTrue(
+                all(window.sample_count >= 1 for window in snapshot.instances[0].history_windows)
+            )
+            engine.close()
+
+    def test_instance_reads_auto_compact_boundary_from_its_codex_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 40, "session-config", False
+            )
+            (instance.paths.codex_home / "config.toml").write_text(
+                "model_auto_compact_token_limit = 220_000\n",
+                encoding="utf-8",
+            )
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{}, {}]),
+                proc=FakeProc(),
+            )
+
+            engine.baseline()
+            snapshot = engine.sample()
+
+            self.assertEqual(snapshot.instances[0].auto_compact_token_limit, 220_000)
+            self.assertEqual(snapshot.instances[0].auto_compact_config_source, "config.toml")
+            engine.close()
+
     def test_multi_instance_isolation_and_failure_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -259,6 +326,247 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(sessions["session-one"].process.cwd, str(first.paths.codex_home))
             self.assertEqual(discovery.calls, 2)
             self.assertEqual(sockets.calls, 2)
+
+    def test_transient_thread_record_miss_preserves_last_known_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 43, "session-model", False
+            )
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{}, {}, {}]),
+                proc=FakeProc(),
+            )
+            engine.baseline()
+            first = engine.sample().sessions[0]
+            self.assertEqual(first.process.model, "gpt-test")
+
+            engine.store_cache[instance.instance_id].threads = lambda _: {}
+            second = engine.sample().sessions[0]
+
+            self.assertEqual(second.process.model, "gpt-test")
+            self.assertEqual(second.process.reasoning_effort, "high")
+            engine.close()
+
+    def test_fast_event_refresh_observes_tool_start_without_full_sampling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 44, "session-fast", False
+            )
+            discovery = FakeDiscovery(
+                DiscoveryResult([process], {instance.instance_id: instance})
+            )
+            sockets = FakeSockets([{}, {}])
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=discovery,
+                sockets=sockets,
+                proc=FakeProc(),
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            self.assertIs(engine.refresh_events(snapshot), snapshot)
+            discovery_calls = discovery.calls
+            socket_calls = sockets.calls
+            rollout = Path(snapshot.sessions[0].process.rollout_path)
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with rollout.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": timestamp,
+                            "type": "response_item",
+                            "payload": {
+                                "type": "custom_tool_call",
+                                "call_id": "call-fast",
+                                "name": "write_file",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+            running = engine.refresh_events(snapshot)
+
+            self.assertEqual(running.sessions[0].lifecycle, LifecycleState.RUNNING_TOOL)
+            self.assertEqual(running.sessions[0].phase, "工具正在运行")
+            self.assertEqual(discovery.calls, discovery_calls)
+            self.assertEqual(sockets.calls, socket_calls)
+
+            with rollout.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": timestamp,
+                            "type": "response_item",
+                            "payload": {
+                                "type": "custom_tool_call_output",
+                                "call_id": "call-fast",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            completed = engine.refresh_events(running)
+
+            self.assertEqual(completed.sessions[0].phase, "工具已返回")
+            self.assertEqual(discovery.calls, discovery_calls)
+            self.assertEqual(sockets.calls, socket_calls)
+            engine.close()
+
+    def test_fast_refresh_publishes_rollout_growth_without_timeline_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 45, "session-growth", False
+            )
+            discovery = FakeDiscovery(
+                DiscoveryResult([process], {instance.instance_id: instance})
+            )
+            sockets = FakeSockets([{}, {}])
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=discovery,
+                sockets=sockets,
+                proc=FakeProc(),
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            event_count = len(snapshot.sessions[0].events)
+            discovery_calls = discovery.calls
+            socket_calls = sockets.calls
+            rollout = Path(snapshot.sessions[0].process.rollout_path)
+            with rollout.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "type": "event_msg",
+                            "payload": {"type": "thread_goal_updated"},
+                        }
+                    )
+                    + "\n"
+                )
+
+            refreshed = engine.refresh_events(snapshot)
+
+            self.assertIsNot(refreshed, snapshot)
+            self.assertEqual(len(refreshed.sessions[0].events), event_count)
+            self.assertGreater(
+                refreshed.sessions[0].observation.rollout_bytes_delta,
+                0,
+            )
+            self.assertEqual(discovery.calls, discovery_calls)
+            self.assertEqual(sockets.calls, socket_calls)
+            engine.close()
+
+    def test_session_log_typed_compact_is_seen_on_fast_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance, process = create_instance(
+                root / "one", 46, "session-typed-compact", False
+            )
+            session_log = root / "tui-session.jsonl"
+            session_log.write_text("")
+            discovery = FakeDiscovery(
+                DiscoveryResult([process], {instance.instance_id: instance})
+            )
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=discovery,
+                sockets=FakeSockets([{}, {}]),
+                proc=SessionLogProc(session_log),
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            with session_log.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "direction": "from_tui",
+                            "kind": "op",
+                            "op": {"type": "Compact"},
+                            "session_id": "session-typed-compact",
+                            "turn_id": "TURN_COMPACT",
+                        }
+                    )
+                    + "\n"
+                )
+
+            refreshed = engine.refresh_events(snapshot)
+
+            self.assertEqual(
+                refreshed.sessions[0].compactions[-1].status,
+                "requested",
+            )
+            self.assertEqual(
+                refreshed.sessions[0].current_operation.category,
+                "compact",
+            )
+            engine.close()
+
+    def test_hook_only_session_refreshes_without_rollout_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance, process = create_instance(
+                root / "one", 47, "session-hook-only", False
+            )
+            hook_events = root / "compact-hooks.jsonl"
+            hook_events.write_text("")
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult([process], {instance.instance_id: instance})
+                ),
+                sockets=FakeSockets([{}, {}]),
+                proc=FakeProc(),
+                hook_events_path=hook_events,
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            session = snapshot.sessions[0]
+            session.process = replace(session.process, rollout_path="")
+            snapshot.instances[0].processes = [session.process]
+            engine.live_sessions[f"{session.instance_id}:{session.session_id}"] = session
+            hook_events.write_text(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "event": "PostCompact",
+                        "session_id": "session-hook-only",
+                        "turn_id": "TURN_HOOK_ONLY",
+                        "trigger": "auto",
+                        "outcome": "failed",
+                    }
+                )
+                + "\n"
+            )
+
+            refreshed = engine.refresh_events(snapshot)
+
+            self.assertIsNot(refreshed, snapshot)
+            self.assertEqual(refreshed.sessions[0].compactions[-1].status, "failed")
+            self.assertEqual(
+                refreshed.sessions[0].latest_failure.category,
+                "compact_error",
+            )
+            self.assertEqual(
+                refreshed.sessions[0].observation.last_evidence_source,
+                "compact_hook",
+            )
+            engine.close()
 
     def test_network_stall_requires_two_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

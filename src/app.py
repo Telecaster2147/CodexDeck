@@ -9,7 +9,7 @@ from pathlib import Path
 
 from engine import MonitorEngine
 from history import HistoryStore
-from models import LifecycleState, MonitorSnapshot, NetworkState, SessionHealth
+from models import LifecycleState, MonitorSnapshot, NetworkState, SessionHealth, SilenceState
 from presentation.doctor import doctor_exit_code, render_doctor_json, render_doctor_text
 from presentation.export import (
     current_incidents_export,
@@ -42,6 +42,7 @@ class AppOptions:
     history_days: int = 30
     history_max_bytes: int = 128 * 1024 * 1024
     packet_inspection: bool = False
+    hook_events_path: Path | None = None
 
 
 def exit_code(snapshot: MonitorSnapshot) -> int:
@@ -49,6 +50,8 @@ def exit_code(snapshot: MonitorSnapshot) -> int:
     if any(session.lifecycle == LifecycleState.FAILED for session in sessions):
         return 3
     if any(session.alert_level == "严重" for session in sessions):
+        return 4
+    if any(session.silence.state == SilenceState.STALL_SUSPECT for session in sessions):
         return 4
     if any(session.network.state == NetworkState.STALLED for session in sessions):
         return 2
@@ -97,6 +100,7 @@ def run_application(options: AppOptions) -> int:
             selected_homes=options.selected_homes,
             history=history,
             packet_inspection=options.packet_inspection,
+            hook_events_path=options.hook_events_path,
         )
     except Exception:
         if history is not None:

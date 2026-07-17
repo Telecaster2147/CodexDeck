@@ -50,9 +50,14 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     session_samples: list[str] = []
     network_samples: list[str] = []
     alert_samples: list[str] = []
+    attention_samples: list[str] = []
     event_samples: list[str] = []
     token_samples: list[str] = []
     collector_samples: list[str] = []
+    silence_samples: list[str] = []
+    compact_active_samples: list[str] = []
+    compact_terminal_samples: list[str] = []
+    compact_duration_samples: list[str] = []
     for instance in snapshot.instances:
         lifecycle = Counter(session.lifecycle.value for session in instance.sessions)
         network = Counter(session.network.state.value for session in instance.sessions)
@@ -61,6 +66,12 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
             for session in instance.sessions
             if session.alert
         )
+        attention = Counter(
+            session.attention.value
+            for session in instance.sessions
+            if session.attention_request
+        )
+        silence = Counter(session.silence.state.value for session in instance.sessions)
         events = Counter(
             event.kind.upper()
             for session in instance.sessions
@@ -86,6 +97,65 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
                     count,
                     instance=instance.instance_id,
                     category=category,
+                )
+            )
+        for state, count in sorted(attention.items()):
+            attention_samples.append(
+                _sample(
+                    "codexnet_attention_sessions",
+                    count,
+                    instance=instance.instance_id,
+                    state=state,
+                )
+            )
+        for state, count in sorted(silence.items()):
+            silence_samples.append(
+                _sample(
+                    "codexnet_silence_sessions",
+                    count,
+                    instance=instance.instance_id,
+                    state=state,
+                )
+            )
+        active_compacts: Counter[str] = Counter()
+        terminal_compacts: Counter[tuple[str, str]] = Counter()
+        duration_totals: Counter[tuple[str, str]] = Counter()
+        for session in instance.sessions:
+            for compact in session.compactions:
+                trigger = compact.trigger or "unknown"
+                if compact.status in {"requested", "candidate", "running"}:
+                    active_compacts[trigger] += 1
+                elif compact.status in {"completed", "failed", "aborted"}:
+                    terminal_compacts[(trigger, compact.status)] += 1
+                    if compact.duration_seconds is not None:
+                        duration_totals[(trigger, compact.status)] += compact.duration_seconds
+        for trigger, count in sorted(active_compacts.items()):
+            compact_active_samples.append(
+                _sample(
+                    "codexnet_compact_active",
+                    count,
+                    instance=instance.instance_id,
+                    trigger=trigger,
+                )
+            )
+        for (trigger, status), count in sorted(terminal_compacts.items()):
+            compact_terminal_samples.append(
+                _sample(
+                    "codexnet_compact_total",
+                    count,
+                    instance=instance.instance_id,
+                    trigger=trigger,
+                    status=status,
+                )
+            )
+        for (trigger, status), total in sorted(duration_totals.items()):
+            compact_duration_samples.append(
+                _sample(
+                    "codexnet_compact_duration_seconds_sum",
+                    total,
+                    instance=instance.instance_id,
+                    trigger=trigger,
+                    status=status,
                 )
             )
         for event_type, count in sorted(events.items()):
@@ -142,7 +212,47 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
             network_samples,
         )
     )
+    lines.extend(
+        _family(
+            "codexnet_silence_sessions",
+            "Sessions by silence assessment state.",
+            "gauge",
+            silence_samples,
+        )
+    )
+    lines.extend(
+        _family(
+            "codexnet_compact_active",
+            "Active compact operations by trigger.",
+            "gauge",
+            compact_active_samples,
+        )
+    )
+    lines.extend(
+        _family(
+            "codexnet_compact_total",
+            "Compact terminal operations retained in the snapshot.",
+            "counter",
+            compact_terminal_samples,
+        )
+    )
+    lines.extend(
+        _family(
+            "codexnet_compact_duration_seconds_sum",
+            "Sum of compact operation durations retained in the snapshot.",
+            "counter",
+            compact_duration_samples,
+        )
+    )
     lines.extend(_family("codexnet_alerts", "Active alerts by category.", "gauge", alert_samples))
+    lines.extend(
+        _family(
+            "codexnet_attention_sessions",
+            "Sessions waiting for user action by attention state.",
+            "gauge",
+            attention_samples,
+        )
+    )
     lines.extend(
         _family(
             "codexnet_snapshot_events",

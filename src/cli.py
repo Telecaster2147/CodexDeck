@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app import AppOptions, run_application
+from codex.hook_events import receive_hook_event
 from config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, DEFAULT_INTERVAL, VERSION
 
 
@@ -50,8 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("doctor", "export", "metrics"),
-        help="doctor：诊断；export：导出复盘；metrics：输出 Prometheus 指标",
+        choices=("doctor", "export", "metrics", "hook-event"),
+        help="doctor：诊断；export：导出；metrics：指标；hook-event：接收 compact hook",
     )
     parser.add_argument(
         "--interval",
@@ -108,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="把关键事件和聚合指标写入独立 SQLite 历史库",
     )
     parser.add_argument(
+        "--hook-events",
+        type=Path,
+        help="读取 compact hook NDJSON；hook-event 命令将最小事件写入此路径",
+    )
+    parser.add_argument(
         "--history-days",
         type=positive_int,
         default=30,
@@ -132,6 +138,11 @@ def required_commands_available() -> None:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
+    if args.command == "hook-event":
+        if args.hook_events is None:
+            raise RuntimeError("hook-event 必须指定 --hook-events PATH")
+        receive_hook_event(args.hook_events, sys.stdin)
+        return 0
     if args.command == "export" and bool(args.session) == bool(args.current_incidents):
         raise RuntimeError("export 必须且只能指定 --session 或 --current-incidents")
     if args.command != "export" and (args.session or args.current_incidents):
@@ -156,6 +167,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         history_path=args.history,
         history_days=args.history_days,
         history_max_bytes=int(args.history_max_mib * 1024 * 1024),
+        hook_events_path=args.hook_events,
     )
     return run_application(options)
 

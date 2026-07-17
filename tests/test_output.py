@@ -10,6 +10,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from models import (  # noqa: E402
     AgentNode,
+    AttentionRequest,
+    AttentionState,
     CodexPaths,
     InstanceSnapshot,
     LifecycleState,
@@ -26,6 +28,7 @@ from models import (  # noqa: E402
     TurnSummary,
 )
 from presentation.json_output import render_json  # noqa: E402
+from presentation.metrics import render_prometheus  # noqa: E402
 from presentation.text import render_text  # noqa: E402
 
 
@@ -116,6 +119,32 @@ def snapshot_with_metrics() -> MonitorSnapshot:
 
 
 class OutputTests(unittest.TestCase):
+    def test_attention_is_present_in_json_text_and_metrics(self) -> None:
+        result = snapshot()
+        session = result.sessions[0]
+        session.attention = AttentionState.APPROVAL
+        session.attention_request = AttentionRequest(
+            AttentionState.APPROVAL,
+            call_id="call-1",
+            summary="等待用户操作",
+            detail="Approve command",
+        )
+
+        payload = json.loads(render_json(result, pretty=False))
+        rendered_text = render_text(result)
+        metrics = render_prometheus(result)
+
+        self.assertEqual(payload["summary"]["action_required"], 1)
+        self.assertEqual(
+            payload["instances"][0]["sessions"][0]["attention"], "APPROVAL"
+        )
+        self.assertIn("待操作 1", rendered_text)
+        self.assertIn("Approve command", rendered_text)
+        self.assertIn(
+            'codexnet_attention_sessions{instance="i1",state="APPROVAL"} 1',
+            metrics,
+        )
+
     def test_json_has_versioned_instance_shape(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=True))
         self.assertEqual(payload["schema_version"], 1)
@@ -124,10 +153,16 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(len(payload["instances"][0]["processes"]), 1)
         self.assertIsNone(payload["instances"][0]["sessions"][0]["alert"])
         self.assertIsNone(payload["instances"][0]["sessions"][0]["process"]["current_task"])
+        self.assertEqual(
+            payload["instances"][0]["sessions"][0]["silence"]["state"],
+            "NORMAL",
+        )
+        self.assertIn("last_semantic_at", payload["instances"][0]["sessions"][0]["observation"])
 
-    def test_json_all_includes_auxiliary_processes(self) -> None:
+    def test_all_includes_auxiliary_processes_in_json_and_text(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=False, show_auxiliary=True))
         self.assertEqual(len(payload["instances"][0]["processes"]), 2)
+        self.assertIn("辅助进程", render_text(snapshot(), show_auxiliary=True))
 
     def test_json_additive_metrics_keep_schema_one_and_nullable_strings(self) -> None:
         payload = json.loads(render_json(snapshot_with_metrics(), pretty=False))
@@ -135,6 +170,9 @@ class OutputTests(unittest.TestCase):
         session = payload["instances"][0]["sessions"][0]
         self.assertEqual(session["turns"][0]["time_to_first_token_seconds"], 0.75)
         self.assertEqual(session["turns"][0]["tools"][0]["display_name"], "shell")
+        self.assertIsNone(session["turns"][0]["tools"][0]["command"])
+        self.assertIsNone(session["turns"][0]["tools"][0]["arguments"])
+        self.assertIsNone(session["turns"][0]["tools"][0]["output"])
         self.assertEqual(session["token_usage"]["context_tokens"], 1200)
         self.assertEqual(session["rate_limits"]["primary"]["used_percent"], 42.5)
         self.assertEqual(session["agents"][0]["children"][0]["thread_id"], "agent-2")
@@ -155,10 +193,6 @@ class OutputTests(unittest.TestCase):
         output = render_json(snapshot(), pretty=False)
         self.assertNotIn("\n", output)
         json.loads(output)
-
-    def test_text_all_includes_auxiliary_process(self) -> None:
-        self.assertIn("辅助进程", render_text(snapshot(), show_auxiliary=True))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from models import LifecycleState, MonitorSnapshot, NormalizedEvent, SessionHealth
+from models import (
+    HistoryWindowStats,
+    LifecycleState,
+    MonitorSnapshot,
+    NormalizedEvent,
+    SessionHealth,
+)
 
 
 KEY_EVENT_TYPES = frozenset(
@@ -32,10 +38,16 @@ KEY_EVENT_TYPES = frozenset(
         "TRANSPORT_FALLBACK",
         "RECOVERED",
         "COMPACTING",
+        "COMPACT_REQUESTED",
         "COMPACT_COMPLETED",
+        "COMPACT_FAILED",
+        "COMPACT_ABORTED",
         "PROCESS_EXITED",
         "PROCESS_RESUMED",
         "SESSION_EXITED",
+        "ACTION_REQUIRED",
+        "ACTION_RESOLVED",
+        "UNPARSED_PAYLOAD",
     }
 )
 
@@ -45,6 +57,22 @@ class HistoryWriteResult:
     events_inserted: int
     session_buckets_updated: int
     instance_buckets_updated: int
+
+
+HISTORY_WINDOWS = (("15m", 900), ("1h", 3600), ("24h", 86400))
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
 def _timestamp(value: str) -> float:
@@ -111,6 +139,8 @@ class HistoryStore:
         self.max_bytes = max_bytes
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path, timeout=5.0)
+        if self.path.stat().st_size == 0:
+            self.connection.execute("PRAGMA page_size = 1024")
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
         self._initialize()
@@ -131,7 +161,8 @@ class HistoryStore:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            INSERT OR IGNORE INTO history_meta(key, value) VALUES ('schema_version', '1');
+            INSERT INTO history_meta(key, value) VALUES ('schema_version', '3')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 
             CREATE TABLE IF NOT EXISTS events (
                 event_key TEXT PRIMARY KEY,
@@ -184,6 +215,21 @@ class HistoryStore:
             CREATE INDEX IF NOT EXISTS instance_buckets_time_idx
                 ON instance_buckets(bucket_start);
 
+            CREATE TABLE IF NOT EXISTS turn_metrics (
+                metric_key TEXT PRIMARY KEY,
+                timestamp REAL NOT NULL,
+                instance_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                ttft_seconds REAL,
+                tool_seconds REAL,
+                recovery_seconds REAL
+            );
+            CREATE INDEX IF NOT EXISTS turn_metrics_time_idx ON turn_metrics(timestamp);
+            CREATE INDEX IF NOT EXISTS turn_metrics_instance_time_idx
+                ON turn_metrics(instance_id, timestamp);
+
             CREATE TABLE IF NOT EXISTS session_state (
                 instance_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -191,6 +237,37 @@ class HistoryStore:
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(instance_id, session_id)
             );
+
+            CREATE TABLE IF NOT EXISTS silence_samples (
+                bucket_start INTEGER NOT NULL,
+                instance_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                workspace TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                model TEXT NOT NULL,
+                tool_category TEXT NOT NULL,
+                assessment TEXT NOT NULL,
+                silence_seconds REAL NOT NULL,
+                evidence_age_seconds REAL,
+                PRIMARY KEY(bucket_start, instance_id, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS silence_samples_time_idx
+                ON silence_samples(bucket_start);
+
+            CREATE TABLE IF NOT EXISTS compact_metrics (
+                operation_key TEXT PRIMARY KEY,
+                timestamp REAL NOT NULL,
+                instance_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_seconds REAL,
+                retry_count INTEGER NOT NULL,
+                context_before INTEGER,
+                context_after INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS compact_metrics_time_idx
+                ON compact_metrics(timestamp);
             """
         )
         self.connection.commit()
@@ -255,6 +332,40 @@ class HistoryStore:
         )
         return self._insert_event(session.instance_id, session.session_id, transition)
 
+    def _record_turn_metrics(self, session: SessionHealth, now: float) -> None:
+        for turn in session.turns:
+            timestamp = turn.completed_at or turn.started_at or now
+            identity = json.dumps(
+                [session.instance_id, session.session_id, turn.turn_id, turn.started_at],
+                separators=(",", ":"),
+            )
+            metric_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            self.connection.execute(
+                """
+                INSERT INTO turn_metrics(
+                    metric_key, timestamp, instance_id, session_id, turn_id, status,
+                    ttft_seconds, tool_seconds, recovery_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(metric_key) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    status = excluded.status,
+                    ttft_seconds = excluded.ttft_seconds,
+                    tool_seconds = excluded.tool_seconds,
+                    recovery_seconds = excluded.recovery_seconds
+                """,
+                (
+                    metric_key,
+                    timestamp,
+                    session.instance_id,
+                    session.session_id,
+                    turn.turn_id,
+                    turn.status,
+                    turn.time_to_first_token_seconds,
+                    turn.tool_duration_seconds,
+                    turn.recovery_duration_seconds,
+                ),
+            )
+
     def _record_session_bucket(self, session: SessionHealth, bucket: int) -> None:
         active = int(
             session.lifecycle
@@ -304,6 +415,87 @@ class HistoryStore:
                 len(session.tool_executions),
             ),
         )
+
+    def _record_silence_sample(
+        self,
+        session: SessionHealth,
+        bucket: int,
+        now: float,
+    ) -> None:
+        semantic_at = session.observation.last_semantic_at or session.phase_since or now
+        evidence_at = session.observation.last_evidence_at
+        self.connection.execute(
+            """
+            INSERT INTO silence_samples(
+                bucket_start, instance_id, session_id, workspace, phase, model,
+                tool_category, assessment, silence_seconds, evidence_age_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bucket_start, instance_id, session_id) DO UPDATE SET
+                workspace = excluded.workspace,
+                phase = excluded.phase,
+                model = excluded.model,
+                tool_category = excluded.tool_category,
+                assessment = excluded.assessment,
+                silence_seconds = excluded.silence_seconds,
+                evidence_age_seconds = excluded.evidence_age_seconds
+            """,
+            (
+                bucket,
+                session.instance_id,
+                session.session_id,
+                session.process.cwd,
+                session.lifecycle.value,
+                session.process.model,
+                session.current_operation.category,
+                session.silence.state.value,
+                max(0.0, now - semantic_at),
+                max(0.0, now - evidence_at) if evidence_at is not None else None,
+            ),
+        )
+
+    def _record_compact_metrics(self, session: SessionHealth, now: float) -> None:
+        for compact in session.compactions:
+            timestamp = compact.terminal_at or compact.started_at or compact.requested_at or now
+            operation_key = compact.operation_id or hashlib.sha256(
+                json.dumps(
+                    [
+                        session.instance_id,
+                        session.session_id,
+                        compact.turn_id,
+                        compact.requested_at,
+                        compact.started_at,
+                    ],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            self.connection.execute(
+                """
+                INSERT INTO compact_metrics(
+                    operation_key, timestamp, instance_id, session_id, trigger,
+                    status, duration_seconds, retry_count, context_before, context_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(operation_key) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    trigger = excluded.trigger,
+                    status = excluded.status,
+                    duration_seconds = excluded.duration_seconds,
+                    retry_count = excluded.retry_count,
+                    context_before = excluded.context_before,
+                    context_after = excluded.context_after
+                """,
+                (
+                    operation_key,
+                    timestamp,
+                    session.instance_id,
+                    session.session_id,
+                    compact.trigger or "unknown",
+                    compact.status,
+                    compact.duration_seconds,
+                    compact.retry_count,
+                    compact.context_tokens,
+                    compact.context_tokens_after,
+                ),
+            )
 
     def _record_instance_bucket(
         self, snapshot: MonitorSnapshot, instance_index: int, bucket: int
@@ -366,6 +558,9 @@ class HistoryStore:
                         session.instance_id, session.session_id, event
                     )
                 self._record_session_bucket(session, session_bucket)
+                self._record_silence_sample(session, session_bucket, now)
+                self._record_turn_metrics(session, now)
+                self._record_compact_metrics(session, now)
             for index in range(len(snapshot.instances)):
                 self._record_instance_bucket(snapshot, index, instance_bucket)
         self.prune(now=now)
@@ -374,6 +569,149 @@ class HistoryStore:
             len(snapshot.sessions),
             len(snapshot.instances),
         )
+
+    def window_stats(
+        self,
+        *,
+        now: float,
+        instance_id: str | None = None,
+    ) -> list[HistoryWindowStats]:
+        """Return explicitly windowed, sample-counted operational statistics."""
+
+        stats: list[HistoryWindowStats] = []
+        for label, window_seconds in HISTORY_WINDOWS:
+            cutoff = now - window_seconds
+            instance_clause = " AND instance_id = ?" if instance_id else ""
+            parameters: tuple[object, ...] = (
+                (cutoff, instance_id) if instance_id else (cutoff,)
+            )
+            rows = self.connection.execute(
+                "SELECT status, ttft_seconds, tool_seconds, recovery_seconds "
+                f"FROM turn_metrics WHERE timestamp >= ?{instance_clause}",
+                parameters,
+            ).fetchall()
+            sample_row = self.connection.execute(
+                "SELECT COALESCE(SUM(samples), 0) FROM instance_buckets "
+                f"WHERE bucket_start >= ?{instance_clause}",
+                parameters,
+            ).fetchone()
+            event_rows = self.connection.execute(
+                "SELECT event_type, COUNT(*) FROM events WHERE timestamp >= ?"
+                f"{instance_clause} AND event_type IN "
+                "('RECONNECTING', 'TRANSPORT_FALLBACK', 'COMPACT_COMPLETED') "
+                "GROUP BY event_type",
+                parameters,
+            ).fetchall()
+            counts = {str(kind): int(count) for kind, count in event_rows}
+            silence_rows = self.connection.execute(
+                "SELECT silence_seconds FROM silence_samples WHERE bucket_start >= ?"
+                f"{instance_clause}",
+                parameters,
+            ).fetchall()
+            compact_rows = self.connection.execute(
+                "SELECT trigger, status, duration_seconds, retry_count, "
+                "context_before, context_after FROM compact_metrics "
+                f"WHERE timestamp >= ?{instance_clause}",
+                parameters,
+            ).fetchall()
+            ttfts = [float(row[1]) for row in rows if row[1] is not None]
+            tools = [float(row[2]) for row in rows if row[2] is not None]
+            recoveries = [float(row[3]) for row in rows if row[3] is not None]
+            failures = sum(str(row[0]).lower() == "failed" for row in rows)
+            silences = [float(row[0]) for row in silence_rows]
+            compact_durations = [
+                float(row[2]) for row in compact_rows if row[2] is not None
+            ]
+            compact_contexts = [
+                (float(row[4]), float(row[5]))
+                for row in compact_rows
+                if row[4] is not None and row[5] is not None
+            ]
+            stats.append(
+                HistoryWindowStats(
+                    label=label,
+                    window_seconds=window_seconds,
+                    sample_count=int(sample_row[0] or 0),
+                    turn_count=len(rows),
+                    failure_count=failures,
+                    failure_rate=failures / len(rows) if rows else None,
+                    ttft_samples=len(ttfts),
+                    ttft_p50_seconds=_percentile(ttfts, 0.50),
+                    ttft_p95_seconds=_percentile(ttfts, 0.95),
+                    tool_samples=len(tools),
+                    tool_p50_seconds=_percentile(tools, 0.50),
+                    tool_p95_seconds=_percentile(tools, 0.95),
+                    reconnect_count=counts.get("RECONNECTING", 0),
+                    fallback_count=counts.get("TRANSPORT_FALLBACK", 0),
+                    recovery_samples=len(recoveries),
+                    recovery_average_seconds=(
+                        sum(recoveries) / len(recoveries) if recoveries else None
+                    ),
+                    compact_count=counts.get("COMPACT_COMPLETED", 0),
+                    compact_per_hour=(
+                        counts.get("COMPACT_COMPLETED", 0) * 3600 / window_seconds
+                    ),
+                    silence_samples=len(silences),
+                    silence_p50_seconds=_percentile(silences, 0.50),
+                    silence_p95_seconds=_percentile(silences, 0.95),
+                    compact_manual_count=sum(
+                        str(row[0]) == "manual" for row in compact_rows
+                    ),
+                    compact_auto_count=sum(str(row[0]) == "auto" for row in compact_rows),
+                    compact_failure_count=sum(
+                        str(row[1]) == "failed" for row in compact_rows
+                    ),
+                    compact_retry_count=sum(int(row[3] or 0) for row in compact_rows),
+                    compact_duration_samples=len(compact_durations),
+                    compact_duration_p50_seconds=_percentile(compact_durations, 0.50),
+                    compact_duration_p95_seconds=_percentile(compact_durations, 0.95),
+                    compact_context_samples=len(compact_contexts),
+                    compact_context_before_average=(
+                        sum(before for before, _ in compact_contexts)
+                        / len(compact_contexts)
+                        if compact_contexts
+                        else None
+                    ),
+                    compact_context_after_average=(
+                        sum(after for _, after in compact_contexts)
+                        / len(compact_contexts)
+                        if compact_contexts
+                        else None
+                    ),
+                )
+            )
+        return stats
+
+    def silence_baseline(
+        self,
+        *,
+        now: float,
+        instance_id: str,
+        workspace: str,
+        phase: str,
+        model: str,
+        tool_category: str,
+        window_seconds: int = 86400,
+    ) -> tuple[int, float | None, float | None]:
+        """Return context-matched silence sample count, p50, and p95."""
+
+        rows = self.connection.execute(
+            """
+            SELECT silence_seconds FROM silence_samples
+            WHERE bucket_start >= ? AND instance_id = ? AND workspace = ?
+              AND phase = ? AND model = ? AND tool_category = ?
+            """,
+            (
+                now - window_seconds,
+                instance_id,
+                workspace,
+                phase,
+                model,
+                tool_category,
+            ),
+        ).fetchall()
+        values = [float(row[0]) for row in rows]
+        return len(values), _percentile(values, 0.50), _percentile(values, 0.95)
 
     def prune(self, *, now: float | None = None) -> None:
         """Apply age and file-size limits; size pruning removes oldest buckets first."""
@@ -389,6 +727,13 @@ class HistoryStore:
                 self.connection.execute(
                     "DELETE FROM instance_buckets WHERE bucket_start < ?", (cutoff,)
                 )
+                self.connection.execute("DELETE FROM turn_metrics WHERE timestamp < ?", (cutoff,))
+                self.connection.execute(
+                    "DELETE FROM silence_samples WHERE bucket_start < ?", (cutoff,)
+                )
+                self.connection.execute(
+                    "DELETE FROM compact_metrics WHERE timestamp < ?", (cutoff,)
+                )
                 self.connection.execute("DELETE FROM session_state WHERE updated_at < ?", (cutoff,))
 
         if self.max_bytes is None:
@@ -398,6 +743,9 @@ class HistoryStore:
                 ("events", "timestamp"),
                 ("session_buckets", "bucket_start"),
                 ("instance_buckets", "bucket_start"),
+                ("turn_metrics", "timestamp"),
+                ("silence_samples", "bucket_start"),
+                ("compact_metrics", "timestamp"),
             ]
             counts = []
             for table, column in candidates:

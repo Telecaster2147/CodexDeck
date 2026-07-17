@@ -14,6 +14,7 @@ from history import HistoryStore  # noqa: E402
 from models import (  # noqa: E402
     CodexPaths,
     CollectorHealth,
+    CompactionSummary,
     FailureInfo,
     InstanceSnapshot,
     LifecycleState,
@@ -21,10 +22,14 @@ from models import (  # noqa: E402
     NetworkEvidence,
     NetworkState,
     NormalizedEvent,
+    ObservationPulse,
     ProcessIdentity,
     ProcessInfo,
     SessionHealth,
+    SilenceAssessment,
+    SilenceState,
     TokenUsageSummary,
+    TurnSummary,
 )
 from presentation.metrics import render_prometheus  # noqa: E402
 
@@ -55,6 +60,12 @@ def make_snapshot(root: Path, generated_at: str = "2026-07-16T00:00:01+00:00") -
         network=NetworkEvidence(NetworkState.ACTIVE),
         alert="slow response",
         alert_level="warning",
+        observation=ObservationPulse(
+            last_semantic_at=1784159950.0,
+            last_evidence_at=1784159999.0,
+            last_evidence_source="network",
+        ),
+        silence=SilenceAssessment(SilenceState.QUIET_UNKNOWN, "quiet"),
         cumulative_token_usage=TokenUsageSummary(input_tokens=10, output_tokens=5, total_tokens=15),
         events=[
             NormalizedEvent(1784160000.0, "TURN_FAILED", "failed", "secret", failure=failure),
@@ -75,6 +86,80 @@ def make_snapshot(root: Path, generated_at: str = "2026-07-16T00:00:01+00:00") -
 
 
 class HistoryTests(unittest.TestCase):
+    def test_window_stats_use_explicit_windows_samples_and_percentiles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = make_snapshot(root)
+            snapshot.sessions[0].turns = [
+                TurnSummary(
+                    f"turn-{index}",
+                    started_at=1784160000.0 + index,
+                    completed_at=1784160001.0 + index,
+                    status="failed" if index == 3 else "completed",
+                    time_to_first_token_seconds=float(index + 1),
+                    tool_duration_seconds=float((index + 1) * 2),
+                    recovery_duration_seconds=4.0 if index == 2 else None,
+                )
+                for index in range(4)
+            ]
+            snapshot.sessions[0].events = [
+                NormalizedEvent(1784160000.0, "RECONNECTING", "retry", source_id="r1"),
+                NormalizedEvent(
+                    1784160001.0, "COMPACT_COMPLETED", "compact", source_id="c1"
+                ),
+            ]
+            snapshot.sessions[0].compactions = [
+                CompactionSummary(
+                    operation_id="compact-operation",
+                    status="completed",
+                    started_at=1784160001.0,
+                    completed_at=1784160006.0,
+                    trigger="manual",
+                    retry_count=2,
+                    context_tokens=240_000,
+                    context_tokens_after=60_000,
+                )
+            ]
+            with HistoryStore(root / "history.sqlite", max_days=None, max_bytes=None) as store:
+                store.record_snapshot(snapshot)
+                stats = store.window_stats(
+                    now=1784160010.0,
+                    instance_id=snapshot.instances[0].instance_id,
+                )
+                baseline = store.silence_baseline(
+                    now=1784160010.0,
+                    instance_id=snapshot.instances[0].instance_id,
+                    workspace=snapshot.sessions[0].process.cwd,
+                    phase=snapshot.sessions[0].lifecycle.value,
+                    model=snapshot.sessions[0].process.model,
+                    tool_category=snapshot.sessions[0].current_operation.category,
+                )
+
+            self.assertEqual([item.label for item in stats], ["15m", "1h", "24h"])
+            for window in stats:
+                self.assertEqual(window.turn_count, 4)
+                self.assertEqual(window.failure_count, 1)
+                self.assertEqual(window.failure_rate, 0.25)
+                self.assertEqual(window.ttft_p50_seconds, 2.5)
+                self.assertAlmostEqual(window.ttft_p95_seconds, 3.85)
+                self.assertEqual(window.tool_p50_seconds, 5.0)
+                self.assertEqual(window.reconnect_count, 1)
+                self.assertEqual(window.fallback_count, 0)
+                self.assertEqual(window.compact_count, 1)
+                self.assertAlmostEqual(
+                    window.compact_per_hour,
+                    3600 / window.window_seconds,
+                )
+                self.assertEqual(window.recovery_average_seconds, 4.0)
+                self.assertEqual(window.silence_samples, 1)
+                self.assertEqual(window.compact_manual_count, 1)
+                self.assertEqual(window.compact_retry_count, 2)
+                self.assertEqual(window.compact_duration_p50_seconds, 5.0)
+                self.assertEqual(window.compact_context_samples, 1)
+                self.assertEqual(window.compact_context_before_average, 240_000)
+                self.assertEqual(window.compact_context_after_average, 60_000)
+            self.assertEqual(baseline, (1, 51.0, 51.0))
+
     def test_records_key_events_buckets_and_deduplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -162,7 +247,17 @@ class HistoryTests(unittest.TestCase):
 class MetricsTests(unittest.TestCase):
     def test_prometheus_output_aggregates_and_has_only_low_cardinality_labels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            output = render_prometheus(make_snapshot(Path(directory)))
+            snapshot = make_snapshot(Path(directory))
+            snapshot.sessions[0].compactions = [
+                CompactionSummary(
+                    operation_id="compact-operation",
+                    status="completed",
+                    started_at=1.0,
+                    completed_at=3.0,
+                    trigger="manual",
+                )
+            ]
+            output = render_prometheus(snapshot)
         self.assertIn('codexnet_sessions{instance="home\\"one",state="GENERATING"} 1', output)
         self.assertIn('codexnet_network_sessions{instance="home\\"one",state="ACTIVE"} 1', output)
         self.assertIn('codexnet_alerts{category="warning",instance="home\\"one"} 1', output)
@@ -170,6 +265,14 @@ class MetricsTests(unittest.TestCase):
         self.assertIn('codexnet_tokens{category="total",instance="home\\"one"} 15', output)
         self.assertIn(
             'codexnet_collector_healthy{category="state_db",instance="home\\"one"} 1',
+            output,
+        )
+        self.assertIn(
+            'codexnet_silence_sessions{instance="home\\"one",state="QUIET_UNKNOWN"} 1',
+            output,
+        )
+        self.assertIn(
+            'codexnet_compact_total{instance="home\\"one",status="completed",trigger="manual"} 1',
             output,
         )
         self.assertNotIn("state_db:home", output)
@@ -181,7 +284,10 @@ class MetricsTests(unittest.TestCase):
             if "{" in line
             for item in line.split("{", 1)[1].split("}", 1)[0].split(",")
         }
-        self.assertLessEqual(label_names, {"instance", "state", "category", "event_type"})
+        self.assertLessEqual(
+            label_names,
+            {"instance", "state", "category", "event_type", "trigger", "status"},
+        )
 
 
 if __name__ == "__main__":

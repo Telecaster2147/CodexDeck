@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from config import LIFECYCLE_LABELS, NETWORK_LABELS, RECOVERY_LABELS
 from models import AgentNode, MonitorSnapshot, SessionHealth, TokenUsageSummary
 from utils import format_duration
@@ -10,6 +12,8 @@ from utils import format_duration
 def _session_status(session: SessionHealth) -> str:
     if session.process_exited:
         return "进程已退出"
+    if session.attention_request:
+        return f"等待用户操作 / {session.attention.value}"
     lifecycle = LIFECYCLE_LABELS[session.lifecycle.value]
     recovery = RECOVERY_LABELS[session.recovery.value]
     return f"{lifecycle} / {recovery}" if recovery else lifecycle
@@ -111,7 +115,8 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
         f"Codex Net Health  {snapshot.generated_at}  刷新 {snapshot.interval_seconds:g}s",
         (
             f"实例 {summary['instances']}  会话 {summary['sessions']}  "
-            f"失败 {summary['current_failures']}  阻塞 {summary['network_stalls']}"
+            f"待操作 {summary['action_required']}  失败 {summary['current_failures']}  "
+            f"阻塞 {summary['network_stalls']}"
         ),
     ]
     if snapshot.diagnostics:
@@ -153,6 +158,11 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
                 )
                 if session.current_failure.additional_details:
                     lines.append(f"    详情：{session.current_failure.additional_details}")
+            elif session.attention_request:
+                lines.append(
+                    f"    操作：{session.attention.value} | "
+                    f"{session.attention_request.detail or session.attention_request.summary}"
+                )
             elif session.alert:
                 lines.append(
                     f"    {session.alert_level}：{session.alert_reason} "
@@ -160,6 +170,31 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
                 )
             elif session.network.reason:
                 lines.append(f"    网络：{session.network.reason}")
+            if session.observation.last_semantic_at is not None:
+                semantic_age = max(0.0, time.time() - session.observation.last_semantic_at)
+                evidence_age = (
+                    max(0.0, time.time() - session.observation.last_evidence_at)
+                    if session.observation.last_evidence_at is not None
+                    else None
+                )
+                observation = (
+                    f"    观察：{session.silence.state.value} | "
+                    f"语义静默 {format_duration(semantic_age)}"
+                )
+                if evidence_age is not None:
+                    observation += (
+                        f" | 最近证据 {session.observation.last_evidence_source or '未知'} "
+                        f"{format_duration(evidence_age)}前"
+                    )
+                lines.append(observation)
+            if session.compactions:
+                compact = session.compactions[-1]
+                compact_line = f"    Compact：{compact.status} | {compact.trigger or 'unknown'}"
+                if compact.duration_seconds is not None:
+                    compact_line += f" | {compact.duration_seconds:.1f}s"
+                if compact.reconstructed:
+                    compact_line += " | reconstructed"
+                lines.append(compact_line)
             for connection in session.network.connections:
                 if not connection.tls_server_name and not connection.tls_alpn_protocols:
                     continue

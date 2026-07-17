@@ -69,6 +69,12 @@ def session_export(
             "session_id": session.session_id,
             "lifecycle": session.lifecycle,
             "recovery": session.recovery,
+            "attention": session.attention,
+            "attention_request": session.attention_request,
+            "current_operation": session.current_operation,
+            "diagnosis": session.diagnosis,
+            "observation": session.observation,
+            "silence": session.silence,
             "phase": session.phase,
             "phase_since": session.phase_since,
             "process": session.process,
@@ -81,6 +87,7 @@ def session_export(
             "protocol_capabilities": session.protocol_capabilities,
         },
         "turns": session.turns,
+        "compactions": session.compactions,
         "tool_executions": session.tool_executions,
         "agents": session.agents,
         "retry_recovery": [_event_value(event) for event in recovery],
@@ -111,8 +118,11 @@ def current_incidents_export(
         if (
             not active_alerts
             and session.current_failure is None
+            and session.attention_request is None
             and not session.alert
             and session.network.state.value not in {"SUSPECT", "STALLED"}
+            and session.silence.state.value
+            not in {"STALL_SUSPECT", "OBSERVER_BLIND"}
         ):
             continue
         incidents.append(
@@ -122,6 +132,11 @@ def current_incidents_export(
                 "session_id": session.session_id,
                 "lifecycle": session.lifecycle,
                 "recovery": session.recovery,
+                "attention": session.attention,
+                "attention_request": session.attention_request,
+                "current_operation": session.current_operation,
+                "observation": session.observation,
+                "silence": session.silence,
                 "network": session.network,
                 "alerts": active_alerts,
                 "current_failure": session.current_failure,

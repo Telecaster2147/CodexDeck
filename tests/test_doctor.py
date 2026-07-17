@@ -112,6 +112,8 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("CODEX_HOME: /tmp/codex-home", text)
         self.assertIn("threads: yes", text)
         self.assertIn("turn_timing: direct (rollout, high)", text)
+        self.assertIn("tui_session_log: disabled", text)
+        self.assertIn("hook_events: disabled", text)
         self.assertIn("future_event: 2", text)
         self.assertEqual(doctor_exit_code(snapshot), 2)
 
@@ -120,6 +122,7 @@ class DoctorTests(unittest.TestCase):
         report = json.loads(render_doctor_json(snapshot))
         self.assertEqual(report["doctor_schema_version"], 1)
         self.assertEqual(report["status"], "healthy")
+        self.assertIn("compact_sources", report["instances"][0])
         self.assertEqual(report["instances"][0]["protocol_capabilities"]["turn_timing"]["mode"], "direct")
 
     def test_collector_error_and_budget_have_degraded_exit(self) -> None:

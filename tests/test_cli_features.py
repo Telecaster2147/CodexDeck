@@ -123,6 +123,11 @@ class CliFeatureTests(unittest.TestCase):
         self.assertEqual(args.session, "abc")
         self.assertEqual(args.history, Path("/tmp/history.sqlite"))
         self.assertEqual(build_parser().parse_args(["metrics"]).command, "metrics")
+        hook = build_parser().parse_args(
+            ["hook-event", "--hook-events", "/tmp/compact-hooks.jsonl"]
+        )
+        self.assertEqual(hook.command, "hook-event")
+        self.assertEqual(hook.hook_events, Path("/tmp/compact-hooks.jsonl"))
 
     def test_metrics_samples_immediately_and_emits_prometheus(self) -> None:
         snapshot, machine = fixture()

@@ -66,6 +66,7 @@ def _protocol_capabilities(instance: object) -> dict[str, Any]:
 def _rollout_diagnostics(instance: object) -> dict[str, Any]:
     return {
         "context_truncated": bool(getattr(instance, "rollout_context_truncated", False)),
+        "activity": _value(getattr(instance, "rollout_activity", [])),
         "cursor": _value(getattr(instance, "rollout_cursor", None)),
         "file_identity": _value(getattr(instance, "rollout_file_identity", None)),
         "file_replaced": _value(getattr(instance, "rollout_file_replaced", None)),
@@ -110,6 +111,10 @@ def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
                     ),
                 },
                 "rollout": _rollout_diagnostics(instance),
+                "compact_sources": {
+                    "tui_session_log": _value(instance.tui_session_log),
+                    "hook_events": _value(instance.hook_events),
+                },
                 "collector_health": instance_collectors,
             }
         )
@@ -151,6 +156,9 @@ def _is_degraded(snapshot: MonitorSnapshot) -> bool:
             return True
         if _collector_degraded(_collector_items(instance)):
             return True
+        for source in (instance.tui_session_log, instance.hook_events):
+            if source.configured and (not source.readable or source.error):
+                return True
     return False
 
 
@@ -249,6 +257,26 @@ def render_doctor_text(snapshot: MonitorSnapshot) -> str:
             f"truncated={rollout['context_truncated']}; replaced={rollout['file_replaced']}; "
             f"partial_line={rollout['partial_line']}"
         )
+        for activity in rollout["activity"]:
+            lines.append(
+                f"    - {activity['path']}: size={activity['stat_size']}; "
+                f"bytes_read={activity['bytes_read']}; records="
+                f"{activity['complete_record_count']}; ignored="
+                f"{activity['ignored_record_count']}; normalized="
+                f"{activity['normalized_count']}; partial={activity['partial_bytes']}; "
+                f"replaced={activity['replaced']}; truncated={activity['truncated']}; "
+                f"copy_truncated={activity['copy_truncated']}"
+            )
+        lines.append("  compact sources:")
+        for name, source in instance["compact_sources"].items():
+            state = "disabled"
+            if source["configured"]:
+                state = "readable" if source["readable"] else "unreadable"
+            lines.append(
+                f"    - {name}: {state}; source={source['source'] or '-'}; "
+                f"last_probe={source['last_probe_at']}; "
+                f"last_event={source['last_event_at']}; error={source['error'] or '-'}"
+            )
         unknown = instance["unknown_events"]
         lines.append(
             f"  unknown events: {unknown['total']}; "

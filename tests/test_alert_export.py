@@ -139,6 +139,31 @@ class AlertLifecycleTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
+    def test_attention_is_exported_as_current_incident(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "attention",
+            [
+                event(100, "TURN_STARTED", "start"),
+                event(
+                    101,
+                    "ACTION_REQUIRED",
+                    "approval",
+                    detail="Approve command",
+                    metadata={"attention_state": "APPROVAL", "call_id": "call-1"},
+                ),
+            ],
+        )
+        session = machine.derive("attention", process(), NetworkEvidence(), 102)
+
+        payload = current_incidents_export([session])
+
+        self.assertEqual(payload["incident_count"], 1)
+        self.assertEqual(payload["incidents"][0]["attention"], "APPROVAL")
+        self.assertEqual(
+            payload["incidents"][0]["attention_request"]["call_id"], "call-1"
+        )
+
     def test_session_export_uses_full_retention_and_redacts_nested_secrets(self) -> None:
         machine = SessionStateMachine(10)
         failure = FailureInfo(
@@ -188,6 +213,9 @@ class ExportTests(unittest.TestCase):
             machine.retained_events("key"),
             generated_at="2026-07-16T00:00:00Z",
         )
+        self.assertIn("observation", payload["session"])
+        self.assertIn("silence", payload["session"])
+        self.assertIn("compactions", payload)
         self.assertEqual(payload["export_schema_version"], 1)
         self.assertEqual(payload["retention"]["event_count"], 3)
         self.assertEqual(len(payload["events"]), 3)
