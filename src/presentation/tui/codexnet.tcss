@@ -15,17 +15,9 @@ Screen {
 }
 
 #app-header {
-    height: 3;
-    padding: 1 2 0 2;
+    height: 1;
+    padding: 0 2;
     background: #111827;
-    border-bottom: solid $border;
-}
-
-#metrics {
-    height: 3;
-    padding: 1 2;
-    color: $muted;
-    background: $background;
 }
 
 #workspace {
@@ -107,14 +99,7 @@ Screen {
     border-bottom: solid $border;
 }
 
-#network-strip {
-    height: 2;
-    padding: 0 1;
-    color: $text;
-    background: $surface;
-}
-
-#runtime-strip {
+#health-strip {
     height: 2;
     padding: 0 1;
     color: $muted;
@@ -138,13 +123,17 @@ Screen {
     background: $background;
 }
 
-#timeline-panel,
-#turns-panel,
-#evidence-panel {
+#activity-panel,
+#diagnosis-panel {
     height: 1fr;
     padding: 1;
     background: $background;
     scrollbar-size: 1 1;
+}
+
+#activity-panel {
+    overflow-x: hidden;
+    overflow-y: auto;
 }
 
 #status-line {
@@ -190,7 +179,6 @@ Footer {
     width: 100%;
 }
 
-.too-small #metrics,
 .too-small #workspace,
 .too-small #status-line {
     display: none;
@@ -201,13 +189,13 @@ Footer {
 }
 
 HelpScreen,
-CompareScreen {
+SettingsScreen {
     align: center middle;
     background: #020617 65%;
 }
 
 #help-dialog,
-#compare-dialog {
+#settings-dialog {
     width: 76;
     max-width: 92%;
     height: auto;
@@ -215,6 +203,55 @@ CompareScreen {
     padding: 1 2;
     background: $surface;
     border: round $border;
+}
+
+#settings-dialog {
+    width: 72;
+    height: 17;
+    max-height: 92%;
+}
+
+#settings-fields {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+.setting-row {
+    height: 3;
+    padding: 0 1;
+    background: transparent;
+}
+
+.setting-row:hover {
+    background: $surface-light;
+}
+
+.setting-label {
+    width: 1fr;
+    height: 3;
+    content-align: left middle;
+}
+
+.setting-row Switch {
+    width: auto;
+    height: 3;
+}
+
+.setting-row Select {
+    width: 38;
+    height: 3;
+}
+
+#settings-actions {
+    height: 4;
+    align-horizontal: right;
+    padding-top: 1;
+}
+
+#settings-actions Button {
+    width: 12;
+    min-width: 10;
+    margin-left: 1;
 }
 
 #compare-dialog {
