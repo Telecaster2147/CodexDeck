@@ -34,7 +34,6 @@ class AppOptions:
     no_color: bool
     show_auxiliary: bool
     flat: bool
-    doctor: bool = False
     command: str = "monitor"
     export_session: str | None = None
     current_incidents: bool = False
@@ -113,7 +112,7 @@ def run_application(options: AppOptions) -> int:
 
 
 def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
-    command = "doctor" if options.doctor else options.command
+    command = options.command
     if command == "doctor":
         snapshot = engine.sample()
         _validate_explicit_filters(options, snapshot)
@@ -153,7 +152,7 @@ def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
         and sys.stdout.isatty()
     )
     if interactive:
-        run_tui(engine, not options.no_color, options.show_auxiliary, options.flat)
+        run_tui(engine, not options.no_color, options.flat)
         return 0
 
     engine.baseline()

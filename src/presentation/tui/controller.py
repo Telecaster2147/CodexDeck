@@ -10,7 +10,6 @@ from .textual_app import run_textual_tui
 def run_tui(
     engine: MonitorEngine,
     use_color: bool,
-    show_auxiliary: bool,
     flat: bool,
 ) -> MonitorSnapshot:
-    return run_textual_tui(engine, use_color, show_auxiliary, flat)
+    return run_textual_tui(engine, use_color, flat)

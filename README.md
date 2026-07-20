@@ -7,11 +7,11 @@
 ## 功能
 
 - 自动发现当前用户运行的 Codex 会话、启动器、app-server 和辅助组件
-- 同时观察不同 `CODEX_HOME` 和 `CODEX_SQLITE_HOME`，默认按实例分组
+- 同时观察不同 `CODEX_HOME` 和 `CODEX_SQLITE_HOME`，默认按真实 workspace 分组并显示 home 元数据
 - 优先解析 Codex 官方 rollout 事件，识别 turn、推理摘要、工具、文件变更、compact、重连和失败
 - Overview 直接显示当前工具、命令摘要、文件影响、subagent 与 action required
-- Activity 展示语义里程碑；Diagnosis 展示证据链、数据质量、瓶颈和历史窗口趋势
-- Terminal 以只读方式关联后台 exec 与后续 poll，展示 retained transcript、状态、PID、cwd 和退出码
+- Activity 展示语义里程碑；Diagnosis 展示当前结论、关键证据、数据质量和瓶颈
+- Terminal 以只读终端视图展示当前运行中的后台 exec，并关联后续 poll 输出、PID、命令和 cwd
 - 子进程 stdout/stderr 指向工作区或 `/tmp` 普通文件时，每 2 秒增量 tail；不读取 PTY、pipe 或 socket
 - 单次 SSE idle timeout 显示为 `RECONNECTING`，恢复后记录 `RECOVERED`
 - 每个终态模型失败显示结构化错误类型和完整脱敏 errmsg
@@ -20,7 +20,7 @@
 - 根据官方 thread 与 agent path 展示 subagent 层级和运行状态
 - 比较 TCP 队列、收发字节、ACK 和重传；连续两个异常窗口后才确认阻塞
 - 一条异常连接不会覆盖同进程中仍在传输的活跃连接
-- 可选被动解析 TLS ClientHello，关联 SNI、ALPN 和协商版本到对应 Codex TCP 连接
+- 可选的高级实验诊断可被动解析 TLS ClientHello，提供连接归属辅助证据
 - 提供基于 Textual 的响应式 TUI、文本输出、单次 JSON 和连续 NDJSON
 - TUI 每 100ms 增量读取活动 rollout 事件，完整进程与网络采样仍保持默认 2 秒
 - rollout 即使只增长 partial/ignored record，也会更新只读活动证据而不追加 Activity
@@ -102,14 +102,14 @@ codexnet doctor --json
 
 `doctor` 立即执行一次只读采样，不等待两秒基线窗口，也不会修改 Codex 数据或配置。
 
-需要额外确认 TLS 连接目标时，可显式启用 Linux 原始套接字采集：
+需要额外确认 TLS 连接目标时，可显式启用高级实验性的 Linux 原始套接字采集：
 
 ```bash
 codexnet --packet-inspection
 codexnet doctor --packet-inspection --json
 ```
 
-该开关默认关闭，运行账户需要 `CAP_NET_RAW` 或 root。采集器只解析 ClientHello 的 SNI、ALPN、
+该能力的数据面冻结且默认关闭，运行账户需要 `CAP_NET_RAW` 或 root。采集器只解析 ClientHello 的 SNI、ALPN、
 TLS 版本和时间，并按当前 TCP 五元组短暂关联；不保留应用请求、响应或 TLS 密文。若系统不允许
 打开原始套接字，`doctor` 和快照的 collector 诊断会显示原因，其他采集器继续工作。
 
@@ -163,16 +163,16 @@ Turn/工具摘要、恢复链、告警、失败 errmsg 和 TCP 证据。导出�
 codexnet metrics
 ```
 
-指标仅使用实例、状态、类别和事件类型等低基数标签，不使用 session ID、PID、errmsg 或
-网络端点。显式开启独立历史库：
+指标 family 已冻结，仅使用实例、状态、类别和事件类型等低基数标签，不使用 session ID、PID、
+errmsg 或网络端点；该命令是一次性输出，不包含内置 HTTP exporter。显式开启独立历史库：
 
 ```bash
 codexnet --history HISTORY.sqlite
 codexnet --once --history HISTORY.sqlite --history-days 14 --history-max-mib 64
 ```
 
-历史功能默认关闭，不写入 Codex 自有 SQLite；关键事件按原始记录保存，会话采样按 10 秒、
-实例采样按 60 秒聚合，并按天数和空间上限淘汰。
+历史功能默认关闭，不创建数据库、不写入 Codex 自有 SQLite，也不增加 TUI 表格；关键事件按
+原始记录保存，会话采样按 10 秒、实例采样按 60 秒聚合，并按天数和空间上限淘汰。
 
 筛选进程或 Codex home：
 
@@ -200,7 +200,7 @@ codexnet --flat
 | `--codex-home PATH` | 只观察指定 home，可重复 |
 | `--once` | 完成一个采样窗口后退出 |
 | `--flat` | 启动时使用扁平会话视图 |
-| `--all` | 包含启动器、app-server 和辅助组件 |
+| `--all` | 在 text/JSON 输出中包含启动器、app-server 和辅助组件 |
 | `--packet-inspection` | 被动解析 TLS ClientHello 元数据，要求 `CAP_NET_RAW` 或 root |
 | `--json` | 单次模式输出 JSON，持续模式输出 NDJSON |
 | `--no-color` | 关闭终端颜色 |
@@ -214,7 +214,7 @@ codexnet --flat
 TUI 的首屏是跨会话 Overview，目标是直接回答哪个工作区正在执行什么、哪个会话需要用户操作，以及哪里发生失败、恢复或阻塞：
 
 ```text
- CODEXNET   SESSIONS 3   ISSUES 1   OPERATIONAL
+ CODEXNET   SESSIONS 3   ISSUES 1
 
  ▼ workspace-a
    CODEX_HOME CODEX_HOME_A · 2 sessions · 1 action required
@@ -233,13 +233,12 @@ TUI 的首屏是跨会话 Overview，目标是直接回答哪个工作区正在�
 | `↑` / `↓`、`j` / `k` | 移动选择 |
 | `Enter` | 折叠/展开工作区，或在窄屏进入会话详情 |
 | `1` / `2` / `3` | 切换 Activity / Diagnosis / Terminal |
-| `o` | 打开所选会话的只读 Terminal |
-| `,` | 打开可点击的显示设置 |
-| `/` | 搜索会话；Terminal tab 中搜索当前 retained transcript |
-| `Tab` | 跳到下一个需要关注的会话 |
+| `/` | 搜索会话；Terminal tab 中搜索当前后台进程输出 |
+| `]` | 跳到下一个需要关注的会话 |
+| `Tab` / `Shift+Tab` | 切换焦点 |
 | `f` | 切换 Activity 与 Terminal 的自动跟随，不持久化 |
+| `n` / `Shift+N` | Terminal 搜索中跳到下一个或上一个匹配 |
 | `g` | 切换分组和扁平视图 |
-| `a` | 显示或隐藏辅助进程 |
 | `r` | 立即执行完整采样 |
 | `?` | 打开快捷键与运行参数帮助 |
 | `Esc` | 返回上一级 |
@@ -247,24 +246,24 @@ TUI 的首屏是跨会话 Overview，目标是直接回答哪个工作区正在�
 
 Inspector 有三个页面：
 
-- **Activity**：展示请求、工具、文件、action required、失败/恢复、compact 和 subagent 等语义里程碑。Operational 模式默认隐藏 keepalive、token/rate-limit 快照、普通 `MODEL_PROGRESS`、reasoning 和成功工具原文。已完成 compact 折叠为一条摘要，领域事件和导出仍保留开始/完成两阶段。
-- **Diagnosis**：按结论、原因、证据链、provenance、freshness、数据质量、capacity、Turn 瓶颈、异常 TCP、agent tree 和历史趋势组织。未知协议显示 `UNPARSED` 的类型、长度、hash 与截断状态；Diagnostic 模式可查看脱敏预览，但主界面不解析或倾倒序列化 JSON。
-- **Terminal**：按后台 process/call 关联初始 exec 和后续 `write_stdin`/poll 输出，并明确标注 `FILE TAIL`、`UPDATES ON CODEX POLL`、`FINAL TRANSCRIPT` 或 `METADATA ONLY`。输出带 `OUT`、`ERR`、`TTY`、`SYS` 标签；控制序列被清理，截断和 dropped bytes 显式显示。普通 Codex TUI 不公开进程内逐字节输出，因此 poll transcript 只在 Codex 写入新工具结果后更新。
+- **Activity**：展示请求、工具、文件、action required、失败/恢复、compact 和 subagent 等语义里程碑。默认隐藏 keepalive、token/rate-limit 快照、普通 `MODEL_PROGRESS`、reasoning 和成功工具原文；已完成 compact 与工具边界折叠为摘要，领域事件和导出仍保留完整状态。
+- **Diagnosis**：只展示当前结论、原因、最多三条关键证据、数据质量和最近 Turn 瓶颈。历史趋势、完整 collector/capacity、协议预览、agent tree 和逐连接详情由 doctor、export、metrics、history 或 JSON 承接。
+- **Terminal**：只显示当前仍在运行且可关联 process ID 的后台进程，完成或 stale 的进程不占用界面。顶部使用 shell prompt 形式展示 cwd 与命令，正文按真实终端行排列，仅保留窄的 `OUT`、`ERR`、`TTY`、`SYS` 来源 gutter。数组型工具输出会先展开 content parts 并移除 Codex 的 `Script completed`/`Wall time` 外壳；控制序列被清理，截断和 dropped bytes 显式显示。普通 Codex TUI 不公开进程内逐字节输出，因此内容只在 Codex 写入新的 poll 结果后更新。
 
 Overview 与固定 health strip 会显示 phase age、semantic silence、最近 evidence 和 observation
 结论。1 秒时钟只重算显示 age，不调用进程发现、SQLite、`ss`、packet 或 history，也不向
 Activity 追加 heartbeat。静默判断不会把 process alive、spinner 或 TCP established 描述成模型进展。
 
 Compact 使用独立 operation lifecycle：`requested`、`candidate`、`running`、`completed`、
-`failed`、`aborted`。运行中的 requested/running 始终可见；成功 terminal 后 Operational 模式才
-折叠成包含开始时间、duration、trigger、source 和 confidence 的摘要。Diagnostic 模式保留每个
-edge 和多源 evidence chain；completion-only 不会虚构 start。
+`failed`、`aborted`。运行中的 requested/running 始终可见；成功 terminal 后折叠成包含开始时间、
+duration、trigger、source 和 confidence 的摘要；completion-only 不会虚构 start。
 
-设置仅保留 `Operational` / `Diagnostic` 模式、工作区分组和辅助进程。偏好保存在 `$XDG_CONFIG_HOME/codexnet/settings.json`；follow 只属于当前视图。每个 `CODEX_HOME` 的 `config.toml` 中 `model_auto_compact_token_limit` 作为配置边界显示，实际 compact 仍只由 rollout/log 协议确认。
+工作区默认分组，`g` 只切换当前运行中的分组状态，`--flat` 控制启动默认值；TUI 不再保存显示
+偏好。每个 `CODEX_HOME` 的 `config.toml` 中 `model_auto_compact_token_limit` 仍作为采集配置，
+实际 compact 只由 rollout/log 协议确认。启用 history 后，长期趋势继续通过 metrics、export 和
+机器输出消费，不进入实时 Diagnosis。
 
-启用独立历史库后，Diagnosis 显示 15m、1h、24h 窗口的 TTFT、工具耗时与静默 p50/p95、失败率、重连、恢复耗时，以及 compact 的 manual/auto、retry、failure、duration 和 context before/after 汇总。每项都带样本数；样本不足时只显示 `n=`，不输出伪精确趋势。
-
-宽度至少 96 列时保持 Overview 与 Inspector 双面板；更窄时使用列表/详情钻取；低于 50×12 显示尺寸提示。稳定刷新原地更新导航、Activity 与 Terminal，保留焦点、选择和滚动位置。
+宽度至少 96 列时保持 Overview 与 Inspector 双面板；更窄时使用列表/详情钻取；低于 50×20 显示尺寸提示。稳定刷新原地更新导航、Activity 与 Terminal，保留焦点、选择和滚动位置。
 
 ## 状态语义
 
@@ -295,12 +294,14 @@ edge 和多源 evidence chain；completion-only 不会虚构 start。
 
 内部实例身份由 `(CODEX_HOME, CODEX_SQLITE_HOME)` 组成。监视器按以下顺序定位数据：
 
-1. 读取每个 Codex 进程的环境变量和 cwd。
-2. 从进程打开的 rollout 与 SQLite 文件反推路径。
+1. 从进程打开的 rollout 与 SQLite 文件确认实际路径。
+2. 读取对应 `CODEX_HOME/config.toml`、进程环境变量和 cwd。
 3. 通过进程父子关系关联启动器和辅助组件。
 4. 使用 Codex 默认 home，同时在路径证据不足时显示数据不完整提示。
 
-相对 `CODEX_SQLITE_HOME` 按对应 Codex 进程的 cwd 解析，与 Codex 自身行为一致。SQLite 文件会先进行只读 schema 能力检查，缺少可选数据源不会中断其他实例。
+相对 `sqlite_home` 与 `CODEX_SQLITE_HOME` 按对应 Codex 进程的 cwd 解析。已打开 SQLite
+文件是最强证据；文件尚未打开时，配置值优先于环境变量。SQLite 文件会先进行只读 schema
+能力检查，缺少可选数据源不会中断其他实例。
 
 ## JSON
 
@@ -311,6 +312,7 @@ JSON 顶层包含：
   "schema_version": 1,
   "generated_at": "2026-07-15T19:00:00+08:00",
   "interval_seconds": 2.0,
+  "collection_duration_seconds": 0.12,
   "summary": {},
   "diagnostics": [],
   "instances": []
@@ -329,7 +331,8 @@ JSON 顶层包含：
 src/
 ├── cli.py                     # 参数和顶层异常处理
 ├── app.py                     # 运行模式与退出码
-├── engine.py                  # 多实例增量采样引擎
+├── engine.py                  # 完整采集与快速事件刷新编排
+├── snapshot_publisher.py      # 快照发布与可选 history 持久化
 ├── state_machine.py           # 生命周期、恢复和停顿状态机
 ├── models.py                  # 领域模型和 schema 值
 ├── diagnostics.py             # 采集器耗时、错误与 stale 状态
@@ -340,6 +343,7 @@ src/
 │   ├── state_store.py         # 只读 SQLite 能力和批量查询
 │   ├── rollout.py             # 增量 JSONL 与半行处理
 │   ├── process_activity.py    # /proc process tree CPU/I/O 差值
+│   ├── compact_evidence.py    # 可选 compact 旁路统一适配层
 │   ├── tui_session_log.py     # typed Compact 白名单解析
 │   ├── hook_events.py         # 最小 compact hook receiver/reader
 │   └── events.py              # 官方协议与诊断日志标准化
@@ -353,9 +357,14 @@ src/
     ├── doctor.py
     ├── export.py
     ├── metrics.py
+    ├── projection.py          # collector 与数据质量共享投影
     └── tui/
+        ├── activity.py
         ├── controller.py
+        ├── diagnosis.py
+        ├── terminal_panel.py
         ├── textual_app.py
+        ├── theme.py
         └── codexnet.tcss
 ```
 

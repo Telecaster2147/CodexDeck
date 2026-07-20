@@ -80,9 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="只观察指定 CODEX_HOME，可重复",
     )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--watch", action="store_true", help="持续观察（默认）")
-    mode.add_argument("--once", action="store_true", help="完成一个采样窗口后退出")
+    parser.add_argument("--once", action="store_true", help="完成一个采样窗口后退出")
     parser.add_argument("--flat", action="store_true", help="启动时使用扁平会话视图")
     parser.add_argument("--all", action="store_true", help="显示启动器、app-server 和辅助进程")
     parser.add_argument(
@@ -96,12 +94,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--current-incidents",
         action="store_true",
         help="export：导出当前未解决事件清单",
-    )
-    parser.add_argument(
-        "--format",
-        choices=("json",),
-        default="json",
-        help="export 输出格式，当前仅支持 json",
     )
     parser.add_argument(
         "--history",
@@ -160,7 +152,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         show_auxiliary=args.all,
         flat=args.flat,
         packet_inspection=args.packet_inspection,
-        doctor=args.command == "doctor",
         command=args.command or "monitor",
         export_session=args.session,
         current_incidents=args.current_incidents,

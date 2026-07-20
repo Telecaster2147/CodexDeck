@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import io
 import sys
-import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from rich.console import Console
 
@@ -28,7 +26,6 @@ from models import (  # noqa: E402
     NetworkEvidence,
     NetworkState,
     NormalizedEvent,
-    ObservationPulse,
     ProcessIdentity,
     ProcessInfo,
     RecoveryState,
@@ -43,25 +40,22 @@ from presentation.tui.textual_app import (  # noqa: E402
     CodexNetApp,
     NavigationItem,
     SampleCompleted,
-    SettingsScreen,
+    TerminalPanel,
     _diagnosis_renderable,
     _timeline_line,
+    binding_key_label,
+    keyboard_reference,
     session_marker,
     session_status,
     timeline_entries,
-)
-from presentation.tui.preferences import (  # noqa: E402
-    TuiPreferences,
-    load_preferences,
-    save_preferences,
 )
 from textual.widgets import (  # noqa: E402
     ContentSwitcher,
     DataTable,
     Footer,
     Input,
+    ListView,
     RichLog,
-    Select,
     Static,
 )
 
@@ -153,7 +147,7 @@ class FakeEngine:
 
 
 class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
-    async def test_overview_prioritizes_action_required_and_tab_selects_it(self) -> None:
+    async def test_overview_prioritizes_action_required_and_anomaly_key_selects_it(self) -> None:
         snapshot = make_snapshot(2)
         waiting = snapshot.sessions[1]
         waiting.attention = AttentionState.APPROVAL
@@ -178,8 +172,12 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 str(sessions[0].query_one(Static).render()),
             )
             app.selected_session = snapshot.sessions[0]
-            app.action_next_anomaly()
+            await pilot.press("]")
             self.assertIs(app.selected_session, waiting)
+            selected = app.selected_session
+            await pilot.press("tab")
+            self.assertIs(app.selected_session, selected)
+            self.assertIsNot(app.focused, app.query_one("#session-list", ListView))
 
     async def test_new_attention_emits_cross_session_notification(self) -> None:
         snapshot = make_snapshot(1)
@@ -201,25 +199,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(notices[0][0], "Choose an option")
         self.assertIn("ACTION REQUIRED", str(notices[0][1]["title"]))
-
-    def test_preferences_round_trip_and_ignore_invalid_values(self) -> None:
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "settings.json"
-            expected = TuiPreferences(
-                grouped=False,
-                show_auxiliary=True,
-                mode="diagnostic",
-            )
-            save_preferences(expected, path)
-            self.assertEqual(load_preferences(path), expected)
-
-            path.write_text(
-                '{"grouped": "yes", "mode": "everything", "follow": false}',
-                encoding="utf-8",
-            )
-            loaded = load_preferences(path)
-            self.assertTrue(loaded.grouped)
-            self.assertEqual(loaded.mode, "operational")
 
     def test_unparsed_trace_shows_identity_without_raw_object(self) -> None:
         line = _timeline_line(
@@ -286,7 +265,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("98.4%", render_plain(line))
         self.assertIn("剩余 3,598", render_plain(line))
 
-    def test_diagnosis_shows_configured_auto_compact_boundary(self) -> None:
+    def test_diagnosis_keeps_conclusion_and_hides_repeated_capacity(self) -> None:
         snapshot = make_snapshot(1)
         instance = snapshot.instances[0]
         instance.auto_compact_token_limit = 220_000
@@ -295,30 +274,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         session.token_usage = TokenUsageSummary(
             context_tokens=216_402,
             context_window=353_400,
-        )
-
-        output = io.StringIO()
-        console = Console(width=120, file=output, color_system=None)
-        session.diagnosis = [DiagnosisFinding("info", "模型正在生成", "正常进展")]
-        console.print(_diagnosis_renderable(session, instance))
-        rendered = output.getvalue()
-
-        self.assertIn("诊断结论", rendered)
-        self.assertIn("推导结论", rendered)
-        self.assertIn("置信度 中", rendered)
-        self.assertIn("数据质量", rendered)
-        self.assertIn("自动 compact 边界  220,000", rendered)
-        self.assertIn("剩余 3,598", rendered)
-        self.assertIn("config.toml", rendered)
-
-    def test_diagnosis_history_uses_windows_and_sample_thresholds(self) -> None:
-        snapshot = make_snapshot(1)
-        instance = snapshot.instances[0]
-        instance.sessions[0].observation = ObservationPulse(
-            last_semantic_at=time.time() - 10,
-            silence_baseline_samples=4,
-            silence_p50_seconds=2,
-            silence_p95_seconds=5,
         )
         instance.history_windows = [
             HistoryWindowStats(
@@ -331,28 +286,24 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 ttft_samples=2,
                 ttft_p50_seconds=1.0,
                 ttft_p95_seconds=3.0,
-                reconnect_count=4,
-                compact_retry_count=2,
-                compact_context_samples=1,
-                compact_context_before_average=240_000,
-                compact_context_after_average=60_000,
             )
         ]
+
         output = io.StringIO()
-        Console(width=120, file=output, color_system=None).print(
-            _diagnosis_renderable(instance.sessions[0], instance)
-        )
+        console = Console(width=120, file=output, color_system=None)
+        session.diagnosis = [DiagnosisFinding("info", "模型正在生成", "正常进展")]
+        console.print(_diagnosis_renderable(session, instance))
         rendered = output.getvalue()
 
-        self.assertIn("历史趋势", rendered)
-        self.assertIn("样本", rendered)
-        self.assertIn("失败", rendered)
-        self.assertIn("15m", rendered)
-        self.assertIn("n=2", rendered)
-        self.assertIn("50% (1/2)", rendered)
-        self.assertIn("retry 2", rendered)
-        self.assertIn("ctx 240000->60000", rendered)
-        self.assertIn("p50 2s · p95 5s · n=4 · 当前超过 p95", rendered)
+        self.assertIn("诊断结论", rendered)
+        self.assertIn("证据属性  推导", rendered)
+        self.assertIn("置信度 中", rendered)
+        self.assertIn("数据质量", rendered)
+        self.assertNotIn("自动 compact 边界", rendered)
+        self.assertNotIn("config.toml", rendered)
+        self.assertNotIn("历史趋势", rendered)
+        self.assertNotIn("15m", rendered)
+        self.assertNotIn("p50", rendered)
 
     def test_timeline_restores_trimmed_compact_from_summary(self) -> None:
         session = make_snapshot(1).sessions[0]
@@ -374,12 +325,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             [entry["kind"] for entry in entries],
             ["COMPACT_COMPLETED"],
         )
-        diagnostic = timeline_entries(session, TuiPreferences(mode="diagnostic"))
-        self.assertEqual(
-            [entry["kind"] for entry in diagnostic],
-            ["COMPACTING", "COMPACT_COMPLETED"],
-        )
-
     def test_active_compact_edges_remain_visible_until_success_terminal(self) -> None:
         session = make_snapshot(1).sessions[0]
         session.events = [
@@ -429,7 +374,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                     "output": '{"status":"completed","result":"two matching sessions"}',
                 },
             ),
-            TuiPreferences(mode="diagnostic"),
         )
         rendered = render_plain(line)
         self.assertNotIn("session events", rendered)
@@ -449,7 +393,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                     "output": "",
                 },
             ),
-            TuiPreferences(mode="diagnostic"),
         )
         background_rendered = render_plain(background)
         self.assertIn("TASK", background_rendered)
@@ -480,17 +423,15 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("const result", render_plain(line))
         self.assertNotIn("await tools", render_plain(line))
 
-    def test_operational_mode_filters_noise_and_tool_output(self) -> None:
+    def test_activity_filters_noise_and_tool_output(self) -> None:
         session = make_snapshot(1).sessions[0]
         session.events = [
             NormalizedEvent(1.0, "REASONING_SUMMARY", "推理摘要"),
             NormalizedEvent(2.0, "MODEL_PROGRESS", "模型进度"),
             NormalizedEvent(3.0, "TOOL_COMPLETED", "工具完成"),
         ]
-        preferences = TuiPreferences(mode="operational")
-
         self.assertEqual(
-            [_kind(item) for item in timeline_entries(session, preferences)],
+            [_kind(item) for item in timeline_entries(session)],
             ["TOOL_COMPLETED"],
         )
         line = _timeline_line(
@@ -500,11 +441,10 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 "工具完成",
                 metadata={"output": '{"message":"hidden output"}'},
             ),
-            preferences,
         )
         self.assertNotIn("hidden output", render_plain(line))
 
-    def test_operational_mode_folds_completed_tool_boundaries(self) -> None:
+    def test_activity_folds_completed_tool_boundaries(self) -> None:
         session = make_snapshot(1).sessions[0]
         session.events = [
             NormalizedEvent(
@@ -532,8 +472,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        operational = timeline_entries(session, TuiPreferences(mode="operational"))
-        diagnostic = timeline_entries(session, TuiPreferences(mode="diagnostic"))
+        operational = timeline_entries(session)
 
         self.assertEqual([_kind(item) for item in operational], ["TOOL_COMPLETED"])
         self.assertEqual(operational[0].metadata["duration_seconds"], 2.0)
@@ -544,10 +483,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TOOL", rendered)
         self.assertIn("exec_command", rendered)
         self.assertNotIn("custom_tool_call_output", rendered)
-        self.assertEqual(
-            [_kind(item) for item in diagnostic], ["TOOL_RUNNING", "TOOL_COMPLETED"]
-        )
-
     def test_execution_trace_renders_command_and_pending_file(self) -> None:
         line = _timeline_line(
             NormalizedEvent(
@@ -724,6 +659,34 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 str(app.query_one("#health-strip", Static).render()),
             )
 
+    async def test_collector_error_survives_clock_tick_until_successful_sample(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 24)) as pilot:
+            app._show_collector_error("socket probe failed")
+            await app._clock_tick()
+            self.assertIn(
+                "COLLECTOR ERROR  socket probe failed",
+                str(app.query_one("#status-line", Static).render()),
+            )
+
+            app._finish_sample(snapshot, "")
+            await pilot.pause()
+            self.assertNotIn(
+                "COLLECTOR ERROR",
+                str(app.query_one("#status-line", Static).render()),
+            )
+
+    async def test_navigation_rebuild_coalesces_concurrent_requests(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 24)):
+            app.rebuilding = True
+            await app._rebuild_navigation()
+            self.assertTrue(app.navigation_dirty)
+
     def test_session_status_and_markers_preserve_live_phase(self) -> None:
         session = make_snapshot(1).sessions[0]
         session.phase = "模型正在生成"
@@ -798,6 +761,19 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                     tool_count=1,
                     file_count=2,
                 )
+                if size in {(80, 24), (60, 20)}:
+                    terminal = TerminalSessionSummary(
+                        "terminal-floor",
+                        process_id="700",
+                        status="running",
+                        capability=TerminalCapability.POLL_TRANSCRIPT,
+                        chunks=(TerminalChunk("floor", 1.0, text="visible output\n"),),
+                    )
+                    snapshot.sessions[0].terminal_sessions = [terminal]
+                    if size == (60, 20):
+                        snapshot.sessions[0].terminal_sessions.append(
+                            replace(terminal, terminal_id="terminal-floor-2")
+                        )
                 app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
                 async with app.run_test(size=size) as pilot:
                     await pilot.pause()
@@ -809,6 +785,18 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                         item for item in app.query(NavigationItem) if item.kind == "session"
                     )
                     self.assertLessEqual(row.size.height, 2)
+
+                    if size in {(80, 24), (60, 20)}:
+                        await pilot.press("enter", "3")
+                        await pilot.pause()
+                        self.assertGreater(
+                            app.query_one("#terminal-output", RichLog).size.height,
+                            0,
+                        )
+                        self.assertEqual(
+                            app.query_one("#terminal-list", DataTable).display,
+                            size == (60, 20),
+                        )
 
         small_snapshot = make_snapshot()
         small_app = CodexNetApp(FakeEngine(small_snapshot), small_snapshot, sampling=False)
@@ -884,7 +872,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.press("o")
+            await pilot.press("3")
             await pilot.pause()
 
             self.assertEqual(
@@ -894,18 +882,26 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.query_one("#terminal-list", DataTable).row_count, 1)
             header = str(app.query_one("#terminal-header", Static).render())
             self.assertIn("READ ONLY", header)
-            self.assertIn("UPDATES ON CODEX POLL", header)
-            self.assertIn("server --watch", header)
+            self.assertIn("POLL", header)
+            self.assertNotIn("server --watch", header)
             log = app.query_one("#terminal-output", RichLog)
             rendered = "\n".join(line.text for line in log.lines)
-            self.assertIn("OUT", rendered)
-            self.assertIn("ERR", rendered)
+            self.assertIn("/work/repository $ server --watch", rendered)
+            self.assertIn("OUT │ line 0", rendered)
+            self.assertIn("ERR │ line 20", rendered)
             self.assertIn("line 20", rendered)
+            self.assertNotRegex(rendered, r"\d{2}:\d{2}:\d{2}")
 
             await pilot.press("enter")
             log.scroll_to(y=5, animate=False, immediate=True)
             await pilot.pause()
             previous_scroll = log.scroll_y
+            selected = app.selected_session
+            await pilot.press("j")
+            self.assertGreaterEqual(log.scroll_y, previous_scroll)
+            self.assertIs(app.selected_session, selected)
+            await pilot.press("k")
+            self.assertIs(app.selected_session, selected)
             app.follow = False
             refreshed = make_snapshot(1)
             refreshed.sessions[0].terminal_sessions = [
@@ -924,31 +920,132 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.query_one("#terminal-search", Input).has_focus)
             await pilot.press("l", "i", "n", "e", "enter")
             self.assertEqual(app.query_one("#terminal-search", Input).value, "line")
+            self.assertIn("MATCH 1/", str(app.query_one("#terminal-header", Static).render()))
+            first_match_scroll = log.scroll_y
+            await pilot.press("n")
+            self.assertGreaterEqual(log.scroll_y, first_match_scroll)
 
-    async def test_settings_popup_is_clickable_and_persists_changes(self) -> None:
+    async def test_terminal_tab_only_shows_current_background_processes(self) -> None:
+        self.assertEqual(
+            TerminalPanel.CAPABILITY_LABELS[TerminalCapability.STREAMING],
+            "RESERVED",
+        )
         snapshot = make_snapshot(1)
-        with TemporaryDirectory() as directory:
-            settings_path = Path(directory) / "settings.json"
-            app = CodexNetApp(
-                FakeEngine(snapshot),
-                snapshot,
-                sampling=False,
-                preferences=TuiPreferences(),
-                settings_path=settings_path,
+        running = TerminalSessionSummary(
+            "running-terminal",
+            process_id="777",
+            command="npm run dev",
+            cwd="/workspace-a",
+            status="running",
+            capability=TerminalCapability.POLL_TRANSCRIPT,
+            chunks=(TerminalChunk("running", 1.0, text="ready\n"),),
+        )
+        completed = TerminalSessionSummary(
+            "completed-terminal",
+            process_id="778",
+            command="pytest",
+            status="completed",
+            capability=TerminalCapability.FINAL_TRANSCRIPT,
+            chunks=(TerminalChunk("completed", 1.0, text="passed\n"),),
+        )
+        stale = replace(running, terminal_id="stale-terminal", process_id="779", stale=True)
+        snapshot.sessions[0].terminal_sessions = [completed, running, stale]
+        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+
+            table = app.query_one("#terminal-list", DataTable)
+            self.assertEqual(table.row_count, 1)
+            header = str(app.query_one("#terminal-header", Static).render())
+            self.assertIn("PID 777", header)
+            self.assertNotIn("npm run dev", header)
+            self.assertNotIn("pytest", header)
+            rendered = "\n".join(
+                line.text for line in app.query_one("#terminal-output", RichLog).lines
+            )
+            self.assertIn("/workspace-a $ npm run dev", rendered)
+            self.assertIn("TTY │ ready", rendered)
+            self.assertNotIn("passed", rendered)
+
+            refreshed = make_snapshot(1)
+            refreshed.sessions[0].terminal_sessions = [
+                replace(running, status="completed", exit_code=0)
+            ]
+            app._apply_snapshot(refreshed)
+            await pilot.pause()
+
+            self.assertEqual(table.row_count, 0)
+            self.assertIn(
+                "当前没有运行中的后台进程",
+                str(app.query_one("#terminal-header", Static).render()),
+            )
+            self.assertIn(
+                "当前没有运行中的后台进程",
+                "\n".join(
+                    line.text for line in app.query_one("#terminal-output", RichLog).lines
+                ),
             )
 
-            async with app.run_test(size=(120, 36)) as pilot:
-                await pilot.press(",")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, SettingsScreen)
-                app.screen.query_one("#setting-mode", Select).value = "diagnostic"
-                await pilot.click("#settings-save")
-                await pilot.pause()
+    async def test_terminal_prompt_keeps_complete_long_command_on_narrow_screen(self) -> None:
+        snapshot = make_snapshot(1)
+        command = (
+            "python -m worker --config /workspace-a/config/production.toml "
+            "--queue background-jobs --concurrency 12 --log-level debug"
+        )
+        snapshot.sessions[0].terminal_sessions = [
+            TerminalSessionSummary(
+                "terminal-long-command",
+                process_id="777",
+                command=command,
+                cwd="/workspace-a",
+                status="running",
+                capability=TerminalCapability.POLL_TRANSCRIPT,
+                chunks=(TerminalChunk("running", 1.0, text="ready\n"),),
+            )
+        ]
+        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
 
-                self.assertTrue(app.follow)
-                self.assertEqual(load_preferences(settings_path).mode, "diagnostic")
-                self.assertNotIn("follow", settings_path.read_text(encoding="utf-8"))
-                self.assertEqual(len(app.screen_stack), 1)
+        async with app.run_test(size=(72, 24)) as pilot:
+            content = app.query_one("#detail-content", ContentSwitcher)
+            await pilot.press("o")
+            await pilot.pause()
+            self.assertEqual(content.current, "activity-panel")
+
+            await pilot.press("3")
+            await pilot.pause()
+
+            log = app.query_one("#terminal-output", RichLog)
+            self.assertTrue(log.wrap)
+            rendered = "\n".join(line.text for line in log.lines)
+            self.assertIn(f"/workspace-a $ {command}", rendered.replace("\n", ""))
+            self.assertNotIn("…", rendered)
+
+    async def test_removed_display_shortcuts_have_no_actions(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        keys = {binding.key for binding in app.BINDINGS}
+        self.assertNotIn("comma", keys)
+        self.assertNotIn("a", keys)
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            grouped = app.grouped
+            await pilot.press(",", "a")
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 1)
+            self.assertEqual(app.grouped, grouped)
+
+    def test_help_and_readme_follow_application_bindings(self) -> None:
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        reference = keyboard_reference()
+        for binding in CodexNetApp.BINDINGS:
+            label = binding_key_label(binding.key)
+            self.assertIn(label, reference)
+            self.assertIn(f"`{label}`", readme)
+        for removed in ("Operational", "Diagnostic", "显示设置", "辅助进程"):
+            self.assertNotIn(removed, reference)
 
     def test_timeline_failure_is_not_duplicated_or_reordered(self) -> None:
         session = make_snapshot(1).sessions[0]
