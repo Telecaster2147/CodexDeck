@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,6 +253,29 @@ def create_instance(
 
 
 class EngineTests(unittest.TestCase):
+    def test_optional_collectors_are_inert_when_disabled(self) -> None:
+        with patch("engine.PacketInspector") as packet_inspector:
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(DiscoveryResult([], {})),
+                sockets=FakeSockets([{}]),
+                proc=FakeProc(),
+            )
+
+        packet_inspector.assert_not_called()
+        self.assertIsNone(engine.packet_inspector)
+        self.assertIsNone(engine.history)
+        self.assertFalse(engine.compact_evidence.hooks.configured)
+        with patch("pathlib.Path.stat") as stat:
+            self.assertEqual(engine.compact_evidence.read_hooks(), [])
+            session_log = engine.compact_evidence.read_session_log(None)
+        stat.assert_not_called()
+        self.assertFalse(session_log.configured)
+        self.assertEqual(engine.compact_evidence.session_logs.cursors, {})
+        engine.close()
+
     def test_full_sample_tails_child_stdout_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -328,6 +352,18 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(
                 all(window.sample_count >= 1 for window in snapshot.instances[0].history_windows)
             )
+            calls = 0
+            original_window_stats = history.window_stats
+
+            def counted_window_stats(**kwargs):
+                nonlocal calls
+                calls += 1
+                return original_window_stats(**kwargs)
+
+            history.window_stats = counted_window_stats  # type: ignore[method-assign]
+            engine.sample()
+            engine.sample()
+            self.assertLessEqual(calls, 1)
             engine.close()
 
     def test_instance_reads_auto_compact_boundary_from_its_codex_home(self) -> None:
@@ -437,6 +473,14 @@ class EngineTests(unittest.TestCase):
             self.assertIs(engine.refresh_events(snapshot), snapshot)
             discovery_calls = discovery.calls
             socket_calls = sockets.calls
+            def forbidden(*args, **kwargs):
+                self.fail("fast path invoked full collector")
+
+            engine.terminal_files.read = forbidden  # type: ignore[method-assign]
+            engine.process_activity.snapshot = forbidden  # type: ignore[method-assign]
+            engine.codex_configs.read = forbidden  # type: ignore[method-assign]
+            engine._store_for = forbidden  # type: ignore[method-assign]
+            engine.snapshot_publisher.publish = forbidden  # type: ignore[method-assign]
             rollout = Path(snapshot.sessions[0].process.rollout_path)
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             with rollout.open("a") as handle:
@@ -603,7 +647,7 @@ class EngineTests(unittest.TestCase):
             terminal = running.sessions[0].terminal_sessions[0]
             self.assertEqual(terminal.process_id, "777")
             self.assertEqual(terminal.status, "running")
-            self.assertEqual(terminal.chunks[0].text, "ready")
+            self.assertEqual(terminal.chunks[0].text, "ready\n")
 
             append(
                 {
@@ -623,9 +667,10 @@ class EngineTests(unittest.TestCase):
             refreshed = engine.refresh_events(running)
 
             terminal = refreshed.sessions[0].terminal_sessions[0]
+            self.assertEqual(terminal.status, "running")
             self.assertEqual(
                 "".join(chunk.text for chunk in terminal.chunks),
-                "readyrequest complete\n",
+                "ready\nrequest complete\n",
             )
             self.assertEqual(discovery.calls, discovery_calls)
             self.assertEqual(sockets.calls, socket_calls)
@@ -679,6 +724,56 @@ class EngineTests(unittest.TestCase):
             )
             engine.close()
 
+    def test_shared_session_log_routes_each_record_before_advancing_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance_a, process_a = create_instance(root / "one", 146, "session-a", False)
+            instance_b, process_b = create_instance(root / "two", 147, "session-b", False)
+            session_log = root / "shared-tui-session.jsonl"
+            session_log.write_text("")
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult(
+                        [process_a, process_b],
+                        {
+                            instance_a.instance_id: instance_a,
+                            instance_b.instance_id: instance_b,
+                        },
+                    )
+                ),
+                sockets=FakeSockets([{}, {}]),
+                proc=SessionLogProc(session_log),
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            with session_log.open("a") as handle:
+                for session_id, turn_id in (("session-a", "TURN_A"), ("session-b", "TURN_B")):
+                    handle.write(
+                        json.dumps(
+                            {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "direction": "from_tui",
+                                "kind": "op",
+                                "op": {"type": "Compact"},
+                                "session_id": session_id,
+                                "turn_id": turn_id,
+                            }
+                        )
+                        + "\n"
+                    )
+
+            refreshed = engine.refresh_events(snapshot)
+
+            statuses = {
+                session.session_id: session.compactions[-1].status
+                for session in refreshed.sessions
+            }
+            self.assertEqual(statuses, {"session-a": "requested", "session-b": "requested"})
+            engine.close()
+
     def test_hook_only_session_refreshes_without_rollout_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -730,6 +825,54 @@ class EngineTests(unittest.TestCase):
                 refreshed.sessions[0].observation.last_evidence_source,
                 "compact_hook",
             )
+            engine.close()
+
+    def test_hook_with_duplicate_session_id_across_homes_is_not_routed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance_a, process_a = create_instance(root / "one", 246, "duplicate", False)
+            instance_b, process_b = create_instance(root / "two", 247, "duplicate", False)
+            hook_events = root / "compact-hooks.jsonl"
+            hook_events.write_text("")
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult(
+                        [process_a, process_b],
+                        {
+                            instance_a.instance_id: instance_a,
+                            instance_b.instance_id: instance_b,
+                        },
+                    )
+                ),
+                sockets=FakeSockets([{}, {}]),
+                proc=FakeProc(),
+                hook_events_path=hook_events,
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            hook_events.write_text(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "event": "PreCompact",
+                        "session_id": "duplicate",
+                        "turn_id": "TURN_DUPLICATE",
+                        "trigger": "manual",
+                        "outcome": "success",
+                    }
+                )
+                + "\n"
+            )
+
+            refreshed = engine.refresh_events(snapshot)
+
+            self.assertTrue(
+                any("缺少唯一可关联 session" in item for item in refreshed.diagnostics)
+            )
+            self.assertTrue(all(not session.compactions for session in refreshed.sessions))
             engine.close()
 
     def test_network_stall_requires_two_windows(self) -> None:

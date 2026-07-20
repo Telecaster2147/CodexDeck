@@ -17,6 +17,7 @@ from models import (
     NormalizedEvent,
     SessionHealth,
 )
+from utils import strip_transcript_bodies
 
 
 KEY_EVENT_TYPES = frozenset(
@@ -143,6 +144,10 @@ class HistoryStore:
             self.connection.execute("PRAGMA page_size = 1024")
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        self._seen_event_keys: dict[tuple[str, str], set[str]] = {}
+        self._turn_signatures: dict[str, tuple[object, ...]] = {}
+        self._compact_signatures: dict[str, tuple[object, ...]] = {}
+        self._last_prune_at: float | None = None
         self._initialize()
 
     def __enter__(self) -> "HistoryStore":
@@ -279,6 +284,11 @@ class HistoryStore:
     def _insert_event(
         self, instance_id: str, session_id: str, event: NormalizedEvent
     ) -> int:
+        event_key = _event_key(instance_id, session_id, event)
+        cache_key = (instance_id, session_id)
+        seen = self._seen_event_keys.setdefault(cache_key, set())
+        if event_key in seen:
+            return 0
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO events(
@@ -287,7 +297,7 @@ class HistoryStore:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _event_key(instance_id, session_id, event),
+                event_key,
                 event.timestamp,
                 instance_id,
                 session_id,
@@ -297,9 +307,18 @@ class HistoryStore:
                 event.detail,
                 event.source,
                 event.turn_id,
-                json.dumps(event.metadata, ensure_ascii=True, sort_keys=True, default=str),
+                json.dumps(
+                    strip_transcript_bodies(event.metadata),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                ),
             ),
         )
+        seen.add(event_key)
+        if len(seen) > 1000:
+            seen.clear()
+            seen.add(event_key)
         return max(cursor.rowcount, 0)
 
     def _record_transition(self, session: SessionHealth, now: float) -> int:
@@ -332,7 +351,12 @@ class HistoryStore:
         )
         return self._insert_event(session.instance_id, session.session_id, transition)
 
-    def _record_turn_metrics(self, session: SessionHealth, now: float) -> None:
+    def _record_turn_metrics(
+        self,
+        session: SessionHealth,
+        now: float,
+        active_keys: set[str],
+    ) -> None:
         for turn in session.turns:
             timestamp = turn.completed_at or turn.started_at or now
             identity = json.dumps(
@@ -340,6 +364,16 @@ class HistoryStore:
                 separators=(",", ":"),
             )
             metric_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            active_keys.add(metric_key)
+            signature = (
+                timestamp,
+                turn.status,
+                turn.time_to_first_token_seconds,
+                turn.tool_duration_seconds,
+                turn.recovery_duration_seconds,
+            )
+            if self._turn_signatures.get(metric_key) == signature:
+                continue
             self.connection.execute(
                 """
                 INSERT INTO turn_metrics(
@@ -365,6 +399,7 @@ class HistoryStore:
                     turn.recovery_duration_seconds,
                 ),
             )
+            self._turn_signatures[metric_key] = signature
 
     def _record_session_bucket(self, session: SessionHealth, bucket: int) -> None:
         active = int(
@@ -453,21 +488,37 @@ class HistoryStore:
             ),
         )
 
-    def _record_compact_metrics(self, session: SessionHealth, now: float) -> None:
+    def _record_compact_metrics(
+        self,
+        session: SessionHealth,
+        now: float,
+        active_keys: set[str],
+    ) -> None:
         for compact in session.compactions:
             timestamp = compact.terminal_at or compact.started_at or compact.requested_at or now
-            operation_key = compact.operation_id or hashlib.sha256(
-                json.dumps(
-                    [
-                        session.instance_id,
-                        session.session_id,
-                        compact.turn_id,
-                        compact.requested_at,
-                        compact.started_at,
-                    ],
-                    separators=(",", ":"),
-                ).encode()
+            operation_identity = [
+                session.instance_id,
+                session.session_id,
+                compact.operation_id,
+                compact.turn_id,
+                compact.requested_at,
+                compact.started_at,
+            ]
+            operation_key = hashlib.sha256(
+                json.dumps(operation_identity, separators=(",", ":")).encode()
             ).hexdigest()
+            active_keys.add(operation_key)
+            signature = (
+                timestamp,
+                compact.trigger or "unknown",
+                compact.status,
+                compact.duration_seconds,
+                compact.retry_count,
+                compact.context_tokens,
+                compact.context_tokens_after,
+            )
+            if self._compact_signatures.get(operation_key) == signature:
+                continue
             self.connection.execute(
                 """
                 INSERT INTO compact_metrics(
@@ -496,6 +547,7 @@ class HistoryStore:
                     compact.context_tokens_after,
                 ),
             )
+            self._compact_signatures[operation_key] = signature
 
     def _record_instance_bucket(
         self, snapshot: MonitorSnapshot, instance_index: int, bucket: int
@@ -550,6 +602,14 @@ class HistoryStore:
         session_bucket = int(now // 10 * 10)
         instance_bucket = int(now // 60 * 60)
         inserted = 0
+        active_sessions = {
+            (session.instance_id, session.session_id) for session in snapshot.sessions
+        }
+        self._seen_event_keys = {
+            key: value for key, value in self._seen_event_keys.items() if key in active_sessions
+        }
+        active_turn_keys: set[str] = set()
+        active_compact_keys: set[str] = set()
         with self.connection:
             for session in snapshot.sessions:
                 inserted += self._record_transition(session, now)
@@ -559,11 +619,28 @@ class HistoryStore:
                     )
                 self._record_session_bucket(session, session_bucket)
                 self._record_silence_sample(session, session_bucket, now)
-                self._record_turn_metrics(session, now)
-                self._record_compact_metrics(session, now)
+                self._record_turn_metrics(session, now, active_turn_keys)
+                self._record_compact_metrics(session, now, active_compact_keys)
             for index in range(len(snapshot.instances)):
                 self._record_instance_bucket(snapshot, index, instance_bucket)
-        self.prune(now=now)
+        self._turn_signatures = {
+            key: value
+            for key, value in self._turn_signatures.items()
+            if key in active_turn_keys
+        }
+        self._compact_signatures = {
+            key: value
+            for key, value in self._compact_signatures.items()
+            if key in active_compact_keys
+        }
+        size_exceeded = self.max_bytes is not None and self._database_bytes() > self.max_bytes
+        if (
+            self._last_prune_at is None
+            or now - self._last_prune_at >= 60
+            or size_exceeded
+        ):
+            self.prune(now=now)
+            self._last_prune_at = now
         return HistoryWriteResult(
             inserted,
             len(snapshot.sessions),
@@ -717,8 +794,10 @@ class HistoryStore:
         """Apply age and file-size limits; size pruning removes oldest buckets first."""
 
         current = now if now is not None else datetime.now(timezone.utc).timestamp()
+        deleted = False
         if self.max_days is not None:
             cutoff = current - self.max_days * 86400
+            before = self.connection.total_changes
             with self.connection:
                 self.connection.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
                 self.connection.execute(
@@ -735,10 +814,11 @@ class HistoryStore:
                     "DELETE FROM compact_metrics WHERE timestamp < ?", (cutoff,)
                 )
                 self.connection.execute("DELETE FROM session_state WHERE updated_at < ?", (cutoff,))
+            deleted = self.connection.total_changes > before
 
         if self.max_bytes is None:
             return
-        while self._database_bytes() > self.max_bytes:
+        while self._database_used_bytes() > self.max_bytes:
             candidates = [
                 ("events", "timestamp"),
                 ("session_buckets", "bucket_start"),
@@ -764,6 +844,8 @@ class HistoryStore:
                     f"(SELECT rowid FROM {table} ORDER BY {column} LIMIT ?)",
                     (batch,),
                 )
+            deleted = True
+        if deleted and self._database_bytes() > self.max_bytes:
             self.connection.execute("VACUUM")
 
     def _database_bytes(self) -> int:
@@ -771,3 +853,9 @@ class HistoryStore:
             return self.path.stat().st_size
         except FileNotFoundError:
             return 0
+
+    def _database_used_bytes(self) -> int:
+        page_size = int(self.connection.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(self.connection.execute("PRAGMA page_count").fetchone()[0])
+        free_pages = int(self.connection.execute("PRAGMA freelist_count").fetchone()[0])
+        return max(0, page_count - free_pages) * page_size

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -184,6 +186,80 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(bucket, (1784160000, 2, 2))
             self.assertEqual(instance, (2, 2))
             self.assertEqual(os.stat(codex_db).st_mtime_ns, before)
+
+    def test_unchanged_turn_and_compact_metrics_skip_redundant_upserts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = make_snapshot(root)
+            snapshot.sessions[0].turns = [
+                TurnSummary(
+                    "turn-1",
+                    started_at=1784160000.0,
+                    status="running",
+                )
+            ]
+            snapshot.sessions[0].compactions = [
+                CompactionSummary(
+                    operation_id="compact-1",
+                    status="running",
+                    started_at=1784160000.0,
+                )
+            ]
+            statements: list[str] = []
+            with HistoryStore(root / "history.sqlite", max_days=None, max_bytes=None) as store:
+                store.connection.set_trace_callback(statements.append)
+                store.record_snapshot(snapshot)
+                store.record_snapshot(snapshot)
+                turn_writes = sum("INSERT INTO turn_metrics" in item for item in statements)
+                compact_writes = sum("INSERT INTO compact_metrics" in item for item in statements)
+
+                snapshot.sessions[0].turns[0] = replace(
+                    snapshot.sessions[0].turns[0], status="completed"
+                )
+                snapshot.sessions[0].compactions[0] = replace(
+                    snapshot.sessions[0].compactions[0], status="completed"
+                )
+                store.record_snapshot(snapshot)
+
+            self.assertEqual(turn_writes, 1)
+            self.assertEqual(compact_writes, 1)
+            self.assertEqual(
+                sum("INSERT INTO turn_metrics" in item for item in statements),
+                2,
+            )
+            self.assertEqual(
+                sum("INSERT INTO compact_metrics" in item for item in statements),
+                2,
+            )
+
+    def test_history_removes_transcript_bodies_from_event_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = make_snapshot(root)
+            transcript = "HISTORY_TRANSCRIPT_SENTINEL_92014"
+            snapshot.sessions[0].events = [
+                NormalizedEvent(
+                    1784160000.0,
+                    "TOOL_COMPLETED",
+                    "shell",
+                    source_id="tool-output",
+                    metadata={
+                        "output": transcript,
+                        "nested": {"stdout": transcript, "stderr": transcript},
+                    },
+                )
+            ]
+            with HistoryStore(root / "history.sqlite", max_days=None, max_bytes=None) as store:
+                store.record_snapshot(snapshot)
+                metadata = store.connection.execute(
+                    "SELECT metadata_json FROM events WHERE event_type = 'TOOL_COMPLETED'"
+                ).fetchone()[0]
+
+            self.assertNotIn(transcript, metadata)
+            self.assertEqual(
+                json.loads(metadata),
+                {"nested": {"stderr": "", "stdout": ""}, "output": ""},
+            )
 
     def test_records_lifecycle_transition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

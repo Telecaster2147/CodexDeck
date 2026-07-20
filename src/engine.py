@@ -11,14 +11,17 @@ from datetime import datetime
 from pathlib import Path
 
 from codex.config_reader import CodexConfigReader
+from codex.compact_evidence import CompactEvidenceReader
 from codex.events import normalize_log
-from codex.hook_events import HookEventReader
 from codex.paths import ProcReader, open_rollout_paths
 from codex.process_activity import ProcessActivityCollector
 from codex.processes import DiscoveryResult, ProcessDiscovery
 from codex.rollout import RolloutActivity, RolloutReader, latest_user_task, rollout_identity
 from codex.state_store import StateStore
-from codex.tui_session_log import TuiSessionLogReader, configured_session_log_path
+from codex.tui_session_log import (
+    SessionLogReadResult,
+    configured_session_log_path,
+)
 from codex.terminal import RegularFileTailCollector, TerminalStore
 from diagnostics import CollectorTracker
 from history import HistoryStore
@@ -39,6 +42,7 @@ from models import (
 from network.classifier import assess_process_network
 from network.packet import PacketInspector
 from network.sockets import SocketCollector
+from snapshot_publisher import SnapshotPublisher
 from state_machine import PROGRESS_KINDS, SessionStateMachine
 from utils import CommandError, compact_path, one_line
 
@@ -71,8 +75,7 @@ class MonitorEngine:
         self.process_activity = process_activity or ProcessActivityCollector(
             getattr(self.proc, "root", Path("/proc"))
         )
-        self.tui_session_logs = TuiSessionLogReader()
-        self.hook_events = HookEventReader(hook_events_path)
+        self.compact_evidence = CompactEvidenceReader(hook_events_path)
         self.session_log_paths: dict[str, Path] = {}
         self.codex_configs = CodexConfigReader()
         self.machine = SessionStateMachine(event_lookback)
@@ -98,6 +101,7 @@ class MonitorEngine:
         self.socket_stale_since: float | None = None
         self.collectors = CollectorTracker(interval)
         self.history = history
+        self.snapshot_publisher = SnapshotPublisher(interval, self.collectors, history)
         self.packet_inspector = packet_inspector or (
             PacketInspector() if packet_inspection else None
         )
@@ -121,6 +125,11 @@ class MonitorEngine:
         }
 
     def sample(self) -> MonitorSnapshot:
+        """Run the full collector pipeline and publish one coherent snapshot."""
+
+        return self._collect_full_sample()
+
+    def _collect_full_sample(self) -> MonitorSnapshot:
         started = time.monotonic()
         now_monotonic = started
         diagnostics: list[str] = []
@@ -169,19 +178,27 @@ class MonitorEngine:
         active_process_keys = {process.stable_key for process in discovery.processes}
         active_session_log_paths: set[str] = set()
         hook_started = time.monotonic()
-        hook_events_by_session: dict[str, list[NormalizedEvent]] = defaultdict(list)
-        unassigned_hook_events: list[NormalizedEvent] = []
-        for session_id, event in self.hook_events.read():
-            if session_id:
-                hook_events_by_session[session_id].append(event)
-            else:
-                unassigned_hook_events.append(event)
-        if self.hook_events.configured:
+        hook_records = self.compact_evidence.read_hooks()
+        if self.compact_evidence.hooks.configured:
             self.collectors.record(
                 "hook_events",
                 hook_started,
-                self.hook_events.error or None,
+                self.compact_evidence.hooks.error or None,
             )
+
+        environ_reader = getattr(self.proc, "environ", None)
+        configured_session_logs: dict[str, Path] = {}
+        session_log_path_counts: dict[str, int] = defaultdict(int)
+        for process in discovery.processes:
+            if process.role != "session":
+                continue
+            environment = environ_reader(process.pid) if callable(environ_reader) else None
+            path = configured_session_log_path(environment, process.cwd)
+            if path is None:
+                continue
+            configured_session_logs[process.stable_key] = path
+            session_log_path_counts[str(path)] += 1
+        session_log_results: dict[str, SessionLogReadResult] = {}
 
         for instance_id, processes in by_instance.items():
             resolved = discovery.instances[instance_id]
@@ -285,32 +302,6 @@ class MonitorEngine:
                 for process in enriched
                 if process.session_id
             }
-            if unassigned_hook_events:
-                instance_session_ids = [
-                    process.session_id
-                    for process in enriched
-                    if process.role == "session" and process.session_id
-                ]
-                remaining_hooks: list[NormalizedEvent] = []
-                for event in unassigned_hook_events:
-                    matches = [
-                        session_id
-                        for session_id in instance_session_ids
-                        if event.turn_id
-                        and any(
-                            retained.turn_id == event.turn_id
-                            for retained in self.machine.retained_events(
-                                f"{instance_id}:{session_id}"
-                            )
-                        )
-                    ]
-                    if len(matches) == 1:
-                        hook_events_by_session[matches[0]].append(event)
-                    elif len(discovery.processes) == 1 and len(instance_session_ids) == 1:
-                        hook_events_by_session[instance_session_ids[0]].append(event)
-                    else:
-                        remaining_hooks.append(event)
-                unassigned_hook_events = remaining_hooks
             events_by_session: dict[str, list[NormalizedEvent]] = defaultdict(list)
             log_activity_by_session: dict[str, float] = {}
             tui_log_configured = False
@@ -320,12 +311,10 @@ class MonitorEngine:
             tui_log_error = ""
             tui_log_sources: set[str] = set()
             tui_started = time.monotonic()
-            environ_reader = getattr(self.proc, "environ", None)
             for process in enriched:
                 if process.role != "session" or not process.session_id:
                     continue
-                environment = environ_reader(process.pid) if callable(environ_reader) else None
-                session_log_path = configured_session_log_path(environment, process.cwd)
+                session_log_path = configured_session_logs.get(process.stable_key)
                 if session_log_path is None:
                     self.session_log_paths.pop(process.stable_key, None)
                     continue
@@ -333,10 +322,16 @@ class MonitorEngine:
                 self.session_log_paths[process.stable_key] = session_log_path
                 tui_log_sources.add(str(session_log_path))
                 active_session_log_paths.add(str(session_log_path))
-                result = self.tui_session_logs.read(
-                    session_log_path,
-                    default_session_id=process.session_id,
-                )
+                path_key = str(session_log_path)
+                result = session_log_results.get(path_key)
+                if result is None:
+                    result = self.compact_evidence.read_session_log(
+                        session_log_path,
+                        default_session_id=(
+                            process.session_id if session_log_path_counts[path_key] == 1 else ""
+                        ),
+                    )
+                    session_log_results[path_key] = result
                 tui_log_readable = tui_log_readable or result.readable
                 tui_log_last_probe = max(
                     (value for value in (tui_log_last_probe, result.observed_at) if value),
@@ -388,7 +383,6 @@ class MonitorEngine:
                 if process.role != "session" or not process.session_id:
                     continue
                 incoming = events_by_session.get(process.session_id, [])
-                incoming.extend(hook_events_by_session.get(process.session_id, []))
                 session_key = f"{instance_id}:{process.session_id}"
                 rollout_activity = RolloutActivity(
                     process.rollout_path,
@@ -603,24 +597,59 @@ class MonitorEngine:
                         error=tui_log_error,
                     ),
                     hook_events=CompactSourceStatus(
-                        configured=self.hook_events.configured,
-                        readable=self.hook_events.configured and not self.hook_events.error,
-                        source=str(self.hook_events.path) if self.hook_events.path else "",
-                        last_probe_at=self.hook_events.last_probe_at,
-                        last_event_at=self.hook_events.last_event_at,
-                        error=self.hook_events.error,
+                        configured=self.compact_evidence.hooks.configured,
+                        readable=(
+                            self.compact_evidence.hooks.configured
+                            and not self.compact_evidence.hooks.error
+                        ),
+                        source=(
+                            str(self.compact_evidence.hooks.path)
+                            if self.compact_evidence.hooks.path
+                            else ""
+                        ),
+                        last_probe_at=self.compact_evidence.hooks.last_probe_at,
+                        last_event_at=self.compact_evidence.hooks.last_event_at,
+                        error=self.compact_evidence.hooks.error,
                     ),
                     processes=enriched,
                     sessions=sessions,
                 )
             )
 
-        if unassigned_hook_events:
+        unresolved_hooks = self._apply_hook_records(instance_snapshots, hook_records)
+        if unresolved_hooks:
             diagnostics.append(
-                f"{len(unassigned_hook_events)} 条 compact hook 事件缺少可关联 session"
+                f"{unresolved_hooks} 条 compact hook 事件缺少唯一可关联 session"
             )
 
         self._retain_exited_sessions(instance_snapshots, active_session_keys)
+
+        self._prune_full_sample_state(
+            by_instance=set(by_instance),
+            active_process_keys=active_process_keys,
+            active_session_keys=active_session_keys,
+            active_rollouts=active_rollouts,
+            active_session_log_paths=active_session_log_paths,
+        )
+        return self.snapshot_publisher.publish(
+            instances=instance_snapshots,
+            started=started,
+            now_monotonic=now_monotonic,
+            diagnostics=diagnostics,
+            discovery_stale_since=self.discovery_stale_since,
+            socket_stale_since=self.socket_stale_since,
+        )
+
+    def _prune_full_sample_state(
+        self,
+        *,
+        by_instance: set[str],
+        active_process_keys: set[str],
+        active_session_keys: set[str],
+        active_rollouts: set[str],
+        active_session_log_paths: set[str],
+    ) -> None:
+        """Drop mutable collector state that no longer belongs to an active sample."""
 
         self.previous_sockets = {
             key: value for key, value in self.previous_sockets.items() if key in active_process_keys
@@ -633,19 +662,18 @@ class MonitorEngine:
                 if key in active_process_keys
             },
         )
-        active_instances = set(by_instance)
         self.log_cursors = defaultdict(
-            int, {key: value for key, value in self.log_cursors.items() if key in active_instances}
+            int, {key: value for key, value in self.log_cursors.items() if key in by_instance}
         )
         self.log_process_keys = {
             key: value
             for key, value in self.log_process_keys.items()
-            if key in active_instances
+            if key in by_instance
         }
-        for instance_id in set(self.store_cache) - active_instances:
+        for instance_id in set(self.store_cache) - by_instance:
             self.store_cache.pop(instance_id).close()
         self.rollouts.prune(active_rollouts)
-        self.tui_session_logs.prune(active_session_log_paths)
+        self.compact_evidence.prune_session_logs(active_session_log_paths)
         self.session_log_paths = {
             key: path
             for key, path in self.session_log_paths.items()
@@ -664,41 +692,6 @@ class MonitorEngine:
             for key, value in self.rollout_path_cache.items()
             if key in active_process_keys
         }
-        snapshot = MonitorSnapshot(
-            generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-            interval_seconds=self.interval,
-            instances=sorted(instance_snapshots, key=lambda item: item.display_codex_home),
-            collection_duration_seconds=time.monotonic() - started,
-            diagnostics=diagnostics,
-            process_data_stale_age_seconds=(
-                now_monotonic - self.discovery_stale_since
-                if self.discovery_stale_since is not None
-                else None
-            ),
-            socket_data_stale_age_seconds=(
-                now_monotonic - self.socket_stale_since
-                if self.socket_stale_since is not None
-                else None
-            ),
-            collector_health=self.collectors.snapshot(),
-        )
-        if self.history is not None:
-            history_started = time.monotonic()
-            try:
-                self.history.record_snapshot(snapshot)
-                history_now = datetime.fromisoformat(snapshot.generated_at).timestamp()
-                for instance in snapshot.instances:
-                    instance.history_windows = self.history.window_stats(
-                        now=history_now,
-                        instance_id=instance.instance_id,
-                    )
-                self.collectors.record("history", history_started)
-            except Exception as exc:
-                self.collectors.record("history", history_started, exc)
-                diagnostics.append(f"历史库写入失败：{exc}")
-            snapshot.collection_duration_seconds = time.monotonic() - started
-            snapshot.collector_health = self.collectors.snapshot()
-        return snapshot
 
     def refresh_events(self, snapshot: MonitorSnapshot) -> MonitorSnapshot:
         """Refresh active rollout events without resampling processes or sockets."""
@@ -706,35 +699,19 @@ class MonitorEngine:
         started = time.monotonic()
         refreshed_instances: list[InstanceSnapshot] = []
         changed = False
-        hook_events_by_session: dict[str, list[NormalizedEvent]] = defaultdict(list)
-        unassigned_hook_events: list[NormalizedEvent] = []
-        for session_id, event in self.hook_events.read():
-            if session_id:
-                hook_events_by_session[session_id].append(event)
-            else:
-                unassigned_hook_events.append(event)
+        hook_records = self.compact_evidence.read_hooks()
         active_sessions = [
             session
             for instance in snapshot.instances
             for session in instance.sessions
             if not session.process_exited
         ]
-        for event in unassigned_hook_events:
-            matches = [
-                session
-                for session in active_sessions
-                if event.turn_id
-                and any(
-                    retained.turn_id == event.turn_id
-                    for retained in self.machine.retained_events(
-                        f"{session.instance_id}:{session.session_id}"
-                    )
-                )
-            ]
-            if len(matches) == 1:
-                hook_events_by_session[matches[0].session_id].append(event)
-            elif len(active_sessions) == 1:
-                hook_events_by_session[active_sessions[0].session_id].append(event)
+        hook_events_by_key, unresolved_hooks = self._route_hook_records(
+            active_sessions, hook_records
+        )
+        session_log_events_by_key, session_log_results = self._read_session_logs_once(
+            active_sessions
+        )
         for instance in snapshot.instances:
             refreshed_sessions: list[SessionHealth] = []
             refreshed_processes: dict[str, ProcessInfo] = {}
@@ -769,10 +746,7 @@ class MonitorEngine:
                 incoming = list(rollout_events)
                 session_log_path = self.session_log_paths.get(process.stable_key)
                 if session_log_path is not None:
-                    session_log_result = self.tui_session_logs.read(
-                        session_log_path,
-                        default_session_id=session.session_id,
-                    )
+                    session_log_result = session_log_results[str(session_log_path)]
                     tui_log_readable = tui_log_readable or session_log_result.readable
                     tui_log_last_probe = max(
                         (
@@ -791,12 +765,8 @@ class MonitorEngine:
                         default=None,
                     )
                     tui_log_error = session_log_result.error or tui_log_error
-                    incoming.extend(
-                        event
-                        for session_id, event in session_log_result.events
-                        if session_id == session.session_id
-                    )
-                incoming.extend(hook_events_by_session.get(session.session_id, []))
+                    incoming.extend(session_log_events_by_key.get(key, []))
+                incoming.extend(hook_events_by_key.get(key, []))
                 if incoming or rollout_activity.changed or terminal_changed:
                     changed = True
                     incoming = self._with_compact_config(
@@ -887,18 +857,31 @@ class MonitorEngine:
                         error=tui_log_error,
                     ),
                     hook_events=CompactSourceStatus(
-                        configured=self.hook_events.configured,
-                        readable=self.hook_events.configured and not self.hook_events.error,
-                        source=str(self.hook_events.path) if self.hook_events.path else "",
-                        last_probe_at=self.hook_events.last_probe_at,
-                        last_event_at=self.hook_events.last_event_at,
-                        error=self.hook_events.error,
+                        configured=self.compact_evidence.hooks.configured,
+                        readable=(
+                            self.compact_evidence.hooks.configured
+                            and not self.compact_evidence.hooks.error
+                        ),
+                        source=(
+                            str(self.compact_evidence.hooks.path)
+                            if self.compact_evidence.hooks.path
+                            else ""
+                        ),
+                        last_probe_at=self.compact_evidence.hooks.last_probe_at,
+                        last_event_at=self.compact_evidence.hooks.last_event_at,
+                        error=self.compact_evidence.hooks.error,
                     ),
                     processes=processes,
                     sessions=refreshed_sessions,
                 )
             )
 
+        diagnostics = list(snapshot.diagnostics)
+        if unresolved_hooks:
+            diagnostics.append(
+                f"{unresolved_hooks} 条 compact hook 事件缺少唯一可关联 session"
+            )
+            changed = True
         if not changed:
             return snapshot
         return replace(
@@ -906,7 +889,122 @@ class MonitorEngine:
             generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             instances=refreshed_instances,
             collection_duration_seconds=time.monotonic() - started,
+            diagnostics=diagnostics,
         )
+
+    def _route_hook_records(
+        self,
+        sessions: list[SessionHealth],
+        records: list[tuple[str, NormalizedEvent]],
+    ) -> tuple[dict[str, list[NormalizedEvent]], int]:
+        routed: dict[str, list[NormalizedEvent]] = defaultdict(list)
+        active = [session for session in sessions if not session.process_exited]
+        unresolved = 0
+        for session_id, event in records:
+            if session_id:
+                matches = [session for session in active if session.session_id == session_id]
+            elif event.turn_id:
+                matches = [
+                    session
+                    for session in active
+                    if any(
+                        retained.turn_id == event.turn_id
+                        for retained in self.machine.retained_events(
+                            f"{session.instance_id}:{session.session_id}"
+                        )
+                    )
+                ]
+            else:
+                matches = active if len(active) == 1 else []
+            if len(matches) != 1:
+                unresolved += 1
+                continue
+            session = matches[0]
+            routed[f"{session.instance_id}:{session.session_id}"].append(event)
+        return routed, unresolved
+
+    def _apply_hook_records(
+        self,
+        snapshots: list[InstanceSnapshot],
+        records: list[tuple[str, NormalizedEvent]],
+    ) -> int:
+        sessions = [session for snapshot in snapshots for session in snapshot.sessions]
+        routed, unresolved = self._route_hook_records(sessions, records)
+        if not routed:
+            return unresolved
+        for snapshot in snapshots:
+            refreshed: list[SessionHealth] = []
+            refreshed_processes: dict[str, ProcessInfo] = {}
+            for session in snapshot.sessions:
+                key = f"{session.instance_id}:{session.session_id}"
+                incoming = routed.get(key, [])
+                if incoming:
+                    incoming = self._with_compact_config(
+                        incoming,
+                        snapshot.auto_compact_token_limit,
+                        snapshot.auto_compact_token_limit_scope,
+                    )
+                    self.machine.ingest(key, incoming)
+                    activity = RolloutActivity(session.process.rollout_path, time.time())
+                    observation = self._observation_pulse(
+                        session,
+                        session.process,
+                        incoming,
+                        activity,
+                        session.network,
+                        None,
+                        full_sample=False,
+                    )
+                    session = self.machine.derive(
+                        key,
+                        session.process,
+                        session.network,
+                        observation=observation,
+                    )
+                    session.terminal_sessions = self.terminals.summaries(key)
+                    self.live_sessions[key] = session
+                refreshed.append(session)
+                refreshed_processes[session.process.stable_key] = session.process
+            snapshot.sessions = refreshed
+            snapshot.processes = [
+                refreshed_processes.get(process.stable_key, process)
+                for process in snapshot.processes
+            ]
+            snapshot.protocol_capabilities = self._merge_protocol_capabilities(refreshed)
+        return unresolved
+
+    def _read_session_logs_once(
+        self,
+        sessions: list[SessionHealth],
+    ) -> tuple[dict[str, list[NormalizedEvent]], dict[str, SessionLogReadResult]]:
+        sessions_by_path: dict[str, list[SessionHealth]] = defaultdict(list)
+        paths: dict[str, Path] = {}
+        for session in sessions:
+            path = self.session_log_paths.get(session.process.stable_key)
+            if path is None:
+                continue
+            key = str(path)
+            paths[key] = path
+            sessions_by_path[key].append(session)
+
+        routed: dict[str, list[NormalizedEvent]] = defaultdict(list)
+        results: dict[str, SessionLogReadResult] = {}
+        for path_key, candidates in sessions_by_path.items():
+            default_session_id = candidates[0].session_id if len(candidates) == 1 else ""
+            result = self.compact_evidence.read_session_log(
+                paths[path_key],
+                default_session_id=default_session_id,
+            )
+            results[path_key] = result
+            for session_id, event in result.events:
+                matches = [
+                    session for session in candidates if session.session_id == session_id
+                ]
+                if len(matches) != 1:
+                    continue
+                session = matches[0]
+                routed[f"{session.instance_id}:{session.session_id}"].append(event)
+        return routed, results
 
     @staticmethod
     def _rollout_activity_value(activity: RolloutActivity) -> dict[str, object]:
