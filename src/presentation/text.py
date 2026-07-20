@@ -74,6 +74,22 @@ def _session_metrics(session: SessionHealth) -> list[str]:
         running = sum(tool.status == "running" for tool in session.tool_executions)
         lines.append(f"    工具：{len(session.tool_executions)} 个，运行中 {running} 个")
 
+    if session.terminal_sessions:
+        running_terminals = sum(
+            terminal.status == "running" for terminal in session.terminal_sessions
+        )
+        capabilities = ", ".join(
+            sorted({terminal.capability.value for terminal in session.terminal_sessions})
+        )
+        dropped = sum(terminal.dropped_bytes for terminal in session.terminal_sessions)
+        detail = (
+            f"    Terminal：{len(session.terminal_sessions)} 个，运行中 {running_terminals} 个"
+            f" | {capabilities}"
+        )
+        if dropped:
+            detail += f" | dropped {dropped} B"
+        lines.append(detail)
+
     token_parts = _token_parts("本 Turn", session.token_usage)
     token_parts.extend(_token_parts("累计", session.cumulative_token_usage))
     if token_parts:

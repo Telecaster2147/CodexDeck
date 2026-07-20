@@ -31,6 +31,7 @@ from models import (  # noqa: E402
     TurnSummary,
 )
 from presentation.json_output import render_json  # noqa: E402
+from presentation.export import session_export  # noqa: E402
 from presentation.metrics import render_prometheus  # noqa: E402
 from presentation.text import render_text  # noqa: E402
 
@@ -136,13 +137,25 @@ class OutputTests(unittest.TestCase):
             )
         ]
 
-        terminal = json.loads(render_json(result, pretty=False))["instances"][0]["sessions"][0][
+        rendered_json = render_json(result, pretty=False)
+        terminal = json.loads(rendered_json)["instances"][0]["sessions"][0][
             "terminal_sessions"
         ][0]
+        rendered_text = render_text(result)
+        metrics = render_prometheus(result)
+        exported = json.dumps(session_export(result.sessions[0], []))
 
         self.assertEqual(terminal["process_id"], "321")
         self.assertEqual(terminal["capability"], "POLL_TRANSCRIPT")
         self.assertNotIn("chunks", terminal)
+        self.assertIn("Terminal：1 个，运行中 1 个 | POLL_TRANSCRIPT", rendered_text)
+        self.assertIn(
+            'codexnet_terminal_sessions{capability="POLL_TRANSCRIPT",instance="i1"} 1',
+            metrics,
+        )
+        self.assertNotIn("TOKEN=secret", rendered_json + rendered_text + metrics)
+        self.assertNotIn("terminal_sessions", exported)
+        self.assertNotIn("TOKEN=secret", exported)
 
     def test_attention_is_present_in_json_text_and_metrics(self) -> None:
         result = snapshot()

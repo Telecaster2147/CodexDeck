@@ -11,6 +11,8 @@
 - 优先解析 Codex 官方 rollout 事件，识别 turn、推理摘要、工具、文件变更、compact、重连和失败
 - Overview 直接显示当前工具、命令摘要、文件影响、subagent 与 action required
 - Activity 展示语义里程碑；Diagnosis 展示证据链、数据质量、瓶颈和历史窗口趋势
+- Terminal 以只读方式关联后台 exec 与后续 poll，展示 retained transcript、状态、PID、cwd 和退出码
+- 子进程 stdout/stderr 指向工作区或 `/tmp` 普通文件时，每 2 秒增量 tail；不读取 PTY、pipe 或 socket
 - 单次 SSE idle timeout 显示为 `RECONNECTING`，恢复后记录 `RECOVERED`
 - 每个终态模型失败显示结构化错误类型和完整脱敏 errmsg
 - 汇总 Turn 耗时、TTFT、工具执行时间，以及 reconnect/fallback 恢复次数
@@ -230,11 +232,12 @@ TUI 的首屏是跨会话 Overview，目标是直接回答哪个工作区正在�
 | --- | --- |
 | `↑` / `↓`、`j` / `k` | 移动选择 |
 | `Enter` | 折叠/展开工作区，或在窄屏进入会话详情 |
-| `1` / `2` | 切换 Activity / Diagnosis |
+| `1` / `2` / `3` | 切换 Activity / Diagnosis / Terminal |
+| `o` | 打开所选会话的只读 Terminal |
 | `,` | 打开可点击的显示设置 |
-| `/` | 搜索会话、模型、工作区或错误 |
+| `/` | 搜索会话；Terminal tab 中搜索当前 retained transcript |
 | `Tab` | 跳到下一个需要关注的会话 |
-| `f` | 切换当前 Activity 的自动跟随，不持久化 |
+| `f` | 切换 Activity 与 Terminal 的自动跟随，不持久化 |
 | `g` | 切换分组和扁平视图 |
 | `a` | 显示或隐藏辅助进程 |
 | `r` | 立即执行完整采样 |
@@ -242,10 +245,11 @@ TUI 的首屏是跨会话 Overview，目标是直接回答哪个工作区正在�
 | `Esc` | 返回上一级 |
 | `q` | 退出 |
 
-Inspector 只有两个页面：
+Inspector 有三个页面：
 
 - **Activity**：展示请求、工具、文件、action required、失败/恢复、compact 和 subagent 等语义里程碑。Operational 模式默认隐藏 keepalive、token/rate-limit 快照、普通 `MODEL_PROGRESS`、reasoning 和成功工具原文。已完成 compact 折叠为一条摘要，领域事件和导出仍保留开始/完成两阶段。
 - **Diagnosis**：按结论、原因、证据链、provenance、freshness、数据质量、capacity、Turn 瓶颈、异常 TCP、agent tree 和历史趋势组织。未知协议显示 `UNPARSED` 的类型、长度、hash 与截断状态；Diagnostic 模式可查看脱敏预览，但主界面不解析或倾倒序列化 JSON。
+- **Terminal**：按后台 process/call 关联初始 exec 和后续 `write_stdin`/poll 输出，并明确标注 `FILE TAIL`、`UPDATES ON CODEX POLL`、`FINAL TRANSCRIPT` 或 `METADATA ONLY`。输出带 `OUT`、`ERR`、`TTY`、`SYS` 标签；控制序列被清理，截断和 dropped bytes 显式显示。普通 Codex TUI 不公开进程内逐字节输出，因此 poll transcript 只在 Codex 写入新工具结果后更新。
 
 Overview 与固定 health strip 会显示 phase age、semantic silence、最近 evidence 和 observation
 结论。1 秒时钟只重算显示 age，不调用进程发现、SQLite、`ss`、packet 或 history，也不向
@@ -260,7 +264,7 @@ edge 和多源 evidence chain；completion-only 不会虚构 start。
 
 启用独立历史库后，Diagnosis 显示 15m、1h、24h 窗口的 TTFT、工具耗时与静默 p50/p95、失败率、重连、恢复耗时，以及 compact 的 manual/auto、retry、failure、duration 和 context before/after 汇总。每项都带样本数；样本不足时只显示 `n=`，不输出伪精确趋势。
 
-宽度至少 96 列时保持 Overview 与 Inspector 双面板；更窄时使用列表/详情钻取；低于 50×12 显示尺寸提示。稳定刷新原地更新导航与 Activity，保留焦点、选择和滚动位置。
+宽度至少 96 列时保持 Overview 与 Inspector 双面板；更窄时使用列表/详情钻取；低于 50×12 显示尺寸提示。稳定刷新原地更新导航、Activity 与 Terminal，保留焦点、选择和滚动位置。
 
 ## 状态语义
 
@@ -313,7 +317,7 @@ JSON 顶层包含：
 }
 ```
 
-实例中包含完整路径、发现方式、schema/协议能力、采集器健康度、未映射协议事件计数、进程和会话。会话除生命周期、恢复状态、网络证据、失败和标准化事件外，还包含 `turns`、`tool_executions`、`token_usage`、`cumulative_token_usage`、`rate_limits`、`agents` 与 `protocol_capabilities`。这些字段是 schema 1 的向后兼容增量；未知标量使用 JSON `null`，未知集合使用空数组。
+实例中包含完整路径、发现方式、schema/协议能力、采集器健康度、未映射协议事件计数、进程和会话。会话除生命周期、恢复状态、网络证据、失败和标准化事件外，还包含 `turns`、`tool_executions`、`terminal_sessions`、`token_usage`、`cumulative_token_usage`、`rate_limits`、`agents` 与 `protocol_capabilities`。`terminal_sessions` 只输出 command、状态、capability、retained/dropped bytes 等摘要，不输出 transcript chunks。正文也不进入 export、history 或 Prometheus。以上字段是 schema 1 的向后兼容增量；未知标量使用 JSON `null`，未知集合使用空数组。
 
 普通 `--once --json` 的 `schema_version` 与 `doctor --json` 的 `doctor_schema_version` 独立维护，当前都为 `1`。
 

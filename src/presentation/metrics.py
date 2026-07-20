@@ -58,6 +58,9 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     compact_active_samples: list[str] = []
     compact_terminal_samples: list[str] = []
     compact_duration_samples: list[str] = []
+    terminal_samples: list[str] = []
+    terminal_dropped_samples: list[str] = []
+    terminal_truncated_samples: list[str] = []
     for instance in snapshot.instances:
         lifecycle = Counter(session.lifecycle.value for session in instance.sessions)
         network = Counter(session.network.state.value for session in instance.sessions)
@@ -117,6 +120,42 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
                     state=state,
                 )
             )
+        terminals = Counter(
+            terminal.capability.value
+            for session in instance.sessions
+            for terminal in session.terminal_sessions
+        )
+        for capability, count in sorted(terminals.items()):
+            terminal_samples.append(
+                _sample(
+                    "codexnet_terminal_sessions",
+                    count,
+                    instance=instance.instance_id,
+                    capability=capability,
+                )
+            )
+        terminal_dropped_samples.append(
+            _sample(
+                "codexnet_terminal_dropped_bytes",
+                sum(
+                    terminal.dropped_bytes
+                    for session in instance.sessions
+                    for terminal in session.terminal_sessions
+                ),
+                instance=instance.instance_id,
+            )
+        )
+        terminal_truncated_samples.append(
+            _sample(
+                "codexnet_terminal_upstream_truncated",
+                sum(
+                    terminal.upstream_truncated
+                    for session in instance.sessions
+                    for terminal in session.terminal_sessions
+                ),
+                instance=instance.instance_id,
+            )
+        )
         active_compacts: Counter[str] = Counter()
         terminal_compacts: Counter[tuple[str, str]] = Counter()
         duration_totals: Counter[tuple[str, str]] = Counter()
@@ -226,6 +265,30 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
             "Active compact operations by trigger.",
             "gauge",
             compact_active_samples,
+        )
+    )
+    lines.extend(
+        _family(
+            "codexnet_terminal_sessions",
+            "Retained terminal sessions by output capability.",
+            "gauge",
+            terminal_samples,
+        )
+    )
+    lines.extend(
+        _family(
+            "codexnet_terminal_dropped_bytes",
+            "Terminal transcript bytes dropped by CodexNet bounds.",
+            "gauge",
+            terminal_dropped_samples,
+        )
+    )
+    lines.extend(
+        _family(
+            "codexnet_terminal_upstream_truncated",
+            "Terminal transcripts marked truncated by the upstream source.",
+            "gauge",
+            terminal_truncated_samples,
         )
     )
     lines.extend(
