@@ -11,6 +11,7 @@ from codex.terminal import (
     RegularFileTailCollector,
     TerminalStore,
     TerminalUpdate,
+    extract_terminal_updates,
     sanitize_terminal_text,
 )
 from models import ChildProcessActivity, ProcessIdentity, TerminalCapability
@@ -77,10 +78,91 @@ class TerminalTranscriptTests(unittest.TestCase):
         self.assertEqual(terminal.process_id, "321")
         self.assertEqual(terminal.command, "make watch")
         self.assertEqual(terminal.cwd, "/workspace-a")
+        self.assertEqual(terminal.status, "running")
         self.assertEqual(terminal.capability, TerminalCapability.POLL_TRANSCRIPT)
         self.assertEqual(
             "".join(chunk.text for chunk in terminal.chunks),
-            "server readyrequest complete\n",
+            "server ready\nrequest complete\n",
+        )
+
+    def test_array_content_parts_preserve_background_output_and_nested_tool_identity(self) -> None:
+        records = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "call-start",
+                    "name": "exec",
+                    "input": (
+                        'const result = await tools.exec_command('
+                        '{"cmd":"npm run dev","workdir":"/workspace-a"});'
+                    ),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-start",
+                    "output": [
+                        {
+                            "type": "output_text",
+                            "text": "Script completed\nWall time 1.0 seconds\nOutput:\n",
+                        },
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Process running with session ID 777\n"
+                                "Wall time: 1 seconds\nOutput:\nready\n"
+                            ),
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "call-poll",
+                    "name": "exec",
+                    "input": (
+                        'const result = await tools.write_stdin('
+                        '{"session_id":777,"chars":""});'
+                    ),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-poll",
+                    "output": [
+                        {
+                            "type": "output_text",
+                            "text": "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                        },
+                        {"type": "output_text", "text": "request complete\n"},
+                    ],
+                },
+            },
+        ]
+        updates = tuple(
+            update
+            for index, record in enumerate(records)
+            for update in extract_terminal_updates(record, f"source-{index}", float(index))
+        )
+        store = TerminalStore()
+
+        store.apply("session", updates)
+        terminal = store.summaries("session")[0]
+
+        self.assertEqual(terminal.process_id, "777")
+        self.assertEqual(terminal.command, "npm run dev")
+        self.assertEqual(terminal.cwd, "/workspace-a")
+        self.assertEqual(terminal.status, "running")
+        self.assertEqual(
+            "".join(chunk.text for chunk in terminal.chunks),
+            "ready\nrequest complete\n",
         )
 
     def test_direct_command_completion_marks_final_transcript(self) -> None:
@@ -133,9 +215,13 @@ class TerminalTranscriptTests(unittest.TestCase):
                                 "process_id": "901",
                                 "command": ["printf", "done"],
                                 "cwd": "/workspace-a",
+                                "source": "unified_exec_startup",
                                 "status": "completed",
-                                "aggregated_output": "done\n",
+                                "stdout": "done\n",
+                                "stderr": "warning\n",
+                                "aggregated_output": "done\nwarning\n",
                                 "exit_code": 0,
+                                "duration": 1.25,
                             },
                         },
                     }
@@ -150,7 +236,69 @@ class TerminalTranscriptTests(unittest.TestCase):
         self.assertEqual(terminal.process_id, "901")
         self.assertEqual(terminal.command, "printf done")
         self.assertEqual(terminal.exit_code, 0)
-        self.assertEqual(terminal.chunks[0].text, "done\n")
+        self.assertEqual(
+            [(chunk.stream, chunk.text) for chunk in terminal.chunks],
+            [("stdout", "done\n"), ("stderr", "warning\n")],
+        )
+        self.assertEqual([event.kind for event in result.events], ["TOOL_COMPLETED"])
+        self.assertEqual(result.events[0].metadata["command"], "printf done")
+        self.assertEqual(result.events[0].metadata["command_source"], "unified_exec_startup")
+        self.assertEqual(result.events[0].metadata["duration_seconds"], 1.25)
+
+    def test_current_unified_exec_running_shape_correlates_later_poll(self) -> None:
+        store = TerminalStore()
+        initial = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-start",
+                    "output": (
+                        "Process running with session ID 777\n"
+                        "Wall time: 1 seconds\nOutput:\nready\n"
+                    ),
+                },
+            },
+            "initial",
+            1.0,
+        )
+        poll_call = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "call-poll",
+                    "name": "write_stdin",
+                    "arguments": json.dumps({"session_id": 777, "chars": ""}),
+                },
+            },
+            "poll-call",
+            2.0,
+        )
+        poll_output = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-poll",
+                    "output": "complete\n",
+                },
+            },
+            "poll-output",
+            3.0,
+        )
+
+        store.apply("session", initial + poll_call + poll_output)
+        terminals = store.summaries("session")
+
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0].process_id, "777")
+        self.assertEqual(terminals[0].status, "running")
+        self.assertEqual(terminals[0].capability, TerminalCapability.POLL_TRANSCRIPT)
+        self.assertEqual(
+            "".join(chunk.text for chunk in terminals[0].chunks),
+            "ready\ncomplete\n",
+        )
 
     def test_duplicate_sources_and_delayed_running_do_not_duplicate_or_resurrect(self) -> None:
         store = TerminalStore()

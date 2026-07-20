@@ -27,7 +27,18 @@ _STRING_ESCAPE = re.compile(r"\x1b[PX^_].*?\x1b\\", re.DOTALL)
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]")
 _BACKGROUND_RUNNING = re.compile(
-    r"Script running with cell ID (?P<process>\S+).*?(?:Output|Final output):\s*(?P<output>.*)",
+    r"(?:Script running with cell ID|Process running with session ID) "
+    r"(?P<process>\S+).*?(?:Output|Final output):\s*(?P<output>.*)",
+    re.DOTALL,
+)
+_SCRIPT_RESULT = re.compile(
+    r"^Script (?:completed|failed).*?\n"
+    r"Wall time[^\n]*\n(?:Output|Final output):\s*(?P<output>.*)",
+    re.DOTALL,
+)
+_PROCESS_EXITED = re.compile(
+    r"^Process exited with code (?P<code>-?\d+).*?\n"
+    r"(?:Output|Final output):\s*(?P<output>.*)",
     re.DOTALL,
 )
 _EXIT_CODE = re.compile(r"(?:Process exited with code|exit(?: code)?)\s*(?P<code>-?\d+)", re.I)
@@ -62,27 +73,34 @@ def _mapping(value: object) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _nested_exec_arguments(value: object) -> dict[str, Any]:
+def _nested_terminal_call(value: object) -> tuple[str, dict[str, Any]]:
     if not isinstance(value, str):
-        return {}
-    for match in re.finditer(r"tools\.(?:exec_command|write_stdin|wait)\(\s*", value):
+        return "", {}
+    for match in re.finditer(
+        r"tools\.(?P<tool>exec_command|write_stdin|wait)\(\s*",
+        value,
+    ):
         try:
             parsed, _ = json.JSONDecoder().raw_decode(value[match.end() :])
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(parsed, dict):
-            return parsed
-    return {}
+            return match.group("tool"), parsed
+    return "", {}
 
 
-def _arguments(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
-    raw = (
+def _argument_value(payload: dict[str, Any], item: dict[str, Any]) -> object:
+    return (
         payload.get("arguments")
         or payload.get("input")
         or item.get("arguments")
         or item.get("input")
     )
-    return _mapping(raw) or _nested_exec_arguments(raw)
+
+
+def _arguments(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    raw = _argument_value(payload, item)
+    return _mapping(raw) or _nested_terminal_call(raw)[1]
 
 
 def _tool_name(payload: dict[str, Any], item: dict[str, Any], item_type: str) -> str:
@@ -106,6 +124,23 @@ def _command(value: object) -> str:
     return str(value or "")
 
 
+def _content_text(value: object) -> str:
+    """Flatten Codex content parts without serializing their container syntax."""
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_content_text(part) for part in value)
+    if isinstance(value, dict):
+        for key in ("text", "output", "content", "value"):
+            if key in value:
+                return _content_text(value[key])
+        return ""
+    return str(value)
+
+
 def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
     """Return text, stream, process id, exit code, and upstream truncation."""
 
@@ -117,7 +152,7 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
             or ""
         )
         exit_code = value.get("exit_code")
-        text = str(
+        text = _content_text(
             value.get("output")
             or value.get("aggregated_output")
             or value.get("stdout")
@@ -132,14 +167,26 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
             int(exit_code) if isinstance(exit_code, (int, float)) else None,
             bool(value.get("truncated") or value.get("omitted_bytes")) or bool(_TRUNCATED.search(text)),
         )
-    text = sanitize_terminal_text(str(value or ""))
+    text = sanitize_terminal_text(_content_text(value))
     running = _BACKGROUND_RUNNING.search(text)
     if running:
         return (
-            running.group("output").strip(),
+            running.group("output"),
             "combined",
             running.group("process"),
             None,
+            bool(_TRUNCATED.search(text)),
+        )
+    script_result = _SCRIPT_RESULT.search(text)
+    if script_result:
+        text = script_result.group("output")
+    exited_result = _PROCESS_EXITED.search(text)
+    if exited_result:
+        return (
+            exited_result.group("output"),
+            "combined",
+            "",
+            int(exited_result.group("code")),
             bool(_TRUNCATED.search(text)),
         )
     exit_match = _EXIT_CODE.search(text)
@@ -170,6 +217,7 @@ class TerminalUpdate:
     cumulative: bool = False
     upstream_truncated: bool = False
     source: str = "rollout"
+    continuation: bool = False
 
 
 def extract_terminal_updates(
@@ -197,6 +245,9 @@ def extract_terminal_updates(
     turn_id = str(payload.get("turn_id") or item.get("turn_id") or "")
     process_id = str(payload.get("process_id") or item.get("process_id") or "")
     tool_name = _tool_name(payload, item, item_type).lower()
+    nested_tool, _ = _nested_terminal_call(_argument_value(payload, item))
+    if nested_tool and tool_name in {"exec", "functions.exec"}:
+        tool_name = nested_tool
     arguments = _arguments(payload, item)
     if not process_id:
         process_id = str(
@@ -226,6 +277,46 @@ def extract_terminal_updates(
         or item.get("result")
     )
     direct_end = item_type in {"exec_command_end", "command_execution"}
+    if direct_end:
+        stdout = payload.get("stdout") or item.get("stdout")
+        stderr = payload.get("stderr") or item.get("stderr")
+        if stdout is not None or stderr is not None:
+            declared_exit = payload.get("exit_code")
+            if declared_exit is None:
+                declared_exit = item.get("exit_code")
+            exit_code = int(declared_exit) if isinstance(declared_exit, (int, float)) else None
+            status = str(payload.get("status") or item.get("status") or "completed").lower()
+            truncated = bool(
+                payload.get("truncated")
+                or item.get("truncated")
+                or payload.get("omitted_bytes")
+                or item.get("omitted_bytes")
+            )
+            updates: list[TerminalUpdate] = []
+            for stream, value in (("stdout", stdout), ("stderr", stderr)):
+                if value in (None, ""):
+                    continue
+                text = sanitize_terminal_text(str(value))
+                updates.append(
+                    TerminalUpdate(
+                        source_id=f"{source_id}:{stream}",
+                        observed_at=observed_at,
+                        call_id=call_id,
+                        process_id=process_id,
+                        turn_id=turn_id,
+                        command=command,
+                        cwd=cwd,
+                        status=status,
+                        exit_code=exit_code,
+                        stream=stream,
+                        output=text,
+                        capability=TerminalCapability.FINAL_TRANSCRIPT,
+                        terminal_candidate=True,
+                        upstream_truncated=truncated or bool(_TRUNCATED.search(text)),
+                    )
+                )
+            if updates:
+                return tuple(updates)
     if direct_end:
         output_value = (
             payload.get("aggregated_output")
@@ -306,6 +397,7 @@ def extract_terminal_updates(
                 else TerminalCapability.METADATA_ONLY
             ),
             terminal_candidate=True,
+            continuation=tool_name in {"write_stdin", "wait"},
         ),
     )
 
@@ -407,6 +499,7 @@ class TerminalStore:
         self.sessions: dict[str, dict[str, _TerminalSession]] = defaultdict(dict)
         self.call_ids: dict[str, dict[str, str]] = defaultdict(dict)
         self.process_ids: dict[str, dict[str, str]] = defaultdict(dict)
+        self.continuation_call_ids: dict[str, set[str]] = defaultdict(set)
         self.seen_sources: dict[str, set[str]] = defaultdict(set)
         self.sequence = 0
 
@@ -425,6 +518,8 @@ class TerminalStore:
         for update in updates:
             if update.source_id in self.seen_sources[session_key]:
                 continue
+            if update.continuation and update.call_id:
+                self.continuation_call_ids[session_key].add(update.call_id)
             terminal_id = ""
             if update.process_id:
                 terminal_id = self.process_ids[session_key].get(update.process_id, "")
@@ -462,8 +557,15 @@ class TerminalStore:
                 terminal.capability = update.capability
             if update.observed_at >= terminal.last_state_at:
                 terminal.last_state_at = update.observed_at
-                if update.status and update.status != "unknown":
-                    terminal.status = update.status
+                status = update.status
+                if (
+                    update.call_id in self.continuation_call_ids[session_key]
+                    and update.exit_code is None
+                    and status in {"completed", "complete", "success"}
+                ):
+                    status = "running"
+                if status and status != "unknown":
+                    terminal.status = status
                 if update.exit_code is not None:
                     terminal.exit_code = update.exit_code
                 if terminal.status in {"completed", "failed", "declined", "error", "errored"}:
@@ -545,6 +647,7 @@ class TerminalStore:
             self.sessions.pop(session_key, None)
             self.call_ids.pop(session_key, None)
             self.process_ids.pop(session_key, None)
+            self.continuation_call_ids.pop(session_key, None)
             self.seen_sources.pop(session_key, None)
 
 

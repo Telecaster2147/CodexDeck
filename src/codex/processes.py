@@ -41,9 +41,15 @@ class DiscoveryResult:
 
 
 class ProcessDiscovery:
-    def __init__(self, runner: CommandRunner | None = None, proc: ProcReader | None = None) -> None:
+    def __init__(
+        self,
+        runner: CommandRunner | None = None,
+        proc: ProcReader | None = None,
+        user_id: int | None = None,
+    ) -> None:
         self.runner = runner or CommandRunner()
         self.proc = proc or ProcReader()
+        self.user_id = os.getuid() if user_id is None else user_id
         self.path_cache: dict[str, tuple[float, ResolvedInstance, str]] = {}
 
     def discover(
@@ -55,7 +61,7 @@ class ProcessDiscovery:
             [
                 "ps",
                 "-eo",
-                "pid=,ppid=,comm=,etimes=,pcpu=,stat=,wchan:32=,args=",
+                "pid=,ppid=,uid=,comm=,etimes=,pcpu=,stat=,wchan:32=,args=",
                 "--cols",
                 "4096",
             ]
@@ -66,16 +72,19 @@ class ProcessDiscovery:
             path.expanduser().resolve(strict=False) for path in selected_homes or set()
         }
         for raw_line in output.splitlines():
-            fields = raw_line.strip().split(maxsplit=7)
-            if len(fields) < 8:
+            fields = raw_line.strip().split(maxsplit=8)
+            if len(fields) < 9:
                 continue
-            pid_s, ppid_s, command, elapsed_s, cpu_s, state, wait_channel, args = fields
+            pid_s, ppid_s, uid_s, command, elapsed_s, cpu_s, state, wait_channel, args = fields
             try:
                 pid = int(pid_s)
                 ppid = int(ppid_s)
+                uid = int(uid_s)
                 elapsed = int(elapsed_s)
                 cpu = float(cpu_s)
             except ValueError:
+                continue
+            if uid != self.user_id:
                 continue
             if not is_codex_process(command, args) or (selected_pids and pid not in selected_pids):
                 continue

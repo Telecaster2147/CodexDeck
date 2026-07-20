@@ -7,6 +7,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 only.
+    import tomli as tomllib
+
 from models import CodexPaths, ProcessIdentity
 
 
@@ -88,6 +93,19 @@ def _infer_sqlite_home(targets: list[Path]) -> Path | None:
     return None
 
 
+def _configured_sqlite_home(codex_home: Path, cwd: Path) -> Path | None:
+    try:
+        with (codex_home / "config.toml").open("rb") as handle:
+            payload = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    raw_value = payload.get("sqlite_home")
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+    path = Path(raw_value.strip()).expanduser()
+    return canonical(path if path.is_absolute() else cwd / path)
+
+
 def instance_id(codex_home: Path, sqlite_home: Path) -> str:
     payload = f"{codex_home}\0{sqlite_home}".encode()
     return hashlib.blake2s(payload, digest_size=8).hexdigest()
@@ -128,14 +146,17 @@ def resolve_instance(pid: int, proc: ProcReader) -> ResolvedInstance:
 
     raw_sqlite_home = environment.get("CODEX_SQLITE_HOME", "").strip()
     inferred_sqlite_home = _infer_sqlite_home(targets)
-    if raw_sqlite_home:
+    configured_sqlite_home = _configured_sqlite_home(codex_home, cwd)
+    if inferred_sqlite_home:
+        sqlite_home = canonical(inferred_sqlite_home)
+        method = "file-descriptor"
+    elif configured_sqlite_home:
+        sqlite_home = configured_sqlite_home
+        method = "config"
+    elif raw_sqlite_home:
         sqlite_path = Path(raw_sqlite_home)
         sqlite_home = canonical(sqlite_path if sqlite_path.is_absolute() else cwd / sqlite_path)
         method = "environment"
-    elif inferred_sqlite_home:
-        sqlite_home = canonical(inferred_sqlite_home)
-        if method == "default":
-            method = "file-descriptor"
     else:
         sqlite_home = codex_home
 

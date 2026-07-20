@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import shlex
 from datetime import datetime
 from typing import Any
 
@@ -265,6 +266,9 @@ def _timing(payload: dict[str, Any]) -> dict[str, Any]:
     duration = _number(payload.get("duration_ms"))
     if duration is not None:
         metadata["duration_seconds"] = float(duration) / 1000.0
+    direct_duration = _number(payload.get("duration"))
+    if direct_duration is not None:
+        metadata["duration_seconds"] = float(direct_duration)
     ttft = _number(payload.get("time_to_first_token_ms"))
     if ttft is not None:
         metadata["time_to_first_token_seconds"] = float(ttft) / 1000.0
@@ -326,9 +330,15 @@ def _tool_metadata(payload: dict[str, Any], item_type: str) -> dict[str, Any]:
         or payload.get("result")
         or item.get("output")
         or item.get("result")
+        or payload.get("aggregated_output")
+        or item.get("aggregated_output")
     )
     command_value = payload.get("command") or item.get("command")
-    command = _bounded_metadata_text(command_value, 1200)
+    command = (
+        shlex.join(str(part) for part in command_value)
+        if isinstance(command_value, list)
+        else _bounded_metadata_text(command_value, 1200)
+    )
     cwd = _bounded_metadata_text(payload.get("cwd") or item.get("cwd"), 320)
     nested_command, nested_cwd = _nested_exec_input(input_value)
     command = command or nested_command
@@ -404,8 +414,16 @@ def _tool_metadata(payload: dict[str, Any], item_type: str) -> dict[str, Any]:
             "nested_tools": nested_tools,
             "server": server,
             "tool": _bounded_metadata_text(payload.get("tool") or item.get("tool"), 160),
+            "command_source": _bounded_metadata_text(
+                payload.get("source") or item.get("source"), 160
+            ),
+            "parsed_command": _bounded_metadata_text(
+                payload.get("parsed_cmd") or item.get("parsed_cmd"), 800
+            ),
         }
     )
+    if isinstance(item.get("duration"), (int, float)):
+        metadata["duration_seconds"] = float(item["duration"])
     exit_code = _number(payload.get("exit_code"))
     if exit_code is not None:
         metadata["exit_code"] = int(exit_code)
@@ -843,6 +861,19 @@ def normalize_rollout_record(
                 ]
             metadata = _tool_metadata(payload, str(item.get("type") or "item"))
             metadata["item_id"] = str(payload.get("item_id") or item.get("id") or "")
+            if compact_item_type == "command_execution":
+                return [
+                    _event(
+                        timestamp,
+                        "TOOL_RUNNING" if item_type == "item_started" else "TOOL_COMPLETED",
+                        metadata["display_name"],
+                        source="rollout",
+                        source_id=source_id,
+                        turn_id=turn_id,
+                        metadata=metadata,
+                        complete=item_type == "item_completed",
+                    )
+                ]
             return [
                 _event(
                     timestamp,

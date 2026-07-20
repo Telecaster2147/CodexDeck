@@ -88,6 +88,29 @@ class PathTests(unittest.TestCase):
         self.assertEqual(resolved.paths.sqlite_home, Path("/runtime/sqlite"))
         self.assertEqual(resolved.method, "file-descriptor")
 
+    def test_configured_sqlite_home_precedes_environment_until_fd_is_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text('sqlite_home = "configured-db"\n')
+            proc = FakeProc(
+                {
+                    "CODEX_HOME": str(codex_home),
+                    "CODEX_SQLITE_HOME": "environment-db",
+                },
+                root,
+            )
+
+            configured = resolve_instance(7, proc)
+            proc.targets = [root / "opened-db" / "state_6.sqlite"]
+            opened = resolve_instance(7, proc)
+
+        self.assertEqual(configured.paths.sqlite_home, root / "configured-db")
+        self.assertEqual(configured.method, "config")
+        self.assertEqual(opened.paths.sqlite_home, root / "opened-db")
+        self.assertEqual(opened.method, "file-descriptor")
+
     def test_unreadable_environment_without_files_is_marked_unresolved(self) -> None:
         proc = FakeProc()
         proc.environment = None
@@ -96,13 +119,15 @@ class PathTests(unittest.TestCase):
 
     def test_launcher_inherits_child_session_instance(self) -> None:
         output = (
-            "10 1 node 100 0.0 S epoll node /usr/bin/codex\n"
-            "11 10 codex 99 1.0 S futex /opt/codex resume\n"
+            "10 1 1000 node 100 0.0 S epoll node /usr/bin/codex\n"
+            "11 10 1000 codex 99 1.0 S futex /opt/codex resume\n"
+            "12 1 2000 codex 80 0.0 S futex codex --other-user\n"
         )
-        result = ProcessDiscovery(FakeRunner(output), FamilyProc()).discover()
+        result = ProcessDiscovery(FakeRunner(output), FamilyProc(), user_id=1000).discover()
         by_pid = {process.pid: process for process in result.processes}
         self.assertEqual(by_pid[10].instance_id, by_pid[11].instance_id)
         self.assertEqual(by_pid[10].discovery_method, "process-family")
+        self.assertNotIn(12, by_pid)
         self.assertEqual(len(result.instances), 1)
 
 

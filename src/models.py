@@ -746,24 +746,6 @@ class SessionHealth:
 
 
 @dataclass
-class ProcessAssessment:
-    process: ProcessInfo
-    network: NetworkEvidence
-
-    @property
-    def health(self) -> str:
-        return self.network.state.value
-
-    @property
-    def reason(self) -> str:
-        return self.network.reason
-
-    @property
-    def connections(self) -> list[ConnectionAssessment]:
-        return self.network.connections
-
-
-@dataclass
 class InstanceSnapshot:
     instance_id: str
     paths: CodexPaths
