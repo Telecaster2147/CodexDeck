@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -21,6 +22,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     ContentSwitcher,
+    DataTable,
     Footer,
     Input,
     Label,
@@ -50,6 +52,8 @@ from models import (
     MonitorSnapshot,
     SessionHealth,
     SilenceState,
+    TerminalCapability,
+    TerminalSessionSummary,
 )
 from presentation.tui.preferences import (
     TuiPreferences,
@@ -575,6 +579,259 @@ class NavigationItem(ListItem):
         self.query_one(Static).update(self._content)
 
 
+class TerminalLog(RichLog):
+    can_focus = True
+
+
+class TerminalPanel(Vertical):
+    """Read-only terminal session picker and bounded transcript viewer."""
+
+    CAPABILITY_LABELS = {
+        TerminalCapability.STREAMING: "LIVE STREAM",
+        TerminalCapability.FILE_TAIL: "FILE TAIL",
+        TerminalCapability.POLL_TRANSCRIPT: "UPDATES ON CODEX POLL",
+        TerminalCapability.FINAL_TRANSCRIPT: "FINAL TRANSCRIPT",
+        TerminalCapability.METADATA_ONLY: "METADATA ONLY",
+    }
+
+    def compose(self) -> ComposeResult:
+        yield Static("READ ONLY  ·  暂无终端会话", id="terminal-header")
+        yield Input(
+            placeholder="搜索当前 retained transcript",
+            id="terminal-search",
+            classes="settled",
+        )
+        yield DataTable(id="terminal-list", cursor_type="row", zebra_stripes=True)
+        yield TerminalLog(
+            id="terminal-output",
+            min_width=1,
+            wrap=True,
+            markup=False,
+            auto_scroll=True,
+            max_lines=5000,
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#terminal-list", DataTable)
+        table.add_column("状态", key="status", width=10)
+        table.add_column("进程", key="process", width=14)
+        table.add_column("命令", key="command")
+        table.add_column("最近输出", key="age", width=10)
+        self._session_key = ""
+        self._terminals: dict[str, TerminalSessionSummary] = {}
+        self._row_keys: tuple[str, ...] = ()
+        self._selected_terminal_id = ""
+        self._output_signatures: tuple[tuple[object, ...], ...] = ()
+        self._output_terminal_id = ""
+        self._search_query = ""
+
+    @staticmethod
+    def _status_label(terminal: TerminalSessionSummary) -> str:
+        marker = {
+            "running": "R 运行中",
+            "completed": "C 已完成",
+            "failed": "F 失败",
+            "error": "F 错误",
+            "errored": "F 错误",
+        }.get(terminal.status, f"? {terminal.status or '未知'}")
+        return marker
+
+    @staticmethod
+    def _command_label(terminal: TerminalSessionSummary) -> str:
+        command = terminal.command or "后台进程"
+        return command if len(command) <= 80 else command[:79] + "…"
+
+    def show_session(self, session: SessionHealth | None, *, follow: bool) -> None:
+        if not self.is_mounted:
+            return
+        terminals = list(session.terminal_sessions if session else [])
+        session_changed = not session or self._session_key != session.key
+        self._session_key = session.key if session else ""
+        self._terminals = {item.terminal_id: item for item in terminals}
+        row_keys = tuple(item.terminal_id for item in terminals)
+        table = self.query_one("#terminal-list", DataTable)
+        if row_keys != self._row_keys:
+            previous = self._selected_terminal_id
+            table.clear(columns=False)
+            now = time.time()
+            for terminal in terminals:
+                age = (
+                    format_duration(max(0, now - terminal.last_output_at)) + "前"
+                    if terminal.last_output_at is not None
+                    else "-"
+                )
+                table.add_row(
+                    self._status_label(terminal),
+                    terminal.process_id or "-",
+                    self._command_label(terminal),
+                    age,
+                    key=terminal.terminal_id,
+                )
+            self._row_keys = row_keys
+            selected = previous if previous in row_keys else next(
+                (item.terminal_id for item in reversed(terminals) if item.status == "running"),
+                row_keys[-1] if row_keys else "",
+            )
+            self._selected_terminal_id = selected
+            if selected:
+                table.move_cursor(row=row_keys.index(selected))
+        else:
+            now = time.time()
+            for terminal in terminals:
+                age = (
+                    format_duration(max(0, now - terminal.last_output_at)) + "前"
+                    if terminal.last_output_at is not None
+                    else "-"
+                )
+                table.update_cell(terminal.terminal_id, "status", self._status_label(terminal))
+                table.update_cell(terminal.terminal_id, "process", terminal.process_id or "-")
+                table.update_cell(
+                    terminal.terminal_id, "command", self._command_label(terminal)
+                )
+                table.update_cell(terminal.terminal_id, "age", age)
+        if session_changed and not terminals:
+            self._selected_terminal_id = ""
+        self._render_selected(follow)
+
+    def _header(self, terminal: TerminalSessionSummary | None) -> Text:
+        header = Text("READ ONLY", style="bold #fbbf24")
+        if terminal is None:
+            header.append("  ·  暂无终端会话", style="#64748b")
+            return header
+        capability = self.CAPABILITY_LABELS.get(terminal.capability, terminal.capability.value)
+        header.append(f"  ·  {capability}", style="bold #38bdf8")
+        header.append(
+            f"  ·  {terminal.process_id or '-'}  ·  {terminal.status.upper()}",
+            style="#e2e8f0",
+        )
+        if terminal.exit_code is not None:
+            header.append(f"  ·  exit {terminal.exit_code}", style="#94a3b8")
+        if terminal.dropped_bytes:
+            header.append(f"  ·  dropped {terminal.dropped_bytes} B", style="#fbbf24")
+        if terminal.upstream_truncated:
+            header.append("  ·  UPSTREAM TRUNCATED", style="bold #fbbf24")
+        if terminal.stale:
+            header.append("  ·  STALE", style="bold #fbbf24")
+        header.append(f"\n$ {terminal.command or 'command unavailable'}", style="#f8fafc")
+        if terminal.cwd:
+            header.append(f"  ·  {compact_path(terminal.cwd)}", style="#94a3b8")
+        return header
+
+    def _chunk_renderable(self, chunk: object) -> Text:
+        stream = str(getattr(chunk, "stream", "combined"))
+        tag = {
+            "stdout": "OUT",
+            "stderr": "ERR",
+            "system": "SYS",
+            "combined": "TTY",
+        }.get(stream, stream.upper()[:3])
+        color = {
+            "stdout": "#cbd5e1",
+            "stderr": "#fca5a5",
+            "system": "#fbbf24",
+            "combined": "#e2e8f0",
+        }.get(stream, "#e2e8f0")
+        timestamp = datetime.fromtimestamp(float(getattr(chunk, "observed_at", 0))).strftime(
+            "%H:%M:%S"
+        )
+        text = Text(f"{timestamp} {tag:<3} ", style=f"bold {color}")
+        text.append(str(getattr(chunk, "text", "")), style=color)
+        if self._search_query:
+            text.highlight_regex(re.escape(self._search_query), style="bold black on #fbbf24")
+        return text
+
+    def _render_selected(self, follow: bool) -> None:
+        terminal = self._terminals.get(self._selected_terminal_id)
+        self.query_one("#terminal-header", Static).update(self._header(terminal))
+        log = self.query_one("#terminal-output", TerminalLog)
+        if terminal is None:
+            if self._output_terminal_id or self._output_signatures:
+                log.clear()
+                log.write(Text("暂无可读取输出", style="#64748b"), scroll_end=False)
+                log.scroll_home(animate=False, immediate=True, x_axis=True, y_axis=True)
+            self._output_terminal_id = ""
+            self._output_signatures = ()
+            return
+        signatures = tuple(
+            (
+                chunk.source_id,
+                chunk.sequence,
+                chunk.stream,
+                chunk.text,
+                self._search_query,
+            )
+            for chunk in terminal.chunks
+        )
+        same_terminal = self._output_terminal_id == terminal.terminal_id
+        previous = self._output_signatures
+        was_at_end = log.is_vertical_scroll_end
+        scroll_y = log.scroll_y
+        should_follow = follow and (not same_terminal or was_at_end)
+        log.auto_scroll = False
+        if same_terminal and previous and signatures[: len(previous)] == previous:
+            for chunk in terminal.chunks[len(previous) :]:
+                log.write(self._chunk_renderable(chunk), scroll_end=False)
+        elif signatures != previous or not same_terminal:
+            log.clear()
+            if terminal.chunks:
+                for chunk in terminal.chunks:
+                    log.write(self._chunk_renderable(chunk), scroll_end=False)
+            else:
+                log.write(
+                    Text("进程已发现，当前数据源还没有可读输出", style="#64748b"),
+                    scroll_end=False,
+                )
+        if should_follow:
+            log.scroll_end(animate=False, immediate=True, x_axis=False)
+            log.scroll_to(x=0, animate=False, immediate=True)
+        elif same_terminal:
+            log.scroll_to(x=0, y=scroll_y, animate=False, immediate=True, force=True)
+        else:
+            log.scroll_home(animate=False, immediate=True, x_axis=True, y_axis=True)
+        log.auto_scroll = follow
+        self._output_terminal_id = terminal.terminal_id
+        self._output_signatures = signatures
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id != "terminal-list" or event.row_key is None:
+            return
+        self._selected_terminal_id = str(event.row_key.value)
+        self._render_selected(self.app.follow)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "terminal-list":
+            self.query_one("#terminal-output", TerminalLog).focus()
+
+    def action_search(self) -> None:
+        search = self.query_one("#terminal-search", Input)
+        search.remove_class("settled")
+        search.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "terminal-search":
+            return
+        self._search_query = event.value
+        self._output_signatures = ()
+        self._render_selected(self.app.follow)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "terminal-search":
+            event.input.add_class("settled")
+            self.query_one("#terminal-output", TerminalLog).focus()
+
+    def back(self) -> bool:
+        search = self.query_one("#terminal-search", Input)
+        output = self.query_one("#terminal-output", TerminalLog)
+        if search.has_focus:
+            search.add_class("settled")
+            output.focus()
+            return True
+        if output.has_focus:
+            self.query_one("#terminal-list", DataTable).focus()
+            return True
+        return False
+
+
 class SessionInspector(Vertical):
     """Persistent session status and tabbed diagnostic content."""
 
@@ -584,6 +841,7 @@ class SessionInspector(Vertical):
         yield Tabs(
             Tab("1  Activity", id="activity-tab"),
             Tab("2  Diagnosis", id="diagnosis-tab"),
+            Tab("3  Terminal", id="terminal-tab"),
             id="detail-tabs",
         )
         with ContentSwitcher(initial="activity-panel", id="detail-content"):
@@ -597,6 +855,7 @@ class SessionInspector(Vertical):
             )
             with VerticalScroll(id="diagnosis-panel"):
                 yield Static("暂无诊断", id="diagnosis-content")
+            yield TerminalPanel(id="terminal-panel")
 
     def show_session(
         self,
@@ -617,6 +876,7 @@ class SessionInspector(Vertical):
             self._timeline_signatures: tuple[tuple[object, ...], ...] = ()
             self._timeline_render_options: tuple[object, ...] = ()
             self.query_one("#diagnosis-content", Static).update("暂无诊断")
+            self.query_one(TerminalPanel).show_session(None, follow=follow)
             return
 
         marker, color = session_marker(session)
@@ -677,6 +937,7 @@ class SessionInspector(Vertical):
                 diagnostic=preferences.mode == "diagnostic",
             )
         )
+        self.query_one(TerminalPanel).show_session(session, follow=follow)
 
     def _render_timeline(
         self,
@@ -1569,7 +1830,8 @@ class HelpScreen(ModalScreen[None]):
                 "  ↑↓ / j k      移动焦点        Enter  打开会话\n"
                 "  Esc           返回列表        Tab    下一个异常\n\n"
                 "VIEWS\n"
-                "  1 / 2         Activity / Diagnosis\n"
+                "  1 / 2 / 3     Activity / Diagnosis / Terminal\n"
+                "  o             打开只读 Terminal\n"
                 "  g             分组 / 扁平     a      辅助进程\n"
                 "  ,             设置\n\n"
                 "OPERATIONS\n"
@@ -1653,6 +1915,8 @@ class CodexNetApp(App[MonitorSnapshot]):
         Binding("tab", "next_anomaly", "异常"),
         Binding("1", "show_tab('activity')", "Activity", show=False),
         Binding("2", "show_tab('diagnosis')", "Diagnosis", show=False),
+        Binding("3", "show_tab('terminal')", "Terminal", show=False),
+        Binding("o", "show_tab('terminal')", "终端"),
         Binding("f", "toggle_follow", "跟随"),
         Binding("j", "cursor_down", "向下", show=False),
         Binding("k", "cursor_up", "向上", show=False),
@@ -2042,6 +2306,9 @@ class CodexNetApp(App[MonitorSnapshot]):
                 yield command
 
     def action_search(self) -> None:
+        if self.query_one("#detail-tabs", Tabs).active == "terminal-tab":
+            self.query_one(TerminalPanel).action_search()
+            return
         search = self.query_one("#search", Input)
         search.remove_class("settled")
         search.focus()
@@ -2068,10 +2335,12 @@ class CodexNetApp(App[MonitorSnapshot]):
         await self._rebuild_navigation()
 
     def action_show_tab(self, name: str) -> None:
-        if name not in {"activity", "diagnosis"}:
+        if name not in {"activity", "diagnosis", "terminal"}:
             return
         self.query_one("#detail-tabs", Tabs).active = f"{name}-tab"
         self.query_one("#detail-content", ContentSwitcher).current = f"{name}-panel"
+        if name == "terminal":
+            self.query_one("#terminal-list", DataTable).focus()
         if self.compact:
             self.compact_detail = True
             self.screen.add_class("detail-open")
@@ -2084,6 +2353,11 @@ class CodexNetApp(App[MonitorSnapshot]):
         if self.follow:
             log.scroll_end(animate=False, immediate=True, x_axis=False)
             log.scroll_to(x=0, animate=False, immediate=True)
+        terminal_log = self.query_one("#terminal-output", TerminalLog)
+        terminal_log.auto_scroll = self.follow
+        if self.follow:
+            terminal_log.scroll_end(animate=False, immediate=True, x_axis=False)
+            terminal_log.scroll_to(x=0, animate=False, immediate=True)
         if self.selected_session:
             instance = next(
                 (
@@ -2167,6 +2441,11 @@ class CodexNetApp(App[MonitorSnapshot]):
                 break
 
     def action_back(self) -> None:
+        if (
+            self.query_one("#detail-tabs", Tabs).active == "terminal-tab"
+            and self.query_one(TerminalPanel).back()
+        ):
+            return
         search = self.query_one("#search", Input)
         if search.has_focus:
             search.value = ""

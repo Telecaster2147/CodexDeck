@@ -4,6 +4,7 @@ import io
 import sys
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -32,6 +33,9 @@ from models import (  # noqa: E402
     ProcessInfo,
     RecoveryState,
     SessionHealth,
+    TerminalCapability,
+    TerminalChunk,
+    TerminalSessionSummary,
     TokenUsageSummary,
     UnparsedPayload,
 )
@@ -51,7 +55,15 @@ from presentation.tui.preferences import (  # noqa: E402
     load_preferences,
     save_preferences,
 )
-from textual.widgets import ContentSwitcher, Footer, Input, RichLog, Select, Static  # noqa: E402
+from textual.widgets import (  # noqa: E402
+    ContentSwitcher,
+    DataTable,
+    Footer,
+    Input,
+    RichLog,
+    Select,
+    Static,
+)
 
 
 def render_plain(renderable: object, width: int = 120) -> str:
@@ -844,6 +856,74 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             search.value = "Session 2"
             await pilot.pause()
             self.assertEqual(len(app.query(NavigationItem)), 2)
+
+    async def test_terminal_tab_shows_read_only_transcript_and_preserves_scroll(self) -> None:
+        snapshot = make_snapshot(1)
+        chunks = tuple(
+            TerminalChunk(
+                f"source-{index}",
+                float(index + 1),
+                stream="stderr" if index == 20 else "stdout",
+                text=f"line {index}\n",
+                sequence=index,
+            )
+            for index in range(40)
+        )
+        snapshot.sessions[0].terminal_sessions = [
+            TerminalSessionSummary(
+                "terminal-1",
+                process_id="777",
+                command="server --watch",
+                cwd="/work/repository",
+                status="running",
+                capability=TerminalCapability.POLL_TRANSCRIPT,
+                retained_bytes=320,
+                chunks=chunks,
+            )
+        ]
+        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.press("o")
+            await pilot.pause()
+
+            self.assertEqual(
+                app.query_one("#detail-content", ContentSwitcher).current,
+                "terminal-panel",
+            )
+            self.assertEqual(app.query_one("#terminal-list", DataTable).row_count, 1)
+            header = str(app.query_one("#terminal-header", Static).render())
+            self.assertIn("READ ONLY", header)
+            self.assertIn("UPDATES ON CODEX POLL", header)
+            self.assertIn("server --watch", header)
+            log = app.query_one("#terminal-output", RichLog)
+            rendered = "\n".join(line.text for line in log.lines)
+            self.assertIn("OUT", rendered)
+            self.assertIn("ERR", rendered)
+            self.assertIn("line 20", rendered)
+
+            await pilot.press("enter")
+            log.scroll_to(y=5, animate=False, immediate=True)
+            await pilot.pause()
+            previous_scroll = log.scroll_y
+            app.follow = False
+            refreshed = make_snapshot(1)
+            refreshed.sessions[0].terminal_sessions = [
+                replace(
+                    snapshot.sessions[0].terminal_sessions[0],
+                    chunks=chunks
+                    + (TerminalChunk("source-new", 99.0, text="new line\n", sequence=99),),
+                )
+            ]
+            app._apply_snapshot(refreshed)
+            await pilot.pause()
+
+            self.assertEqual(log.scroll_y, previous_scroll)
+            self.assertIs(app.focused, log)
+            await pilot.press("/")
+            self.assertTrue(app.query_one("#terminal-search", Input).has_focus)
+            await pilot.press("l", "i", "n", "e", "enter")
+            self.assertEqual(app.query_one("#terminal-search", Input).value, "line")
 
     async def test_settings_popup_is_clickable_and_persists_changes(self) -> None:
         snapshot = make_snapshot(1)

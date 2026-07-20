@@ -124,11 +124,63 @@ Screen {
 }
 
 #activity-panel,
-#diagnosis-panel {
+#diagnosis-panel,
+#terminal-panel {
     height: 1fr;
     padding: 1;
     background: $background;
     scrollbar-size: 1 1;
+}
+
+#terminal-panel {
+    padding: 0;
+    layout: vertical;
+}
+
+#terminal-header {
+    height: 3;
+    padding: 0 1;
+    background: $surface;
+    color: $muted;
+    border-bottom: solid $border;
+}
+
+#terminal-search {
+    height: 3;
+    margin: 0 1;
+    border: tall $accent;
+    background: $surface;
+}
+
+#terminal-search.settled {
+    display: none;
+}
+
+#terminal-list {
+    height: 8;
+    min-height: 4;
+    background: $background;
+    scrollbar-size: 1 1;
+    border-bottom: solid $border;
+}
+
+#terminal-list > .datatable--cursor {
+    background: $surface-light;
+    color: $text;
+    text-style: none;
+}
+
+#terminal-output {
+    height: 1fr;
+    padding: 1;
+    background: $background;
+    scrollbar-size: 1 1;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+#terminal-output:focus {
+    border-left: thick $accent;
 }
 
 #activity-panel {
@@ -177,6 +229,10 @@ Footer {
 .compact.detail-open #inspector {
     display: block;
     width: 100%;
+}
+
+.compact #terminal-list {
+    height: 6;
 }
 
 .too-small #workspace,
