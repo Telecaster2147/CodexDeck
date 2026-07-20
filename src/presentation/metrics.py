@@ -8,6 +8,26 @@ from typing import Iterable
 from models import MonitorSnapshot
 
 
+METRIC_FAMILIES = (
+    "codexnet_collection_duration_seconds",
+    "codexnet_instances",
+    "codexnet_sessions",
+    "codexnet_network_sessions",
+    "codexnet_silence_sessions",
+    "codexnet_compact_active",
+    "codexnet_terminal_sessions",
+    "codexnet_terminal_dropped_bytes",
+    "codexnet_terminal_upstream_truncated",
+    "codexnet_compact_total",
+    "codexnet_compact_duration_seconds_sum",
+    "codexnet_alerts",
+    "codexnet_attention_sessions",
+    "codexnet_snapshot_events",
+    "codexnet_tokens",
+    "codexnet_collector_healthy",
+)
+
+
 def _escape(value: object) -> str:
     return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 

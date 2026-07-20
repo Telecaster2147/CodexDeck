@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from config import COMMAND_TIMEOUT
 
@@ -90,6 +90,41 @@ def redact_sensitive(text: str) -> str:
     redacted = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", "[REDACTED]", redacted)
     redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{16,}\b", "[REDACTED]", redacted)
     return redacted
+
+
+TRANSCRIPT_BODY_FIELDS = frozenset(
+    {
+        "aggregated_output",
+        "chunks",
+        "formatted_output",
+        "interaction_input",
+        "output",
+        "stderr",
+        "stdout",
+        "transcript",
+    }
+)
+
+
+def strip_transcript_bodies(value: Any) -> Any:
+    """Return a public/history projection with terminal body fields removed."""
+
+    if isinstance(value, dict):
+        projected: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            if name == "chunks":
+                continue
+            if name in TRANSCRIPT_BODY_FIELDS:
+                projected[name] = ""
+            else:
+                projected[name] = strip_transcript_bodies(item)
+        return projected
+    if isinstance(value, list):
+        return [strip_transcript_bodies(item) for item in value]
+    if isinstance(value, tuple):
+        return [strip_transcript_bodies(item) for item in value]
+    return value
 
 
 def one_line(text: str) -> str:

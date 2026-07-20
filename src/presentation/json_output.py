@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from models import MonitorSnapshot, json_value
+from utils import strip_transcript_bodies
 
 
 SCHEMA_VERSION = 1
@@ -14,12 +15,15 @@ NULLABLE_STRING_FIELDS = {
     "alert_reason",
     "additional_details",
     "agent_path",
+    "aggregated_output",
     "collaboration_mode",
     "command",
     "completion_status",
     "current_task",
     "cwd",
     "detail",
+    "formatted_output",
+    "interaction_input",
     "arguments",
     "model",
     "nickname",
@@ -34,7 +38,10 @@ NULLABLE_STRING_FIELDS = {
     "session_title",
     "source_id",
     "source",
+    "stderr",
+    "stdout",
     "trace_id",
+    "transcript",
     "turn_id",
     "wait_channel",
 }
@@ -51,11 +58,7 @@ def _normalize_nulls(value: object, field: str = "") -> object:
 
 
 def snapshot_dict(snapshot: MonitorSnapshot, *, show_auxiliary: bool = False) -> dict[str, object]:
-    instances = _normalize_nulls(json_value(snapshot.instances))
-    for instance in instances:
-        for session in instance["sessions"]:
-            for terminal in session.get("terminal_sessions", []):
-                terminal.pop("chunks", None)
+    instances = _normalize_nulls(strip_transcript_bodies(json_value(snapshot.instances)))
     if not show_auxiliary:
         for instance in instances:
             instance["processes"] = [

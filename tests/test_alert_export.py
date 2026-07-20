@@ -157,6 +157,16 @@ class ExportTests(unittest.TestCase):
         session = machine.derive("attention", process(), NetworkEvidence(), 102)
 
         payload = current_incidents_export([session])
+        self.assertEqual(
+            set(payload),
+            {
+                "export_schema_version",
+                "export_type",
+                "generated_at",
+                "incident_count",
+                "incidents",
+            },
+        )
 
         self.assertEqual(payload["incident_count"], 1)
         self.assertEqual(payload["incidents"][0]["attention"], "APPROVAL")
@@ -212,6 +222,24 @@ class ExportTests(unittest.TestCase):
             session,
             machine.retained_events("key"),
             generated_at="2026-07-16T00:00:00Z",
+        )
+        self.assertEqual(
+            set(payload),
+            {
+                "export_schema_version",
+                "export_type",
+                "generated_at",
+                "session",
+                "turns",
+                "compactions",
+                "tool_executions",
+                "agents",
+                "retry_recovery",
+                "failures",
+                "tcp_evidence",
+                "events",
+                "retention",
+            },
         )
         self.assertIn("observation", payload["session"])
         self.assertIn("silence", payload["session"])

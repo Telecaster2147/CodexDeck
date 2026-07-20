@@ -65,7 +65,19 @@ def make_instance() -> InstanceSnapshot:
 
 
 def make_options(*, json_output: bool = False) -> AppOptions:
-    return AppOptions(2.0, 30.0, 900, None, None, False, json_output, True, False, False, True)
+    return AppOptions(
+        2.0,
+        30.0,
+        900,
+        None,
+        None,
+        False,
+        json_output,
+        True,
+        False,
+        False,
+        command="doctor",
+    )
 
 
 class FakeEngine:
@@ -83,9 +95,9 @@ class FakeEngine:
 
 
 class DoctorTests(unittest.TestCase):
-    def test_legacy_app_options_position_keeps_doctor_flag(self) -> None:
+    def test_app_options_selects_doctor_command(self) -> None:
         options = make_options()
-        self.assertTrue(options.doctor)
+        self.assertEqual(options.command, "doctor")
         self.assertFalse(options.packet_inspection)
 
     def test_parser_accepts_doctor_without_changing_default_mode(self) -> None:
@@ -104,16 +116,16 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(engine.baselines, 0)
         self.assertIn("codexnet doctor: healthy", output.getvalue())
 
-    def test_text_lists_paths_schema_protocol_and_unknown_events(self) -> None:
+    def test_text_prioritizes_paths_and_degraded_details(self) -> None:
         instance = make_instance()
         instance.unknown_event_types = {"future_event": 2}
         snapshot = MonitorSnapshot("now", 2.0, [instance], 0.25)
         text = render_doctor_text(snapshot)
         self.assertIn("CODEX_HOME: /tmp/codex-home", text)
-        self.assertIn("threads: yes", text)
-        self.assertIn("turn_timing: direct (rollout, high)", text)
-        self.assertIn("tui_session_log: disabled", text)
-        self.assertIn("hook_events: disabled", text)
+        self.assertIn("完整 schema、协议、rollout 与 collector 矩阵: doctor --json", text)
+        self.assertNotIn("threads: yes", text)
+        self.assertNotIn("turn_timing: direct", text)
+        self.assertNotIn("tui_session_log: disabled", text)
         self.assertIn("future_event: 2", text)
         self.assertEqual(doctor_exit_code(snapshot), 2)
 
@@ -121,6 +133,33 @@ class DoctorTests(unittest.TestCase):
         snapshot = MonitorSnapshot("now", 2.0, [make_instance()], 0.25)
         report = json.loads(render_doctor_json(snapshot))
         self.assertEqual(report["doctor_schema_version"], 1)
+        self.assertEqual(
+            set(report),
+            {
+                "doctor_schema_version",
+                "generated_at",
+                "status",
+                "collection",
+                "diagnostics",
+                "collector_health",
+                "instances",
+            },
+        )
+        self.assertEqual(
+            set(report["instances"][0]),
+            {
+                "instance_id",
+                "discovery_method",
+                "paths",
+                "schema_capabilities",
+                "protocol_capabilities",
+                "diagnostics",
+                "unknown_events",
+                "rollout",
+                "compact_sources",
+                "collector_health",
+            },
+        )
         self.assertEqual(report["status"], "healthy")
         self.assertIn("compact_sources", report["instances"][0])
         self.assertEqual(report["instances"][0]["protocol_capabilities"]["turn_timing"]["mode"], "direct")

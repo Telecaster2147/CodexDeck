@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from models import AlertStatus, NormalizedEvent, SessionHealth, json_value
-from utils import redact_sensitive
+from utils import redact_sensitive, strip_transcript_bodies
 
 
 EXPORT_SCHEMA_VERSION = 1
@@ -100,7 +100,7 @@ def session_export(
             "source": "SessionStateMachine.retained_events",
         },
     }
-    return _redact(json_value(payload))
+    return _redact(strip_transcript_bodies(json_value(payload)))
 
 
 def current_incidents_export(
@@ -149,7 +149,7 @@ def current_incidents_export(
         "incident_count": len(incidents),
         "incidents": incidents,
     }
-    return _redact(json_value(payload))
+    return _redact(strip_transcript_bodies(json_value(payload)))
 
 
 def render_export_json(payload: dict[str, Any], *, pretty: bool = True) -> str:

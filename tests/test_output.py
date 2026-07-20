@@ -13,11 +13,13 @@ from models import (  # noqa: E402
     AttentionRequest,
     AttentionState,
     CodexPaths,
+    Confidence,
     InstanceSnapshot,
     LifecycleState,
     MonitorSnapshot,
     NetworkEvidence,
     NetworkState,
+    NormalizedEvent,
     ProcessIdentity,
     ProcessInfo,
     RateLimitSummary,
@@ -32,7 +34,7 @@ from models import (  # noqa: E402
 )
 from presentation.json_output import render_json  # noqa: E402
 from presentation.export import session_export  # noqa: E402
-from presentation.metrics import render_prometheus  # noqa: E402
+from presentation.metrics import METRIC_FAMILIES, render_prometheus  # noqa: E402
 from presentation.text import render_text  # noqa: E402
 
 
@@ -125,6 +127,7 @@ def snapshot_with_metrics() -> MonitorSnapshot:
 class OutputTests(unittest.TestCase):
     def test_json_exposes_terminal_summary_without_transcript_body(self) -> None:
         result = snapshot()
+        transcript = "TRANSCRIPT_SENTINEL_84721"
         result.sessions[0].terminal_sessions = [
             TerminalSessionSummary(
                 "terminal-1",
@@ -133,7 +136,24 @@ class OutputTests(unittest.TestCase):
                 status="running",
                 capability=TerminalCapability.POLL_TRANSCRIPT,
                 retained_bytes=12,
-                chunks=(TerminalChunk("source", 1.0, text="TOKEN=secret\n"),),
+                chunks=(TerminalChunk("source", 1.0, text=transcript),),
+            )
+        ]
+        tool = ToolExecutionSummary(
+            "call-1",
+            status="completed",
+            output=transcript,
+        )
+        result.sessions[0].tool_executions = [tool]
+        result.sessions[0].turns = [TurnSummary("turn-1", tools=(tool,))]
+        result.sessions[0].events = [
+            NormalizedEvent(
+                1.0,
+                "TOOL_COMPLETED",
+                "shell",
+                source="rollout",
+                confidence=Confidence.HIGH,
+                metadata={"output": transcript, "nested": {"stderr": transcript}},
             )
         ]
 
@@ -143,7 +163,7 @@ class OutputTests(unittest.TestCase):
         ][0]
         rendered_text = render_text(result)
         metrics = render_prometheus(result)
-        exported = json.dumps(session_export(result.sessions[0], []))
+        exported = json.dumps(session_export(result.sessions[0], result.sessions[0].events))
 
         self.assertEqual(terminal["process_id"], "321")
         self.assertEqual(terminal["capability"], "POLL_TRANSCRIPT")
@@ -153,9 +173,14 @@ class OutputTests(unittest.TestCase):
             'codexnet_terminal_sessions{capability="POLL_TRANSCRIPT",instance="i1"} 1',
             metrics,
         )
-        self.assertNotIn("TOKEN=secret", rendered_json + rendered_text + metrics)
+        self.assertNotIn(transcript, rendered_json + rendered_text + metrics)
+        public_session = json.loads(rendered_json)["instances"][0]["sessions"][0]
+        self.assertIsNone(public_session["tool_executions"][0]["output"])
+        self.assertIsNone(public_session["turns"][0]["tools"][0]["output"])
+        self.assertIsNone(public_session["events"][0]["metadata"]["output"])
+        self.assertIsNone(public_session["events"][0]["metadata"]["nested"]["stderr"])
         self.assertNotIn("terminal_sessions", exported)
-        self.assertNotIn("TOKEN=secret", exported)
+        self.assertNotIn(transcript, exported)
 
     def test_attention_is_present_in_json_text_and_metrics(self) -> None:
         result = snapshot()
@@ -186,6 +211,18 @@ class OutputTests(unittest.TestCase):
     def test_json_has_versioned_instance_shape(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=True))
         self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(
+            set(payload),
+            {
+                "schema_version",
+                "generated_at",
+                "interval_seconds",
+                "collection_duration_seconds",
+                "summary",
+                "diagnostics",
+                "instances",
+            },
+        )
         self.assertEqual(payload["instances"][0]["instance_id"], "i1")
         self.assertEqual(payload["instances"][0]["sessions"][0]["network"]["state"], "ACTIVE")
         self.assertEqual(len(payload["instances"][0]["processes"]), 1)
@@ -196,6 +233,13 @@ class OutputTests(unittest.TestCase):
             "NORMAL",
         )
         self.assertIn("last_semantic_at", payload["instances"][0]["sessions"][0]["observation"])
+
+    def test_metrics_family_contract_is_frozen(self) -> None:
+        output = render_prometheus(snapshot_with_metrics())
+        families = tuple(
+            line.split()[2] for line in output.splitlines() if line.startswith("# HELP ")
+        )
+        self.assertEqual(families, METRIC_FAMILIES)
 
     def test_all_includes_auxiliary_processes_in_json_and_text(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=False, show_auxiliary=True))
