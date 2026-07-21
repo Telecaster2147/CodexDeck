@@ -2,7 +2,7 @@
 
 # CodexDeck
 
-### 所有 Codex 会话，一块安静、准确、只读的终端仪表盘
+### 管理所有 Codex 会话实时连接状态，一块准确只读的终端仪表盘
 
 [![Version](https://img.shields.io/badge/version-0.1.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
