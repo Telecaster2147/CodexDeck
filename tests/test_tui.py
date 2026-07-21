@@ -60,6 +60,7 @@ from presentation.tui.textual_app import (  # noqa: E402
     startup_renderable,
     timeline_entries,
 )
+from textual.css.query import NoMatches  # noqa: E402
 from textual.widgets import (  # noqa: E402
     Collapsible,
     ContentSwitcher,
@@ -878,6 +879,16 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             show.assert_not_called()
             clear.assert_not_called()
             write.assert_not_called()
+
+    async def test_navigation_rebuild_ignores_unmounted_widgets(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)):
+            with patch.object(app, "query_one", side_effect=NoMatches("screen is unmounted")):
+                await app._rebuild_navigation()
+
+            self.assertFalse(app.rebuilding)
 
     async def test_unchanged_fast_samples_do_not_update_widgets(self) -> None:
         snapshot = make_snapshot(1)

@@ -757,8 +757,13 @@ class CodexDeckApp(App[MonitorSnapshot]):
             return
         self.rebuilding = True
         self.navigation_dirty = False
-        list_view = self.query_one("#session-list", ListView)
-        query = self.query_one("#search", Input).value.strip()
+        try:
+            list_view = self.query_one("#session-list", ListView)
+            query = self.query_one("#search", Input).value.strip()
+        except NoMatches:
+            # A final timer tick may arrive after Textual starts unmounting the screen.
+            self.rebuilding = False
+            return
         items: list[NavigationItem] = []
         for instance in self.snapshot.instances:
             sessions = [
