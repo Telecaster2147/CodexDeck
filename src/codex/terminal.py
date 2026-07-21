@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
 
-from models import TerminalCapability, TerminalChunk, TerminalSessionSummary
+from models import (
+    RUNNING_TERMINAL_STATUSES,
+    TerminalCapability,
+    TerminalChunk,
+    TerminalSessionSummary,
+)
 from utils import redact_sensitive
 
 
@@ -21,14 +26,15 @@ MAX_TERMINAL_BYTES = 2 * 1024 * 1024
 MAX_TERMINAL_CHUNKS = 4_000
 MAX_TERMINALS_PER_SESSION = 16
 MAX_GLOBAL_TERMINAL_BYTES = 16 * 1024 * 1024
+TERMINAL_OS_MISS_WINDOWS = 2
 
 _OSC = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.DOTALL)
 _STRING_ESCAPE = re.compile(r"\x1b[PX^_].*?\x1b\\", re.DOTALL)
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]")
 _BACKGROUND_RUNNING = re.compile(
-    r"(?:Script running with cell ID|Process running with session ID) "
-    r"(?P<process>\S+).*?(?:Output|Final output):\s*(?P<output>.*)",
+    r"^(?:Script running with cell ID|Process running with session ID) "
+    r"(?P<process>[^\s\"\\\\]+).*?(?:Output|Final output):\s*(?P<output>.*)",
     re.DOTALL,
 )
 _SCRIPT_RESULT = re.compile(
@@ -52,7 +58,7 @@ _TERMINAL_TOOLS = {"exec", "exec_command", "local_shell_call", "write_stdin", "w
 
 
 def sanitize_terminal_text(value: str) -> str:
-    """Remove terminal control sequences without replaying them to CodexNet's TTY."""
+    """Remove terminal control sequences without replaying them to CodexDeck's TTY."""
 
     text = value.replace("\r\n", "\n").replace("\r", "\n")
     text = _OSC.sub("", text)
@@ -74,19 +80,124 @@ def _mapping(value: object) -> dict[str, Any]:
 
 
 def _nested_terminal_call(value: object) -> tuple[str, dict[str, Any]]:
+    calls = _nested_terminal_calls(value)
+    return calls[0] if calls else ("", {})
+
+
+def _js_string(value: str, start: int) -> tuple[str, int]:
+    quote = value[start]
+    result: list[str] = []
+    index = start + 1
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v"}
+    while index < len(value):
+        char = value[index]
+        if char == quote:
+            return "".join(result), index + 1
+        if char == "\\" and index + 1 < len(value):
+            escaped = value[index + 1]
+            if escaped == "u" and index + 5 < len(value):
+                try:
+                    result.append(chr(int(value[index + 2 : index + 6], 16)))
+                    index += 6
+                    continue
+                except ValueError:
+                    pass
+            result.append(escapes.get(escaped, escaped))
+            index += 2
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result), index
+
+
+def _js_argument_value(value: str, start: int) -> tuple[object, int]:
+    index = start
+    while index < len(value) and value[index].isspace():
+        index += 1
+    if index >= len(value):
+        return "", index
+    if value[index] in {'"', "'", "`"}:
+        return _js_string(value, index)
+    if value[index] == "[":
+        end = index + 1
+        depth = 1
+        while end < len(value) and depth:
+            if value[end] in {'"', "'", "`"}:
+                _, end = _js_string(value, end)
+                continue
+            depth += value[end] == "["
+            depth -= value[end] == "]"
+            end += 1
+        raw = value[index:end]
+        try:
+            return json.loads(raw), end
+        except json.JSONDecodeError:
+            return raw, end
+    match = re.match(r"-?\d+(?:\.\d+)?", value[index:])
+    if match:
+        raw = match.group(0)
+        return (float(raw) if "." in raw else int(raw)), index + len(raw)
+    match = re.match(r"[A-Za-z_$][\w$]*", value[index:])
+    if match:
+        raw = match.group(0)
+        return {"true": True, "false": False, "null": None}.get(raw, raw), index + len(raw)
+    return "", index + 1
+
+
+def _js_object_end(value: str, start: int) -> int:
+    while start < len(value) and value[start].isspace():
+        start += 1
+    if start >= len(value) or value[start] != "{":
+        return start
+    depth = 0
+    index = start
+    while index < len(value):
+        char = value[index]
+        if char in {'"', "'", "`"}:
+            _, index = _js_string(value, index)
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(value)
+
+
+def _js_terminal_arguments(value: str, start: int, end: int) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    keys = ("cmd", "command", "workdir", "cwd", "process_id", "session_id", "cell_id")
+    object_text = value[start:end]
+    for key in keys:
+        match = re.search(rf"(?:[\"']?{key}[\"']?)\s*:\s*", object_text)
+        if not match:
+            continue
+        parsed, _ = _js_argument_value(value, start + match.end())
+        arguments[key] = parsed
+    return arguments
+
+
+def _nested_terminal_calls(value: object) -> list[tuple[str, dict[str, Any]]]:
     if not isinstance(value, str):
-        return "", {}
+        return []
+    calls: list[tuple[str, dict[str, Any]]] = []
     for match in re.finditer(
         r"tools\.(?P<tool>exec_command|write_stdin|wait)\(\s*",
         value,
     ):
+        object_end = _js_object_end(value, match.end())
         try:
-            parsed, _ = json.JSONDecoder().raw_decode(value[match.end() :])
+            parsed, consumed = json.JSONDecoder().raw_decode(value[match.end() : object_end])
         except (json.JSONDecodeError, TypeError):
-            continue
+            parsed = _js_terminal_arguments(value, match.end(), object_end)
+        else:
+            if not consumed:
+                continue
         if isinstance(parsed, dict):
-            return match.group("tool"), parsed
-    return "", {}
+            calls.append((match.group("tool"), parsed))
+    return calls
 
 
 def _argument_value(payload: dict[str, Any], item: dict[str, Any]) -> object:
@@ -141,11 +252,20 @@ def _content_text(value: object) -> str:
     return str(value)
 
 
+def _process_id(value: object) -> str:
+    """Keep a protocol process ID separate from serialized output delimiters."""
+
+    process_id = str(value or "").strip()
+    for delimiter in ("\\n", "\\r", "\n", "\r"):
+        process_id = process_id.split(delimiter, 1)[0]
+    return process_id.strip(" \t\"'")
+
+
 def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
     """Return text, stream, process id, exit code, and upstream truncation."""
 
     if isinstance(value, dict):
-        process_id = str(
+        process_id = _process_id(
             value.get("process_id")
             or value.get("session_id")
             or value.get("cell_id")
@@ -168,19 +288,34 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
             bool(value.get("truncated") or value.get("omitted_bytes")) or bool(_TRUNCATED.search(text)),
         )
     text = sanitize_terminal_text(_content_text(value))
-    running = _BACKGROUND_RUNNING.search(text)
+    running = _BACKGROUND_RUNNING.match(text)
     if running:
         return (
             running.group("output"),
             "combined",
-            running.group("process"),
+            _process_id(running.group("process")),
             None,
             bool(_TRUNCATED.search(text)),
         )
-    script_result = _SCRIPT_RESULT.search(text)
+    script_result = _SCRIPT_RESULT.match(text)
     if script_result:
         text = script_result.group("output")
-    exited_result = _PROCESS_EXITED.search(text)
+        nested_result = _mapping(text)
+        if (
+            "wall_time_seconds" in nested_result
+            and ("session_id" in nested_result or "exit_code" in nested_result)
+        ):
+            return _output_fields(nested_result)
+        running = _BACKGROUND_RUNNING.match(text)
+        if running:
+            return (
+                running.group("output"),
+                "combined",
+                _process_id(running.group("process")),
+                None,
+                bool(_TRUNCATED.search(text)),
+            )
+    exited_result = _PROCESS_EXITED.match(text)
     if exited_result:
         return (
             exited_result.group("output"),
@@ -189,7 +324,7 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
             int(exited_result.group("code")),
             bool(_TRUNCATED.search(text)),
         )
-    exit_match = _EXIT_CODE.search(text)
+    exit_match = _EXIT_CODE.match(text)
     return (
         text,
         "combined",
@@ -218,6 +353,7 @@ class TerminalUpdate:
     upstream_truncated: bool = False
     source: str = "rollout"
     continuation: bool = False
+    wait_for_completion: bool = False
 
 
 def extract_terminal_updates(
@@ -243,14 +379,14 @@ def extract_terminal_updates(
         or ""
     )
     turn_id = str(payload.get("turn_id") or item.get("turn_id") or "")
-    process_id = str(payload.get("process_id") or item.get("process_id") or "")
+    process_id = _process_id(payload.get("process_id") or item.get("process_id") or "")
     tool_name = _tool_name(payload, item, item_type).lower()
     nested_tool, _ = _nested_terminal_call(_argument_value(payload, item))
     if nested_tool and tool_name in {"exec", "functions.exec"}:
         tool_name = nested_tool
     arguments = _arguments(payload, item)
     if not process_id:
-        process_id = str(
+        process_id = _process_id(
             arguments.get("process_id")
             or arguments.get("session_id")
             or arguments.get("cell_id")
@@ -335,7 +471,7 @@ def extract_terminal_updates(
             declared_exit = item.get("exit_code")
         if exit_code is None and isinstance(declared_exit, (int, float)):
             exit_code = int(declared_exit)
-        process_id = process_id or output_process
+        process_id = process_id or _process_id(output_process)
         running = bool(output_process and exit_code is None)
         return (
             TerminalUpdate(
@@ -398,6 +534,7 @@ def extract_terminal_updates(
             ),
             terminal_candidate=True,
             continuation=tool_name in {"write_stdin", "wait"},
+            wait_for_completion=tool_name == "wait",
         ),
     )
 
@@ -421,6 +558,12 @@ class _TerminalSession:
     stale: bool = False
     source: str = "rollout"
     last_state_at: float = 0.0
+    process_active: bool = False
+    os_confirmed: bool = False
+    os_match_windows: int = 0
+    pending_os_process_id: str = ""
+    os_miss_windows: int = 0
+    last_os_seen_at: float | None = None
     chunks: deque[TerminalChunk] = field(default_factory=deque)
     retained_bytes: int = 0
 
@@ -466,7 +609,7 @@ class _TerminalSession:
                 source_id=f"trim:{self.terminal_id}",
                 observed_at=self.last_output_at or self.started_at or 0.0,
                 stream="system",
-                text=f"[CodexNet dropped {self.dropped_bytes} earlier bytes]\n",
+                text=f"[CodexDeck dropped {self.dropped_bytes} earlier bytes]\n",
                 sequence=-1,
             )
             chunks = (marker, *chunks)
@@ -487,6 +630,7 @@ class _TerminalSession:
             dropped_bytes=self.dropped_bytes,
             upstream_truncated=self.upstream_truncated,
             stale=self.stale,
+            process_active=self.process_active,
             source=self.source,
             chunks=chunks,
         )
@@ -500,6 +644,7 @@ class TerminalStore:
         self.call_ids: dict[str, dict[str, str]] = defaultdict(dict)
         self.process_ids: dict[str, dict[str, str]] = defaultdict(dict)
         self.continuation_call_ids: dict[str, set[str]] = defaultdict(set)
+        self.wait_call_ids: dict[str, set[str]] = defaultdict(set)
         self.seen_sources: dict[str, set[str]] = defaultdict(set)
         self.sequence = 0
 
@@ -520,6 +665,8 @@ class TerminalStore:
                 continue
             if update.continuation and update.call_id:
                 self.continuation_call_ids[session_key].add(update.call_id)
+            if update.wait_for_completion and update.call_id:
+                self.wait_call_ids[session_key].add(update.call_id)
             terminal_id = ""
             if update.process_id:
                 terminal_id = self.process_ids[session_key].get(update.process_id, "")
@@ -562,6 +709,10 @@ class TerminalStore:
                     update.call_id in self.continuation_call_ids[session_key]
                     and update.exit_code is None
                     and status in {"completed", "complete", "success"}
+                    and (
+                        update.continuation
+                        or update.call_id not in self.wait_call_ids[session_key]
+                    )
                 ):
                     status = "running"
                 if status and status != "unknown":
@@ -570,6 +721,12 @@ class TerminalStore:
                     terminal.exit_code = update.exit_code
                 if terminal.status in {"completed", "failed", "declined", "error", "errored"}:
                     terminal.completed_at = update.observed_at
+                    terminal.process_active = False
+                elif (
+                    terminal.status in RUNNING_TERMINAL_STATUSES
+                    and update.source == "file-tail"
+                ):
+                    terminal.process_active = True
             self.sequence += 1
             terminal.append(update, self.sequence)
             self.seen_sources[session_key].add(update.source_id)
@@ -585,7 +742,7 @@ class TerminalStore:
         ordered = sorted(
             values.values(),
             key=lambda item: (
-                item.status == "running",
+                item.status in RUNNING_TERMINAL_STATUSES,
                 item.last_output_at or item.completed_at or item.started_at or 0.0,
             ),
         )
@@ -605,6 +762,198 @@ class TerminalStore:
             )
         ]
 
+    def current_summaries(self, session_key: str) -> list[TerminalSessionSummary]:
+        """Publish background tasks known active from protocol or current OS evidence."""
+
+        return [
+            summary
+            for summary in self.summaries(session_key)
+            if summary.status in RUNNING_TERMINAL_STATUSES
+            and bool(summary.process_id)
+            and summary.process_active
+            and not summary.stale
+            and (
+                summary.source == "file-tail"
+                or self.sessions[session_key][summary.terminal_id].os_confirmed
+            )
+        ]
+
+    @staticmethod
+    def _command_matches_child(
+        command: str,
+        child_command: str,
+        *,
+        exact_only: bool = False,
+    ) -> bool:
+        if not command or not child_command:
+            return False
+
+        normalized_command = " ".join(command.split())
+        normalized_child = " ".join(child_command.split())
+        if normalized_command in normalized_child:
+            return True
+        if exact_only:
+            return False
+
+        def tokens(value: str) -> set[str]:
+            try:
+                values = shlex.split(value)
+            except ValueError:
+                values = value.split()
+            return {
+                Path(token).name.lower()
+                for token in values
+                if token and not token.startswith("-") and "=" not in token
+            }
+
+        command_tokens = tokens(command)
+        child_tokens = tokens(child_command)
+        if not command_tokens or not child_tokens:
+            return False
+        if command_tokens & child_tokens:
+            return True
+
+        return bool(
+            {re.sub(r"[\d.]+$", "", token) for token in command_tokens}
+            & {re.sub(r"[\d.]+$", "", token) for token in child_tokens}
+        )
+
+    @staticmethod
+    def _os_process_id(child: object) -> str:
+        identity = getattr(child, "identity", None)
+        pid = getattr(identity, "pid", None)
+        start_time = getattr(identity, "start_time", None)
+        if not isinstance(pid, int) or not isinstance(start_time, int):
+            return ""
+        return f"os:{pid}:{start_time}"
+
+    def reconcile_children(
+        self,
+        session_key: str,
+        children: tuple[object, ...],
+        observed_at: float,
+        *,
+        evidence_cutoff: float | None = None,
+    ) -> bool:
+        """Close previously confirmed rollout terminals after stable OS absence."""
+
+        all_live_children = [
+            child
+            for child in children
+            if str(getattr(child, "state", "")).upper() != "Z"
+        ]
+        candidates = [
+            terminal
+            for terminal in self.sessions.get(session_key, {}).values()
+            if terminal.source == "rollout"
+            and terminal.command
+            and not terminal.stale
+            and (
+                (
+                    bool(terminal.process_id)
+                    and terminal.status in RUNNING_TERMINAL_STATUSES
+                )
+                or (
+                    not terminal.process_id
+                    and terminal.completed_at is not None
+                )
+            )
+            and (
+                evidence_cutoff is None
+                or terminal.last_state_at <= evidence_cutoff
+            )
+        ]
+        if not candidates:
+            return False
+        for terminal in candidates:
+            if terminal.os_confirmed:
+                terminal.process_active = False
+        matched_terminal_ids: set[str] = set()
+        claimed_job_roots: set[int] = set()
+        changed = False
+        for terminal in reversed(candidates):
+            exact_only = (
+                not terminal.process_id
+                or terminal.process_id.startswith("os:")
+            )
+            matching_children = [
+                child
+                for child in all_live_children
+                if self._command_matches_child(
+                    terminal.command,
+                    str(getattr(child, "command", "") or ""),
+                    exact_only=exact_only,
+                )
+            ]
+            matching_pids = {
+                getattr(getattr(child, "identity", None), "pid", None)
+                for child in matching_children
+            }
+            job_roots = [
+                child
+                for child in matching_children
+                if getattr(child, "parent_pid", 0) not in matching_pids
+            ]
+            for child in job_roots:
+                child_pid = getattr(getattr(child, "identity", None), "pid", None)
+                if not isinstance(child_pid, int) or child_pid in claimed_job_roots:
+                    continue
+                if self._command_matches_child(
+                    terminal.command,
+                    str(getattr(child, "command", "") or ""),
+                    exact_only=exact_only,
+                ):
+                    os_process_id = self._os_process_id(child)
+                    existing = self.process_ids[session_key].get(os_process_id, "")
+                    if existing and existing != terminal.terminal_id:
+                        continue
+                    matched_terminal_ids.add(terminal.terminal_id)
+                    claimed_job_roots.add(child_pid)
+                    protocol_confirmed = bool(
+                        terminal.process_id
+                        and not terminal.process_id.startswith("os:")
+                    )
+                    if protocol_confirmed:
+                        terminal.os_match_windows = TERMINAL_OS_MISS_WINDOWS
+                    elif terminal.pending_os_process_id == os_process_id:
+                        terminal.os_match_windows += 1
+                    else:
+                        terminal.pending_os_process_id = os_process_id
+                        terminal.os_match_windows = 1
+                    if terminal.os_match_windows >= TERMINAL_OS_MISS_WINDOWS:
+                        if not terminal.process_id and os_process_id:
+                            terminal.process_id = os_process_id
+                            self.process_ids[session_key][os_process_id] = terminal.terminal_id
+                            changed = True
+                        if terminal.status not in RUNNING_TERMINAL_STATUSES:
+                            terminal.status = "running"
+                            terminal.completed_at = None
+                            terminal.exit_code = None
+                            changed = True
+                        terminal.os_confirmed = True
+                        terminal.process_active = True
+                    terminal.os_miss_windows = 0
+                    terminal.last_os_seen_at = observed_at
+                    break
+        unmatched = [
+            terminal
+            for terminal in candidates
+            if terminal.terminal_id not in matched_terminal_ids
+        ]
+        for terminal in unmatched:
+            if not terminal.os_confirmed:
+                terminal.pending_os_process_id = ""
+                terminal.os_match_windows = 0
+                continue
+            terminal.os_miss_windows += 1
+            if terminal.os_miss_windows < TERMINAL_OS_MISS_WINDOWS:
+                continue
+            terminal.status = "completed"
+            terminal.completed_at = observed_at
+            terminal.last_state_at = max(terminal.last_state_at, observed_at)
+            changed = True
+        return changed
+
     def _trim_global(self) -> None:
         terminals = [
             terminal
@@ -617,7 +966,7 @@ class TerminalStore:
         ordered = sorted(
             terminals,
             key=lambda item: (
-                item.status == "running",
+                item.status in RUNNING_TERMINAL_STATUSES,
                 item.last_output_at or item.completed_at or item.started_at or 0.0,
             ),
         )
@@ -639,8 +988,16 @@ class TerminalStore:
 
     def mark_stale(self, session_key: str) -> None:
         for terminal in self.sessions.get(session_key, {}).values():
-            if terminal.status == "running":
+            if terminal.status in RUNNING_TERMINAL_STATUSES:
                 terminal.stale = True
+                terminal.process_active = False
+
+    def mark_process_unavailable(self, session_key: str) -> None:
+        """Hide live terminals when the current process tree cannot be verified."""
+
+        for terminal in self.sessions.get(session_key, {}).values():
+            if terminal.status in RUNNING_TERMINAL_STATUSES:
+                terminal.process_active = False
 
     def prune(self, retained_session_keys: set[str]) -> None:
         for session_key in set(self.sessions) - retained_session_keys:
@@ -648,6 +1005,7 @@ class TerminalStore:
             self.call_ids.pop(session_key, None)
             self.process_ids.pop(session_key, None)
             self.continuation_call_ids.pop(session_key, None)
+            self.wait_call_ids.pop(session_key, None)
             self.seen_sources.pop(session_key, None)
 
 
@@ -657,6 +1015,9 @@ class _FileCursor:
     inode: int
     offset: int = 0
     partial: bytes = b""
+    process_id: str = ""
+    command: str = ""
+    cwd: str = ""
 
 
 class RegularFileTailCollector:
@@ -725,11 +1086,32 @@ class RegularFileTailCollector:
                 if cursor is None or (cursor.device, cursor.inode) != (device, inode):
                     offset = max(0, size - MAX_TERMINAL_BYTES)
                     upstream_truncated = offset > 0
-                    cursor = _FileCursor(device, inode, offset)
+                    cursor = _FileCursor(
+                        device,
+                        inode,
+                        offset,
+                        process_id=f"os:{pid}:{start_time}",
+                        command=str(getattr(child, "command", "") or "child process"),
+                        cwd=workspace,
+                    )
                     self.cursors[cursor_key] = cursor
                 elif size < cursor.offset:
                     cursor.offset = 0
                     cursor.partial = b""
+                updates.append(
+                    TerminalUpdate(
+                        source_id=f"file-active:{device}:{inode}:{observed_at}",
+                        observed_at=observed_at,
+                        process_id=cursor.process_id,
+                        command=cursor.command,
+                        cwd=cursor.cwd,
+                        status="running",
+                        capability=TerminalCapability.FILE_TAIL,
+                        terminal_candidate=True,
+                        upstream_truncated=upstream_truncated,
+                        source="file-tail",
+                    )
+                )
                 if size <= cursor.offset:
                     continue
                 try:
@@ -755,9 +1137,9 @@ class RegularFileTailCollector:
                     TerminalUpdate(
                         source_id=f"file:{device}:{inode}:{start}",
                         observed_at=observed_at,
-                        process_id=f"os:{pid}:{start_time}",
-                        command=str(getattr(child, "command", "") or "child process"),
-                        cwd=workspace,
+                        process_id=cursor.process_id,
+                        command=cursor.command,
+                        cwd=cursor.cwd,
                         status="running",
                         stream=stream,
                         output=sanitize_terminal_text(decoded),
@@ -767,6 +1149,26 @@ class RegularFileTailCollector:
                         source="file-tail",
                     )
                 )
+        closed_keys = {
+            key
+            for key in self.cursors
+            if key[0] == session_key and key not in active_keys
+        }
+        for key in closed_keys:
+            cursor = self.cursors[key]
+            updates.append(
+                TerminalUpdate(
+                    source_id=f"file-closed:{cursor.device}:{cursor.inode}:{observed_at}",
+                    observed_at=observed_at,
+                    process_id=cursor.process_id,
+                    command=cursor.command,
+                    cwd=cursor.cwd,
+                    status="completed",
+                    capability=TerminalCapability.FILE_TAIL,
+                    terminal_candidate=True,
+                    source="file-tail",
+                )
+            )
         self.cursors = {
             key: cursor
             for key, cursor in self.cursors.items()

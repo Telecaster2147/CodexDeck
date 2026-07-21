@@ -61,7 +61,12 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _open(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=SQLITE_TIMEOUT)
+    connection = sqlite3.connect(
+        f"file:{path}?mode=ro",
+        uri=True,
+        timeout=SQLITE_TIMEOUT,
+        check_same_thread=False,
+    )
     connection.execute("PRAGMA query_only=ON")
     connection.execute(f"PRAGMA busy_timeout={int(SQLITE_TIMEOUT * 1000)}")
     return connection

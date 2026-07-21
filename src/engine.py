@@ -376,36 +376,99 @@ class MonitorEngine:
                         for event in normalize_log(record)
                     )
 
+            session_processes: dict[str, list[ProcessInfo]] = defaultdict(list)
+            for process in enriched:
+                if process.role == "session" and process.session_id:
+                    session_processes[process.session_id].append(process)
+
             sessions = []
             instance_rollout_activity: list[dict[str, object]] = []
             rollout_started = time.monotonic()
-            for process in enriched:
-                if process.role != "session" or not process.session_id:
-                    continue
-                incoming = events_by_session.get(process.session_id, [])
-                session_key = f"{instance_id}:{process.session_id}"
-                rollout_activity = RolloutActivity(
-                    process.rollout_path,
-                    time.time(),
-                )
-                if process.rollout_path:
-                    rollout_result = self.rollouts.read_with_activity(
-                        Path(process.rollout_path)
-                    )
-                    rollout_activity = rollout_result.activity
-                    incoming.extend(rollout_result.events)
-                    self.terminals.apply(session_key, rollout_result.terminal_updates)
-                self.terminals.apply(
-                    session_key,
-                    self.terminal_files.read(
-                        session_key,
-                        process.cwd,
-                        process.activity.children,
-                        time.time(),
+            for session_id, candidates in session_processes.items():
+                process = max(
+                    candidates,
+                    key=lambda item: (
+                        {True: 2, None: 1, False: 0}[item.foreground_active],
+                        item.activity.active,
+                        item.activity.sampled_at or 0.0,
+                        bool(item.rollout_path),
+                        item.identity.start_time,
+                        item.pid,
                     ),
                 )
-                instance_rollout_activity.append(
-                    self._rollout_activity_value(rollout_activity)
+                if len(candidates) > 1:
+                    pids = ", ".join(
+                        str(item.pid) for item in sorted(candidates, key=lambda p: p.pid)
+                    )
+                    instance_diagnostics.append(
+                        f"检测到同一会话由 {len(candidates)} 个 Codex 进程打开；"
+                        f"列表已合并，当前显示 PID {process.pid}（进程 {pids}）"
+                    )
+
+                incoming = list(events_by_session.get(session_id, []))
+                session_key = f"{instance_id}:{session_id}"
+                rollout_activities: list[RolloutActivity] = []
+                seen_rollouts: set[str] = set()
+                observed_at = time.time()
+                process_children: dict[str, object] = {}
+                process_tree_available = False
+                process_tree_sampled_at: list[float] = []
+                for candidate in candidates:
+                    if candidate.activity.available:
+                        process_tree_available = True
+                        if candidate.activity.sampled_at is not None:
+                            process_tree_sampled_at.append(candidate.activity.sampled_at)
+                        process_children.update(
+                            {
+                                child.identity.key: child
+                                for child in candidate.activity.children
+                            }
+                        )
+                    if candidate.rollout_path and candidate.rollout_path not in seen_rollouts:
+                        seen_rollouts.add(candidate.rollout_path)
+                        rollout_result = self.rollouts.read_with_activity(
+                            Path(candidate.rollout_path)
+                        )
+                        rollout_activities.append(rollout_result.activity)
+                        incoming.extend(rollout_result.events)
+                        self.terminals.apply(
+                            session_key,
+                            rollout_result.terminal_updates,
+                        )
+                    if candidate.activity.available:
+                        self.terminals.apply(
+                            session_key,
+                            self.terminal_files.read(
+                                session_key,
+                                candidate.cwd,
+                                candidate.activity.children,
+                                observed_at,
+                            ),
+                        )
+                if process_tree_available:
+                    self.terminals.reconcile_children(
+                        session_key,
+                        tuple(process_children.values()),
+                        observed_at,
+                        evidence_cutoff=(
+                            min(process_tree_sampled_at)
+                            if process_tree_sampled_at
+                            else None
+                        ),
+                    )
+                else:
+                    self.terminals.mark_process_unavailable(session_key)
+                rollout_activity = max(
+                    rollout_activities,
+                    key=lambda item: (
+                        item.last_growth_at or 0.0,
+                        item.changed,
+                        item.observed_at,
+                    ),
+                    default=RolloutActivity(process.rollout_path, observed_at),
+                )
+                instance_rollout_activity.extend(
+                    self._rollout_activity_value(item) for item in rollout_activities
                 )
                 incoming = self._with_compact_config(
                     incoming,
@@ -426,8 +489,16 @@ class MonitorEngine:
                         )
                     )
                 active_session_keys.add(session_key)
-                before = self.previous_sockets.get(process.stable_key, [])
-                after = socket_by_pid.get(process.pid, [])
+                before = [
+                    socket
+                    for candidate in candidates
+                    for socket in self.previous_sockets.get(candidate.stable_key, [])
+                ]
+                after = [
+                    socket
+                    for candidate in candidates
+                    for socket in socket_by_pid.get(candidate.pid, [])
+                ]
                 network = assess_process_network(before, after, self.idle_threshold)
                 if sockets_stale:
                     network.stale = True
@@ -461,7 +532,7 @@ class MonitorEngine:
                     incoming,
                     rollout_activity,
                     network,
-                    log_activity_by_session.get(process.session_id),
+                    log_activity_by_session.get(session_id),
                     full_sample=True,
                     process_stale=self.discovery_stale_since is not None,
                     network_stale=sockets_stale,
@@ -545,9 +616,12 @@ class MonitorEngine:
                         network,
                         observation=observation,
                     )
-                session.terminal_sessions = self.terminals.summaries(session_key)
+                session.terminal_sessions = self.terminals.current_summaries(session_key)
                 sessions.append(session)
-                self.previous_sockets[process.stable_key] = after
+                for candidate in candidates:
+                    self.previous_sockets[candidate.stable_key] = socket_by_pid.get(
+                        candidate.pid, []
+                    )
             self.collectors.record(f"rollout:{instance_id}", rollout_started)
             collector_health = [
                 item
@@ -733,7 +807,8 @@ class MonitorEngine:
                 if process.rollout_path:
                     rollout_paths.add(process.rollout_path)
                     rollout_result = self.rollouts.read_with_activity(
-                        Path(process.rollout_path)
+                        Path(process.rollout_path),
+                        allow_terminal_metadata_backfill=False,
                     )
                     rollout_activity = rollout_result.activity
                     rollout_events = rollout_result.events
@@ -830,7 +905,7 @@ class MonitorEngine:
                             default=None,
                         ),
                     )
-                session.terminal_sessions = self.terminals.summaries(key)
+                session.terminal_sessions = self.terminals.current_summaries(key)
                 refreshed_sessions.append(session)
                 refreshed_processes[process.stable_key] = session.process
 
@@ -961,7 +1036,7 @@ class MonitorEngine:
                         session.network,
                         observation=observation,
                     )
-                    session.terminal_sessions = self.terminals.summaries(key)
+                    session.terminal_sessions = self.terminals.current_summaries(key)
                     self.live_sessions[key] = session
                 refreshed.append(session)
                 refreshed_processes[session.process.stable_key] = session.process
@@ -1179,22 +1254,32 @@ class MonitorEngine:
         process: ProcessInfo,
         sessions_dir: Path,
     ) -> tuple[Path | None, str]:
-        cached = self.rollout_path_cache.get(process.stable_key)
-        if cached and cached[0] is not None and cached[0].exists():
-            return cached
-        candidates: list[tuple[bool, int, Path, str]] = []
+        # A long-lived Codex TUI keeps the same PID when `/new` replaces the
+        # conversation. Re-check its open rollout descriptors on every full
+        # sample; a path-only cache would pin the process to the old session.
+        candidates: list[tuple[bool, int, int, Path, str]] = []
         for path in open_rollout_paths(process.pid, sessions_dir, self.proc):
             session_id, is_subagent = rollout_identity(path)
             try:
-                size = path.stat().st_size
+                stat = path.stat()
             except OSError:
+                modified_at = 0
                 size = 0
-            candidates.append((not is_subagent, size, path, session_id))
+            else:
+                modified_at = stat.st_mtime_ns
+                size = stat.st_size
+            candidates.append((not is_subagent, modified_at, size, path, session_id))
         if not candidates:
+            cached = self.rollout_path_cache.get(process.stable_key)
+            if cached and cached[0] is not None and cached[0].exists():
+                return cached
             result = (None, "")
             self.rollout_path_cache[process.stable_key] = result
             return result
-        _, _, path, session_id = max(candidates, key=lambda item: (item[0], item[1]))
+        _, _, _, path, session_id = max(
+            candidates,
+            key=lambda item: (item[0], item[1], item[2], str(item[3])),
+        )
         result = (path, session_id)
         self.rollout_path_cache[process.stable_key] = result
         return result
@@ -1248,20 +1333,45 @@ class MonitorEngine:
         for key, session in self.live_sessions.items():
             if key in active_keys:
                 continue
+            replacement = next(
+                (
+                    candidate
+                    for candidate in current.values()
+                    if candidate.process.stable_key == session.process.stable_key
+                    and candidate.session_id != session.session_id
+                ),
+                None,
+            )
+            if replacement is not None:
+                summary = "会话已由 /new 关闭"
+                detail = (
+                    f"PID {session.process.pid} 已切换到新会话 "
+                    f"{replacement.session_id[:8]}"
+                )
+                network_reason = "当前 Codex 窗口已切换到新会话"
+                source_id = (
+                    f"session-replaced:{session.process.stable_key}:"
+                    f"{session.session_id}:{replacement.session_id}"
+                )
+            else:
+                summary = "进程已退出"
+                detail = f"PID {session.process.pid} 已结束"
+                network_reason = "Codex 进程已退出"
+                source_id = f"process-exited:{session.process.stable_key}"
             exited = NormalizedEvent(
                 timestamp=now,
-                kind="PROCESS_EXITED",
-                summary="进程已退出",
-                detail=f"PID {session.process.pid} 已结束",
+                kind="SESSION_CLOSED" if replacement is not None else "PROCESS_EXITED",
+                summary=summary,
+                detail=detail,
                 source="process",
                 confidence=Confidence.HIGH,
-                source_id=f"process-exited:{session.process.stable_key}",
+                source_id=source_id,
                 observed_at=now,
             )
             self.machine.ingest(key, [exited])
             network = NetworkEvidence(
                 state=NetworkState.CLOSED,
-                reason="Codex 进程已退出",
+                reason=network_reason,
             )
             retained = self.machine.derive(
                 key,
@@ -1271,7 +1381,7 @@ class MonitorEngine:
                 observation=session.observation,
             )
             self.terminals.mark_stale(key)
-            retained.terminal_sessions = self.terminals.summaries(key)
+            retained.terminal_sessions = self.terminals.current_summaries(key)
             self.retired_sessions[key] = (retained, now)
 
         expiry = now - self.machine.lookback_seconds

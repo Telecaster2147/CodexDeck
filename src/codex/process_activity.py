@@ -77,6 +77,7 @@ class ProcessActivityCollector:
             children.append(
                 ChildProcessActivity(
                     identity=sample.identity,
+                    parent_pid=sample.ppid,
                     command=sample.command,
                     state=sample.state,
                     elapsed_seconds=sample.elapsed_seconds,
@@ -154,11 +155,21 @@ class ProcessActivityCollector:
         return result
 
     def _children(self, pid: int) -> list[int]:
-        path = self.root / str(pid) / "task" / str(pid) / "children"
+        task_root = self.root / str(pid) / "task"
         try:
-            return [int(value) for value in path.read_text().split()]
-        except (OSError, ValueError):
+            task_directories = tuple(task_root.iterdir())
+        except OSError:
             return []
+        children: set[int] = set()
+        for task_directory in task_directories:
+            try:
+                children.update(
+                    int(value)
+                    for value in (task_directory / "children").read_text().split()
+                )
+            except (OSError, ValueError):
+                continue
+        return sorted(children)
 
     def _sample(self, pid: int, sampled_at: float) -> ProcSample | None:
         directory = self.root / str(pid)
@@ -173,6 +184,7 @@ class ProcessActivityCollector:
             start_time = int(fields[19])
         except (OSError, IndexError, ValueError):
             return None
+        command = self._command_line(directory, command)
         io_values = self._key_values(directory / "io")
         status_values = self._key_values(directory / "status")
         io_bytes = sum(
@@ -200,6 +212,16 @@ class ProcessActivityCollector:
             thread_count=status_values.get("Threads", 0),
             elapsed_seconds=max(0.0, uptime - start_time / self.clock_ticks),
         )
+
+    @staticmethod
+    def _command_line(directory: Path, fallback: str) -> str:
+        try:
+            with (directory / "cmdline").open("rb") as handle:
+                raw = handle.read(8 * 1024)
+        except OSError:
+            return fallback
+        values = [value.decode(errors="replace") for value in raw.split(b"\0") if value]
+        return " ".join(values) or fallback
 
     @staticmethod
     def _key_values(path: Path) -> dict[str, int]:

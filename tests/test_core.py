@@ -174,6 +174,104 @@ class EventNormalizationTests(unittest.TestCase):
         self.assertTrue(events[0].metadata["summary_available"])
         self.assertTrue(events[0].metadata["encrypted"])
 
+    def test_known_protocol_records_are_not_unparsed(self) -> None:
+        for role in ("user", "system", "developer", None):
+            with self.subTest(role=role):
+                payload = {
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "protocol context"}],
+                }
+                if role is not None:
+                    payload["role"] = role
+                events = normalize_rollout_record(
+                    {
+                        "timestamp": "2026-07-16T00:00:00Z",
+                        "type": "response_item",
+                        "payload": payload,
+                    },
+                    f"message:{role}",
+                )
+
+                self.assertEqual(events, [])
+
+        fixtures = {
+            "web_search_call": ("web_search", "网页搜索"),
+            "image_generation_call": ("image_generation", "生成图片"),
+        }
+        for item_type, (tool_name, display_name) in fixtures.items():
+            with self.subTest(item_type=item_type):
+                events = normalize_rollout_record(
+                    {
+                        "timestamp": 10.0,
+                        "type": "response_item",
+                        "payload": {
+                            "type": item_type,
+                            "status": "completed",
+                            "action": {"query": "protocol fixture"},
+                        },
+                    },
+                    item_type,
+                )
+                self.assertEqual([event.kind for event in events], ["TOOL_COMPLETED"])
+                self.assertEqual(events[0].metadata["tool_name"], tool_name)
+                self.assertEqual(events[0].metadata["display_name"], display_name)
+                self.assertTrue(events[0].complete)
+
+        for item_type in ("web_search_end", "image_generation_end"):
+            with self.subTest(item_type=item_type):
+                self.assertEqual(
+                    normalize_rollout_record(
+                        {
+                            "timestamp": 10.0,
+                            "type": "event_msg",
+                            "payload": {"type": item_type, "call_id": "call-1"},
+                        },
+                        item_type,
+                    ),
+                    [],
+                )
+
+    def test_unparsed_record_retains_full_redacted_diagnostic_payload(self) -> None:
+        events = normalize_rollout_record(
+            {
+                "timestamp": 10.0,
+                "type": "event_msg",
+                "payload": {
+                    "type": "future_protocol_event",
+                    "token": "secret-value",
+                    "access_token": "access-value",
+                    "client_secret": "client-value",
+                    "nested": {"refresh-token": "refresh-value"},
+                    "detail": "x" * 400,
+                },
+            },
+            "future",
+        )
+
+        self.assertEqual([event.kind for event in events], ["UNPARSED_PAYLOAD"])
+        payload = events[0].metadata["diagnostic_payload"]
+        self.assertIn('"detail": "' + "x" * 300, payload)
+        self.assertIn('"token": "[REDACTED]"', payload)
+        self.assertNotIn("secret-value", payload)
+        self.assertNotIn("access-value", payload)
+        self.assertNotIn("client-value", payload)
+        self.assertNotIn("refresh-value", payload)
+        self.assertTrue(events[0].unparsed.truncated)
+
+    def test_unparsed_diagnostic_payload_has_a_hard_retention_limit(self) -> None:
+        events = normalize_rollout_record(
+            {
+                "timestamp": 10.0,
+                "type": "event_msg",
+                "payload": {"type": "future_protocol_event", "detail": "x" * 10_000},
+            },
+            "future",
+        )
+
+        event = events[0]
+        self.assertEqual(len(event.metadata["diagnostic_payload"]), 4 * 1024)
+        self.assertGreater(event.metadata["diagnostic_payload_dropped_chars"], 0)
+
     def test_nested_exec_and_patch_input_exposes_command_cwd_and_files(self) -> None:
         tool_input = (
             'const result = await tools.exec_command({"cmd":"rg -n refresh src",'

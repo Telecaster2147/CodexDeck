@@ -11,12 +11,13 @@ from typing import Any
 
 from config import EVENT_LABELS
 from models import Confidence, FailureInfo, NormalizedEvent, UnparsedPayload
-from utils import message_text, one_line, redact_sensitive
+from utils import message_text, one_line, redact_sensitive, redact_structured
 from .state_store import LogRecord
 
 
 NON_TURN_FAILURES = {"active_turn_not_steerable", "thread_rollback_failed"}
 COMPACT_COMMAND = re.compile(r"^/compact(?:\s+.*)?$", re.IGNORECASE)
+MAX_DIAGNOSTIC_PAYLOAD_CHARS = 4 * 1024
 
 TOOL_OUTPUT_TYPES = {
     "custom_tool_call_output",
@@ -154,7 +155,14 @@ def _unparsed_event(
     turn_id: str,
 ) -> NormalizedEvent:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    cleaned = redact_sensitive(serialized)
+    cleaned = json.dumps(
+        redact_structured(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    retained = cleaned[:MAX_DIAGNOSTIC_PAYLOAD_CHARS]
+    dropped_chars = len(cleaned) - len(retained)
     limit = 240
     unparsed = UnparsedPayload(
         f"{record_type}:{item_type or 'unknown'}",
@@ -172,8 +180,14 @@ def _unparsed_event(
         turn_id=turn_id,
         confidence=Confidence.LOW,
         complete=False,
+        metadata={
+            "diagnostic_payload": retained,
+            "diagnostic_payload_dropped_chars": dropped_chars,
+        },
         unparsed=unparsed,
     )
+
+
 def _structured_text(value: object) -> str:
     """Extract human-readable text from current reasoning/message protocol shapes."""
 
@@ -485,6 +499,7 @@ def _compaction_events(
     source_id: str,
     turn_id: str,
     inferred_manual_compact: bool,
+    inferred_auto_compact: bool,
     context_tokens: int | None,
     context_window: int | None,
     compact_started_at: float | None,
@@ -492,8 +507,15 @@ def _compaction_events(
     compact_started_turn_id: str,
 ) -> list[NormalizedEvent]:
     metadata: dict[str, Any] = {"window_number": payload.get("window_number")}
-    if inferred_manual_compact:
-        metadata["trigger"] = "manual"
+    trigger = (
+        "manual"
+        if inferred_manual_compact
+        else "auto"
+        if inferred_auto_compact
+        else ""
+    )
+    if trigger:
+        metadata["trigger"] = trigger
     if context_tokens is not None:
         metadata["context_tokens"] = context_tokens
     if context_window is not None:
@@ -502,20 +524,35 @@ def _compaction_events(
         metadata["context_ratio"] = context_tokens / context_window
 
     events: list[NormalizedEvent] = []
-    if inferred_manual_compact and compact_started_at is not None:
+    if (inferred_manual_compact or inferred_auto_compact) and compact_started_at is not None:
+        start_trigger = "manual" if inferred_manual_compact else "auto"
         events.append(
             _event(
                 compact_started_at,
                 "COMPACTING",
-                "检测到手动 compact 任务",
+                "检测到手动 compact 任务"
+                if inferred_manual_compact
+                else "根据压缩前 token 快照重建自动 compact 开始",
                 source="rollout",
-                source_id=compact_started_source_id or f"{source_id}:manual-compact",
+                source_id=(
+                    f"{compact_started_source_id}:auto-compact"
+                    if compact_started_source_id and inferred_auto_compact
+                    else compact_started_source_id
+                    or f"{source_id}:{start_trigger}-compact"
+                ),
                 turn_id=compact_started_turn_id or turn_id,
+                confidence=Confidence.MEDIUM if inferred_auto_compact else Confidence.HIGH,
+                derived=True,
                 metadata={
                     **metadata,
-                    "trigger": "manual",
+                    "trigger": start_trigger,
                     "inferred_from_compacted_record": True,
                     "reconstructed": True,
+                    "reconstruction_basis": (
+                        "pre_compact_token_snapshot"
+                        if inferred_auto_compact
+                        else "standalone_compact_turn"
+                    ),
                 },
             )
         )
@@ -523,7 +560,11 @@ def _compaction_events(
         _event(
             timestamp,
             "COMPACT_COMPLETED",
-            "手动 compact 已完成" if inferred_manual_compact else "",
+            "手动 compact 已完成"
+            if inferred_manual_compact
+            else "自动 compact 已完成"
+            if inferred_auto_compact
+            else "",
             source="rollout",
             source_id=source_id,
             turn_id=turn_id,
@@ -592,6 +633,7 @@ def normalize_rollout_record(
     source_id: str,
     *,
     inferred_manual_compact: bool = False,
+    inferred_auto_compact: bool = False,
     context_tokens: int | None = None,
     context_window: int | None = None,
     compact_started_at: float | None = None,
@@ -807,6 +849,7 @@ def normalize_rollout_record(
                 source_id=source_id,
                 turn_id=turn_id,
                 inferred_manual_compact=inferred_manual_compact,
+                inferred_auto_compact=inferred_auto_compact,
                 context_tokens=context_tokens,
                 context_window=context_window,
                 compact_started_at=compact_started_at,
@@ -848,8 +891,8 @@ def normalize_rollout_record(
                 return [
                     _event(
                         timestamp,
-                        "COMPACTING" if item_type == "item_started" else "COMPACT_PROGRESS",
-                        "上下文压缩已开始" if item_type == "item_started" else "压缩步骤已返回",
+                        "COMPACTING" if item_type == "item_started" else "COMPACT_COMPLETED",
+                        "上下文压缩已开始" if item_type == "item_started" else "上下文压缩已完成",
                         source="rollout",
                         source_id=source_id,
                         turn_id=turn_id,
@@ -1023,7 +1066,13 @@ def normalize_rollout_record(
                     metadata={"plan": plan if isinstance(plan, list) else []},
                 )
             ]
-        if item_type in {"thread_goal_updated", "thread_rolled_back", "user_message"}:
+        if item_type in {
+            "image_generation_end",
+            "thread_goal_updated",
+            "thread_rolled_back",
+            "user_message",
+            "web_search_end",
+        }:
             return []
         return [
             _unparsed_event(
@@ -1081,6 +1130,32 @@ def normalize_rollout_record(
                     },
                 )
             ]
+        if item_type in {"compaction", "context_compaction"}:
+            return []
+        if item_type in {"web_search_call", "image_generation_call"}:
+            tool_name = "web_search" if item_type == "web_search_call" else "image_generation"
+            status = str(payload.get("status") or "completed").lower()
+            running = status in {"in_progress", "pending", "running"}
+            metadata = _tool_metadata(
+                {
+                    **payload,
+                    "name": tool_name,
+                    "input": payload.get("action"),
+                },
+                item_type,
+            )
+            return [
+                _event(
+                    timestamp,
+                    "TOOL_RUNNING" if running else "TOOL_COMPLETED",
+                    metadata["display_name"],
+                    source="rollout",
+                    source_id=source_id,
+                    turn_id=turn_id,
+                    metadata=metadata,
+                    complete=not running,
+                )
+            ]
         if item_type == "message" and payload.get("role") == "assistant":
             return [
                 _event(
@@ -1125,7 +1200,7 @@ def normalize_rollout_record(
                     metadata=metadata,
                 )
             ]
-        if item_type == "message" and payload.get("role") == "user":
+        if item_type == "message":
             return []
         return [
             _unparsed_event(
@@ -1139,6 +1214,7 @@ def normalize_rollout_record(
             source_id=source_id,
             turn_id=turn_id,
             inferred_manual_compact=inferred_manual_compact,
+            inferred_auto_compact=inferred_auto_compact,
             context_tokens=context_tokens,
             context_window=context_window,
             compact_started_at=compact_started_at,

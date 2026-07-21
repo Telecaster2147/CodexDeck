@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex.rollout import RolloutReader
+from codex.rollout import RolloutReader, TerminalMetadataBackfillCursor
 from codex.terminal import (
     RegularFileTailCollector,
     TerminalStore,
@@ -165,6 +165,820 @@ class TerminalTranscriptTests(unittest.TestCase):
             "ready\nrequest complete\n",
         )
 
+    def test_completed_command_output_does_not_parse_embedded_process_fixture(self) -> None:
+        records = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "call-source",
+                    "name": "exec",
+                    "input": (
+                        'const result = await tools.exec_command('
+                        '{"cmd":"sed -n 1,80p tests/test_terminal.py"});'
+                    ),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-source",
+                    "output": (
+                        "Script completed\nWall time 0.1 seconds\nOutput:\n"
+                        'fixture = "Process running with session ID 321\\n'
+                        'Wall time: 1 second\\nOutput:\\nready"\n'
+                    ),
+                },
+            },
+        ]
+        updates = tuple(
+            update
+            for index, record in enumerate(records)
+            for update in extract_terminal_updates(record, f"source-{index}", float(index))
+        )
+        store = TerminalStore()
+
+        store.apply("session", updates)
+
+        terminal = store.summaries("session")[0]
+        self.assertEqual(terminal.process_id, "")
+        self.assertEqual(terminal.status, "completed")
+        self.assertEqual(store.current_summaries("session"), [])
+
+    def test_unified_exec_json_result_exposes_background_session_id(self) -> None:
+        updates = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-background",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "Script completed\nWall time 1.2 seconds\nOutput:\n",
+                        },
+                        {
+                            "type": "input_text",
+                            "text": json.dumps(
+                                {
+                                    "wall_time_seconds": 1.0,
+                                    "session_id": 79038,
+                                    "output": "ready\n",
+                                }
+                            ),
+                        },
+                    ],
+                },
+            },
+            "source",
+            1.0,
+        )
+
+        self.assertEqual(updates[0].process_id, "79038")
+        self.assertEqual(updates[0].status, "running")
+        self.assertEqual(updates[0].output, "ready\n")
+
+    def test_plain_json_command_output_is_not_a_background_result(self) -> None:
+        updates = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-json",
+                    "output": (
+                        "Script completed\nWall time 0.1 seconds\nOutput:\n"
+                        '{"session_id": 42, "output": "application data"}'
+                    ),
+                },
+            },
+            "source",
+            1.0,
+        )
+
+        self.assertEqual(updates[0].process_id, "")
+        self.assertEqual(updates[0].status, "completed")
+
+    def test_cold_start_backfills_terminal_metadata_without_old_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-16T23:59:58Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "unrelated-start",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "old watch"}),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-16T23:59:59Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "unrelated-start",
+                        "output": (
+                            "Script running with cell ID 999\n"
+                            "Wall time 1 seconds\nOutput:\nunrelated output\n"
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "call_id": "call-start",
+                        "name": "exec",
+                        "input": (
+                            'await tools.exec_command({cmd:"npm run dev", '
+                            'workdir:"/workspace-a"});'
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-start",
+                        "output": (
+                            "Script running with cell ID 321\n"
+                            "Wall time 1 seconds\nOutput:\nold output\n"
+                        ),
+                    },
+                },
+            ]
+            records.extend(
+                {
+                    "timestamp": "2026-07-17T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "padding": "x" * 120},
+                }
+                for _ in range(12)
+            )
+            records.extend(
+                [
+                    {
+                        "timestamp": "2026-07-17T00:00:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "call_id": "call-poll",
+                            "name": "exec",
+                            "input": "await tools.write_stdin({session_id:321, chars:\"\"});",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-07-17T00:00:04Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call-poll",
+                            "output": "recent output\n",
+                        },
+                    },
+                ]
+            )
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+            with (
+                patch("codex.rollout.MAX_SESSION_TAIL", 700),
+                patch("codex.rollout.MAX_TERMINAL_METADATA_BACKFILL", 16 * 1024),
+            ):
+                reader = RolloutReader()
+                result = reader.read_with_activity(path)
+
+        store = TerminalStore()
+        store.apply("session", result.terminal_updates)
+        terminals = store.summaries("session")
+        self.assertEqual(len(terminals), 1)
+        terminal = terminals[0]
+        self.assertTrue(reader.has_truncated_context({str(path)}))
+        self.assertEqual(terminal.process_id, "321")
+        self.assertEqual(terminal.command, "npm run dev")
+        self.assertEqual(terminal.cwd, "/workspace-a")
+        self.assertEqual("".join(chunk.text for chunk in terminal.chunks), "recent output\n")
+
+    def test_metadata_backfill_is_chunked_and_disabled_on_fast_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "call-start",
+                        "name": "exec_command",
+                        "arguments": json.dumps(
+                            {"cmd": "python worker.py", "workdir": "/workspace-a"}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-start",
+                        "output": (
+                            "Script running with cell ID 321\n"
+                            "Wall time 1 seconds\nOutput:\nold output\n"
+                        ),
+                    },
+                },
+            ]
+            records.extend(
+                {
+                    "timestamp": "2026-07-17T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "padding": "x" * 100},
+                }
+                for _ in range(30)
+            )
+            records.extend(
+                [
+                    {
+                        "timestamp": "2026-07-17T00:00:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "call-poll",
+                            "name": "write_stdin",
+                            "arguments": json.dumps({"session_id": 321, "chars": ""}),
+                        },
+                    },
+                    {
+                        "timestamp": "2026-07-17T00:00:04Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-poll",
+                            "output": "recent output\n",
+                        },
+                    },
+                ]
+            )
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+            with (
+                patch("codex.rollout.MAX_SESSION_TAIL", 700),
+                patch("codex.rollout.MAX_TERMINAL_METADATA_BACKFILL", 8 * 1024),
+                patch("codex.rollout.MAX_TERMINAL_METADATA_BACKFILL_CHUNK", 256),
+                patch("codex.rollout.TERMINAL_METADATA_LINE_OVERLAP", 512),
+            ):
+                reader = RolloutReader()
+                store = TerminalStore()
+                first = reader.read_with_activity(path)
+                store.apply("session", first.terminal_updates)
+                self.assertEqual(store.summaries("session")[0].command, "")
+                pending = reader.terminal_metadata_backfills[str(path)]
+                after_first_chunk = pending.next_end
+
+                fast = reader.read_with_activity(
+                    path,
+                    allow_terminal_metadata_backfill=False,
+                )
+                store.apply("session", fast.terminal_updates)
+                self.assertEqual(pending.next_end, after_first_chunk)
+                self.assertEqual(fast.terminal_updates, ())
+
+                for _ in range(30):
+                    result = reader.read_with_activity(path)
+                    store.apply("session", result.terminal_updates)
+                    if store.summaries("session")[0].command:
+                        break
+
+        terminal = store.summaries("session")[0]
+        self.assertEqual(terminal.command, "python worker.py")
+        self.assertEqual(terminal.cwd, "/workspace-a")
+        self.assertEqual("".join(chunk.text for chunk in terminal.chunks), "recent output\n")
+
+    def test_metadata_backfill_skips_invalid_utf8_and_keeps_valid_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            valid = json.dumps(
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-start",
+                        "output": "Script running with cell ID 321\nWall time 1 seconds\nOutput:\n",
+                    },
+                }
+            ).encode()
+            path.write_bytes(b'{"output":"Script completed \xff"}\n' + valid + b"\n")
+            stat = path.stat()
+            state = TerminalMetadataBackfillCursor(
+                inode=stat.st_ino,
+                next_end=stat.st_size,
+                floor=0,
+                process_ids={"321"},
+                process_call_ids={"321": set()},
+            )
+
+            updates, _finished = RolloutReader._terminal_metadata_backfill_step(path, state)
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].process_id, "321")
+
+    def test_later_unknown_process_can_start_backfill_after_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            initial = [
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "call-start",
+                        "name": "exec_command",
+                        "arguments": json.dumps(
+                            {"cmd": "python worker.py", "workdir": "/workspace-a"}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-start",
+                        "output": (
+                            "Script running with cell ID 321\n"
+                            "Wall time 1 seconds\nOutput:\nready\n"
+                        ),
+                    },
+                },
+            ]
+            initial.extend(
+                {
+                    "timestamp": "2026-07-17T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "padding": "x" * 120},
+                }
+                for _ in range(20)
+            )
+            path.write_text("".join(json.dumps(record) + "\n" for record in initial))
+
+            with patch("codex.rollout.MAX_SESSION_TAIL", 700):
+                reader = RolloutReader()
+                first = reader.read_with_activity(path)
+                self.assertEqual(first.terminal_updates, ())
+
+                later = [
+                    {
+                        "timestamp": "2026-07-17T00:00:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "call-poll",
+                            "name": "write_stdin",
+                            "arguments": json.dumps({"session_id": 321, "chars": ""}),
+                        },
+                    },
+                    {
+                        "timestamp": "2026-07-17T00:00:04Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-poll",
+                            "output": "request complete\n",
+                        },
+                    },
+                ]
+                with path.open("a") as handle:
+                    handle.write("".join(json.dumps(record) + "\n" for record in later))
+                result = reader.read_with_activity(path)
+
+        store = TerminalStore()
+        store.apply("session", result.terminal_updates)
+        terminal = store.summaries("session")[0]
+        self.assertEqual(terminal.process_id, "321")
+        self.assertEqual(terminal.command, "python worker.py")
+        self.assertEqual(terminal.cwd, "/workspace-a")
+
+    def test_wait_completion_removes_background_process_from_running_state(self) -> None:
+        records = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "call-start",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "python worker.py"}),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-start",
+                    "output": (
+                        "Script running with cell ID 321\n"
+                        "Wall time 1 seconds\nOutput:\nready\n"
+                    ),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "call-wait",
+                    "name": "wait",
+                    "arguments": json.dumps({"cell_id": 321}),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-wait",
+                    "output": "Script completed\nWall time 1 second\nOutput:\ndone\n",
+                },
+            },
+        ]
+        updates = tuple(
+            update
+            for index, record in enumerate(records)
+            for update in extract_terminal_updates(record, f"source-{index}", float(index))
+        )
+        store = TerminalStore()
+        store.apply("session", updates)
+
+        terminal = store.summaries("session")[0]
+        self.assertEqual(terminal.process_id, "321")
+        self.assertEqual(terminal.status, "completed")
+        self.assertEqual(terminal.completed_at, 3.0)
+
+    def test_process_reconciliation_has_hysteresis_and_preserves_rollout_evidence(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "python",
+                    1.0,
+                    call_id="call-python",
+                    process_id="cell-python",
+                    command="python worker.py",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "npm",
+                    2.0,
+                    call_id="call-npm",
+                    process_id="cell-npm",
+                    command="npm run dev",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        python_child = ChildProcessActivity(
+            ProcessIdentity(42, 7),
+            command="python3.11",
+            state="S",
+        )
+        npm_child = ChildProcessActivity(
+            ProcessIdentity(43, 8),
+            command="npm",
+            state="S",
+        )
+
+        self.assertFalse(
+            store.reconcile_children("session", (python_child, npm_child), 3.0)
+        )
+        matched = {item.process_id: item for item in store.summaries("session")}
+        self.assertTrue(matched["cell-python"].process_active)
+        self.assertTrue(matched["cell-npm"].process_active)
+        self.assertEqual(
+            {item.process_id for item in store.current_summaries("session")},
+            {"cell-python", "cell-npm"},
+        )
+        self.assertFalse(store.reconcile_children("session", (python_child,), 4.0))
+        missing_once = {item.process_id: item for item in store.summaries("session")}
+        self.assertTrue(missing_once["cell-python"].process_active)
+        self.assertFalse(missing_once["cell-npm"].process_active)
+        self.assertEqual(missing_once["cell-npm"].status, "running")
+        self.assertEqual(
+            [item.process_id for item in store.current_summaries("session")],
+            ["cell-python"],
+        )
+        self.assertTrue(store.reconcile_children("session", (python_child,), 5.0))
+        summaries = {item.process_id: item for item in store.summaries("session")}
+        self.assertEqual(summaries["cell-python"].status, "running")
+        self.assertTrue(summaries["cell-python"].process_active)
+        self.assertEqual(summaries["cell-npm"].status, "completed")
+        self.assertFalse(summaries["cell-npm"].process_active)
+
+        transient_store = TerminalStore()
+        transient_store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "rollout",
+                    1.0,
+                    process_id="cell-1",
+                    command="server --watch",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        server = ChildProcessActivity(ProcessIdentity(42, 7), command="server", state="S")
+        self.assertFalse(transient_store.reconcile_children("session", (server,), 2.0))
+        self.assertFalse(transient_store.reconcile_children("session", (), 3.0))
+        self.assertFalse(transient_store.reconcile_children("session", (server,), 4.0))
+        self.assertFalse(transient_store.reconcile_children("session", (), 5.0))
+        self.assertTrue(transient_store.reconcile_children("session", (), 6.0))
+        self.assertEqual(transient_store.summaries("session")[0].status, "completed")
+
+        unrelated_store = TerminalStore()
+        unrelated_store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "rollout",
+                    1.0,
+                    process_id="cell-unrelated",
+                    command="python worker.py",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        unrelated_child = ChildProcessActivity(
+            ProcessIdentity(99, 1), command="mcp-server", state="S"
+        )
+        self.assertFalse(
+            unrelated_store.reconcile_children("session", (unrelated_child,), 2.0)
+        )
+        self.assertFalse(unrelated_store.summaries("session")[0].process_active)
+
+        unconfirmed_store = TerminalStore()
+        unconfirmed_store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "rollout",
+                    1.0,
+                    process_id="cell-1",
+                    command="server",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "file",
+                    1.0,
+                    process_id="os:42:7",
+                    command="logger",
+                    status="running",
+                    capability=TerminalCapability.FILE_TAIL,
+                    terminal_candidate=True,
+                    source="file-tail",
+                ),
+            ),
+        )
+
+        self.assertFalse(unconfirmed_store.reconcile_children("session", (), 2.0))
+        self.assertFalse(unconfirmed_store.reconcile_children("session", (), 3.0))
+        summaries = {item.process_id: item for item in unconfirmed_store.summaries("session")}
+        self.assertEqual(summaries["cell-1"].status, "running")
+        self.assertFalse(summaries["cell-1"].process_active)
+        self.assertEqual(summaries["os:42:7"].status, "running")
+        self.assertTrue(summaries["os:42:7"].process_active)
+        self.assertEqual(
+            [item.process_id for item in unconfirmed_store.current_summaries("session")],
+            ["os:42:7"],
+        )
+
+        newer_store = TerminalStore()
+        newer_store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "new-process",
+                    4.0,
+                    process_id="cell-new",
+                    command="server",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+
+        self.assertFalse(
+            newer_store.reconcile_children(
+                "session",
+                (),
+                5.0,
+                evidence_cutoff=3.0,
+            )
+        )
+        self.assertEqual(newer_store.summaries("session")[0].status, "running")
+
+        store.mark_process_unavailable("session")
+        unavailable = {item.process_id: item for item in store.summaries("session")}
+        self.assertFalse(unavailable["cell-python"].process_active)
+        self.assertEqual(store.current_summaries("session"), [])
+
+        in_progress_store = TerminalStore()
+        in_progress_store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "progress",
+                    1.0,
+                    process_id="cell-progress",
+                    command="server",
+                    status="in_progress",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        progress = in_progress_store.sessions["session"]["cell-progress"]
+        progress.process_active = True
+        in_progress_store.mark_stale("session")
+        progress_summary = in_progress_store.summaries("session")[0]
+        self.assertTrue(progress_summary.stale)
+        self.assertFalse(progress_summary.process_active)
+        self.assertEqual(in_progress_store.current_summaries("session"), [])
+
+    def test_process_reconciliation_matches_shell_wrapped_command(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "running",
+                    1.0,
+                    process_id="cell-1",
+                    command="python worker.py",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        child = ChildProcessActivity(
+            ProcessIdentity(42, 7),
+            command="/bin/bash -c python worker.py",
+            state="S",
+        )
+
+        store.reconcile_children("session", (child,), 2.0)
+
+        terminal = store.current_summaries("session")[0]
+        self.assertEqual(terminal.process_id, "cell-1")
+        self.assertTrue(terminal.process_active)
+
+    def test_os_child_reopens_completed_nested_exec_without_protocol_process_id(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "old-call",
+                    0.5,
+                    call_id="call-old",
+                    command="git status --short",
+                    status="completed",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "call",
+                    1.0,
+                    call_id="call-1",
+                    command="printf ready; while :; do sleep 30; done",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "outer-result",
+                    2.0,
+                    call_id="call-1",
+                    status="completed",
+                    output="ready\n",
+                    capability=TerminalCapability.FINAL_TRANSCRIPT,
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        child = ChildProcessActivity(
+            ProcessIdentity(157982, 77),
+            command=(
+                "/usr/bin/codex-linux-sandbox -- /bin/bash -lc "
+                "printf ready; while :; do sleep 30; done"
+            ),
+            state="S",
+        )
+
+        self.assertFalse(store.reconcile_children("session", (child,), 3.0))
+        self.assertEqual(store.current_summaries("session"), [])
+        self.assertTrue(store.reconcile_children("session", (child,), 4.0))
+
+        terminal = store.current_summaries("session")[0]
+        self.assertEqual(terminal.process_id, "os:157982:77")
+        self.assertEqual(terminal.status, "running")
+        self.assertTrue(terminal.process_active)
+        self.assertEqual(terminal.chunks[0].text, "ready\n")
+        old_terminal = next(
+            item for item in store.summaries("session") if item.command == "git status --short"
+        )
+        self.assertEqual(old_terminal.status, "completed")
+        self.assertFalse(old_terminal.process_active)
+
+    def test_reconciliation_uses_one_process_tree_root_per_background_job(self) -> None:
+        store = TerminalStore()
+        command = "while :; do sleep 30; done"
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "old-result",
+                    1.0,
+                    call_id="call-old",
+                    command=command,
+                    status="completed",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "new-result",
+                    2.0,
+                    call_id="call-new",
+                    command=command,
+                    status="completed",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        children = (
+            ChildProcessActivity(
+                ProcessIdentity(50, 5),
+                parent_pid=10,
+                command="codex-code-mode-host",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(100, 10),
+                parent_pid=50,
+                command=f"codex-linux-sandbox -- /bin/bash -lc {command}",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(101, 11),
+                parent_pid=100,
+                command=f"bwrap -- /bin/bash -lc {command}",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(102, 12),
+                parent_pid=101,
+                command=f"/bin/bash -lc {command}",
+                state="S",
+            ),
+        )
+
+        store.reconcile_children("session", children, 3.0)
+        self.assertEqual(store.current_summaries("session"), [])
+        store.reconcile_children("session", children, 4.0)
+
+        current = store.current_summaries("session")
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0].root_call_id, "call-new")
+        self.assertEqual(current[0].process_id, "os:100:10")
+
+    def test_running_call_without_background_result_is_not_published(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "call",
+                    1.0,
+                    call_id="call-foreground",
+                    command="make test",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        child = ChildProcessActivity(
+            ProcessIdentity(42, 7),
+            parent_pid=10,
+            command="codex-linux-sandbox -- make test",
+            state="S",
+        )
+
+        store.reconcile_children("session", (child,), 2.0)
+
+        self.assertEqual(store.current_summaries("session"), [])
+
     def test_direct_command_completion_marks_final_transcript(self) -> None:
         store = TerminalStore()
         updates = (
@@ -295,10 +1109,29 @@ class TerminalTranscriptTests(unittest.TestCase):
         self.assertEqual(terminals[0].process_id, "777")
         self.assertEqual(terminals[0].status, "running")
         self.assertEqual(terminals[0].capability, TerminalCapability.POLL_TRANSCRIPT)
+        self.assertEqual(store.current_summaries("session"), [])
         self.assertEqual(
             "".join(chunk.text for chunk in terminals[0].chunks),
             "ready\ncomplete\n",
         )
+
+    def test_serialized_background_process_id_stops_before_escape_delimiter(self) -> None:
+        updates = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "output": (
+                        "Process running with session ID 321\\n"
+                        "Wall time: 1 seconds\\nOutput:\\nready\\n"
+                    ),
+                },
+            },
+            "serialized",
+            1.0,
+        )
+
+        self.assertEqual(updates[0].process_id, "321")
 
     def test_duplicate_sources_and_delayed_running_do_not_duplicate_or_resurrect(self) -> None:
         store = TerminalStore()
@@ -379,12 +1212,18 @@ class TerminalTranscriptTests(unittest.TestCase):
             with log.open("a") as handle:
                 handle.write("request\n")
             second = collector.read("session", str(workspace), (child,), 2.0)
+            closed = collector.read("session", str(workspace), (), 3.0)
 
-        self.assertEqual(len(first), 1)
-        self.assertEqual(first[0].capability, TerminalCapability.FILE_TAIL)
-        self.assertEqual(first[0].stream, "stdout")
-        self.assertEqual(first[0].output, "ready\n")
-        self.assertEqual(second[0].output, "request\n")
+        first_output = next(update for update in first if update.output)
+        second_output = next(update for update in second if update.output)
+        self.assertEqual(first_output.capability, TerminalCapability.FILE_TAIL)
+        self.assertEqual(first_output.stream, "stdout")
+        self.assertEqual(first_output.output, "ready\n")
+        self.assertEqual(second_output.output, "request\n")
+        self.assertTrue(any(update.status == "running" for update in first))
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0].process_id, "os:42:7")
+        self.assertEqual(closed[0].status, "completed")
 
     def test_regular_file_tail_preserves_utf8_split_across_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -404,7 +1243,10 @@ class TerminalTranscriptTests(unittest.TestCase):
                 for index in range(3)
             ]
 
-        self.assertEqual("".join(batch[0].output for batch in updates), "好")
+        self.assertEqual(
+            "".join(update.output for batch in updates for update in batch),
+            "好",
+        )
 
 
 if __name__ == "__main__":

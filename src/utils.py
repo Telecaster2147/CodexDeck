@@ -92,10 +92,65 @@ def redact_sensitive(text: str) -> str:
     return redacted
 
 
+SENSITIVE_FIELD_NAMES = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "client_secret",
+        "cookie",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "private_key",
+        "secret",
+        "set_cookie",
+        "token",
+    }
+)
+SENSITIVE_FIELD_SUFFIXES = (
+    "_api_key",
+    "_cookie",
+    "_credential",
+    "_credentials",
+    "_password",
+    "_passwd",
+    "_private_key",
+    "_secret",
+    "_token",
+)
+
+
+def redact_structured(value: Any) -> Any:
+    """Redact secret-bearing fields before diagnostic payload serialization."""
+
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+            if normalized in SENSITIVE_FIELD_NAMES or normalized.endswith(
+                SENSITIVE_FIELD_SUFFIXES
+            ):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = redact_structured(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_structured(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_structured(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive(value)
+    return value
+
+
 TRANSCRIPT_BODY_FIELDS = frozenset(
     {
         "aggregated_output",
         "chunks",
+        "diagnostic_payload",
         "formatted_output",
         "interaction_input",
         "output",

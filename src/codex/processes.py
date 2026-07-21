@@ -61,7 +61,8 @@ class ProcessDiscovery:
             [
                 "ps",
                 "-eo",
-                "pid=,ppid=,uid=,comm=,etimes=,pcpu=,stat=,wchan:32=,args=",
+                "pid=,ppid=,uid=,pgid=,tpgid=,tty=,comm=,etimes=,pcpu=,stat=,"
+                "wchan:32=,args=",
                 "--cols",
                 "4096",
             ]
@@ -72,14 +73,29 @@ class ProcessDiscovery:
             path.expanduser().resolve(strict=False) for path in selected_homes or set()
         }
         for raw_line in output.splitlines():
-            fields = raw_line.strip().split(maxsplit=8)
-            if len(fields) < 9:
+            fields = raw_line.strip().split(maxsplit=11)
+            if len(fields) < 12:
                 continue
-            pid_s, ppid_s, uid_s, command, elapsed_s, cpu_s, state, wait_channel, args = fields
+            (
+                pid_s,
+                ppid_s,
+                uid_s,
+                pgid_s,
+                tpgid_s,
+                terminal,
+                command,
+                elapsed_s,
+                cpu_s,
+                state,
+                wait_channel,
+                args,
+            ) = fields
             try:
                 pid = int(pid_s)
                 ppid = int(ppid_s)
                 uid = int(uid_s)
+                process_group_id = int(pgid_s)
+                foreground_process_group_id = int(tpgid_s)
                 elapsed = int(elapsed_s)
                 cpu = float(cpu_s)
             except ValueError:
@@ -113,6 +129,9 @@ class ProcessDiscovery:
                     cwd=cwd,
                     instance_id=resolved.instance_id,
                     discovery_method=resolved.method,
+                    process_group_id=process_group_id,
+                    foreground_process_group_id=foreground_process_group_id,
+                    terminal=terminal,
                 )
             )
         active = {process.stable_key for process in processes}

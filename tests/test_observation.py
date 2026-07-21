@@ -56,6 +56,7 @@ def _write_proc(
     io_bytes: int,
     io_operations: int = 0,
     children: str = "",
+    cmdline: bytes = b"",
 ) -> None:
     directory = root / str(pid)
     (directory / "task" / str(pid)).mkdir(parents=True, exist_ok=True)
@@ -69,6 +70,14 @@ def _write_proc(
         "nonvoluntary_ctxt_switches:\t1\n"
     )
     (directory / "task" / str(pid) / "children").write_text(children)
+    if cmdline:
+        (directory / "cmdline").write_bytes(cmdline)
+
+
+def _write_thread_children(root: Path, pid: int, tid: int, children: str) -> None:
+    directory = root / str(pid) / "task" / str(tid)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "children").write_text(children)
 
 
 class RolloutActivityTests(unittest.TestCase):
@@ -147,6 +156,67 @@ class ProcessActivityTests(unittest.TestCase):
             self.assertEqual(second.child_count, 1)
             self.assertEqual(second.children_created, 1)
             self.assertEqual(second.children[0].command, "proc-200")
+
+    def test_child_command_uses_proc_cmdline_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "uptime").write_text("1000.0 0.0\n")
+            _write_proc(
+                root,
+                100,
+                ppid=1,
+                start=1000,
+                utime=0,
+                stime=0,
+                io_bytes=0,
+                children="200",
+            )
+            _write_proc(
+                root,
+                200,
+                ppid=100,
+                start=2000,
+                utime=0,
+                stime=0,
+                io_bytes=0,
+                cmdline=b"/bin/bash\0-c\0python worker.py\0",
+            )
+
+            snapshot = ProcessActivityCollector(root).snapshot(ProcessIdentity(100, 1000))
+
+            self.assertEqual(snapshot.children[0].command, "/bin/bash -c python worker.py")
+
+    def test_children_started_by_non_leader_thread_are_included(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "uptime").write_text("1000.0 0.0\n")
+            _write_proc(
+                root,
+                100,
+                ppid=1,
+                start=1000,
+                utime=0,
+                stime=0,
+                io_bytes=0,
+            )
+            _write_thread_children(root, 100, 101, "200")
+            _write_proc(
+                root,
+                200,
+                ppid=100,
+                start=2000,
+                utime=0,
+                stime=0,
+                io_bytes=0,
+                cmdline=b"/bin/bash\0-lc\0while :; do sleep 30; done\0",
+            )
+
+            snapshot = ProcessActivityCollector(root).snapshot(ProcessIdentity(100, 1000))
+
+            self.assertEqual(snapshot.child_count, 1)
+            self.assertEqual(snapshot.children[0].identity.pid, 200)
+            self.assertEqual(snapshot.children[0].parent_pid, 100)
+            self.assertIn("while :; do sleep 30; done", snapshot.children[0].command)
 
 
 class SilenceAssessmentTests(unittest.TestCase):

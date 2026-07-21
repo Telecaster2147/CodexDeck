@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -80,12 +81,42 @@ class FakeProc:
         return []
 
 
+class SharedRolloutProc(FakeProc):
+    def __init__(self, rollout: Path) -> None:
+        self.rollout = rollout
+
+    def fd_targets(self, pid: int):
+        return [self.rollout]
+
+
+class SwitchingRolloutProc(FakeProc):
+    def __init__(self, rollouts: list[Path]) -> None:
+        self.rollouts = rollouts
+
+    def fd_targets(self, pid: int):
+        return list(self.rollouts)
+
+
 class FixedProcessActivity:
     def __init__(self, activity: ProcessTreeActivity) -> None:
         self.activity = activity
 
     def snapshot(self, identity: ProcessIdentity) -> ProcessTreeActivity:
         return self.activity
+
+    def prune(self, active_identities: set[str]) -> None:
+        return None
+
+
+class SequencedProcessActivity:
+    def __init__(self, activities: list[ProcessTreeActivity]) -> None:
+        self.activities = activities
+        self.calls = 0
+
+    def snapshot(self, identity: ProcessIdentity) -> ProcessTreeActivity:
+        activity = self.activities[min(self.calls, len(self.activities) - 1)]
+        self.calls += 1
+        return activity
 
     def prune(self, active_identities: set[str]) -> None:
         return None
@@ -314,6 +345,7 @@ class EngineTests(unittest.TestCase):
             terminal = first.sessions[0].terminal_sessions[0]
             self.assertEqual(terminal.capability.value, "FILE_TAIL")
             self.assertEqual(terminal.process_id, "os:4242:99")
+            self.assertTrue(terminal.process_active)
             self.assertEqual(terminal.chunks[0].text, "ready\n")
 
             with log.open("a") as handle:
@@ -323,6 +355,58 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(
                 "".join(chunk.text for chunk in second.sessions[0].terminal_sessions[0].chunks),
                 "ready\nrequest\n",
+            )
+            engine.close()
+
+    def test_terminal_hides_during_process_probe_failure_and_recovers_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance, process = create_instance(
+                root / "one", 381, "session-file-tail-recovery", False
+            )
+            log = root / "one" / "server.log"
+            log.write_text("ready\n")
+            proc_root = root / "proc"
+            fd_dir = proc_root / "4242" / "fd"
+            fd_dir.mkdir(parents=True)
+            (fd_dir / "1").symlink_to(log)
+            child = ChildProcessActivity(
+                ProcessIdentity(4242, 99), command="server", state="S", active=True
+            )
+            available = ProcessTreeActivity(
+                available=True,
+                sampled_at=time.time(),
+                child_count=1,
+                children=(child,),
+            )
+            unavailable = ProcessTreeActivity(available=False, sampled_at=time.time())
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult([process], {instance.instance_id: instance})
+                ),
+                sockets=FakeSockets([{}, {}, {}, {}]),
+                proc=ProcReader(proc_root),
+                process_activity=SequencedProcessActivity(
+                    [available, unavailable, available]
+                ),
+            )
+            engine.baseline()
+
+            visible = engine.sample().sessions[0].terminal_sessions
+            hidden = engine.sample().sessions[0].terminal_sessions
+            recovered = engine.sample().sessions[0].terminal_sessions
+
+            self.assertEqual(len(visible), 1)
+            self.assertTrue(visible[0].process_active)
+            self.assertEqual(hidden, [])
+            self.assertEqual(len(recovered), 1)
+            self.assertTrue(recovered[0].process_active)
+            self.assertEqual(
+                "".join(chunk.text for chunk in recovered[0].chunks),
+                "ready\n",
             )
             engine.close()
 
@@ -425,6 +509,53 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(sessions["session-one"].process.cwd, str(first.paths.codex_home))
             self.assertEqual(discovery.calls, 2)
             self.assertEqual(sockets.calls, 2)
+
+    def test_same_session_opened_by_two_processes_is_merged_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, first = create_instance(
+                Path(temp) / "one", 421, "SESSION_DUPLICATE", False
+            )
+            first = replace(
+                first,
+                process_group_id=421,
+                foreground_process_group_id=421,
+                terminal="pts/1",
+            )
+            second = replace(
+                first,
+                identity=ProcessIdentity(422, first.identity.start_time + 1),
+                elapsed_seconds=1,
+                process_group_id=422,
+                foreground_process_group_id=421,
+            )
+            result = DiscoveryResult(
+                [first, second],
+                {instance.instance_id: instance},
+            )
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{}, {}]),
+                proc=SharedRolloutProc(next(instance.paths.sessions_dir.glob("*.jsonl"))),
+            )
+
+            engine.baseline()
+            snapshot = engine.sample()
+
+            self.assertEqual(len(snapshot.sessions), 1)
+            self.assertEqual(snapshot.sessions[0].session_id, "SESSION_DUPLICATE")
+            self.assertEqual(snapshot.sessions[0].process.pid, 421)
+            self.assertEqual(len(snapshot.instances[0].processes), 2)
+            self.assertTrue(
+                any(
+                    "同一会话由 2 个 Codex 进程打开" in message
+                    and "列表已合并" in message
+                    for message in snapshot.instances[0].diagnostics
+                )
+            )
+            engine.close()
 
     def test_transient_thread_record_miss_preserves_last_known_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -597,6 +728,16 @@ class EngineTests(unittest.TestCase):
                 DiscoveryResult([process], {instance.instance_id: instance})
             )
             sockets = FakeSockets([{}, {}])
+            activity = ProcessTreeActivity(
+                available=True,
+                sampled_at=time.time() + 60,
+                child_count=1,
+                children=(
+                    ChildProcessActivity(
+                        ProcessIdentity(7770, 1), command="server", state="S"
+                    ),
+                ),
+            )
             engine = MonitorEngine(
                 2.0,
                 30,
@@ -604,6 +745,7 @@ class EngineTests(unittest.TestCase):
                 discovery=discovery,
                 sockets=sockets,
                 proc=FakeProc(),
+                process_activity=FixedProcessActivity(activity),
             )
             engine.baseline()
             snapshot = engine.sample()
@@ -643,11 +785,22 @@ class EngineTests(unittest.TestCase):
             )
             running = engine.refresh_events(snapshot)
 
-            self.assertEqual(len(running.sessions[0].terminal_sessions), 1)
-            terminal = running.sessions[0].terminal_sessions[0]
+            self.assertEqual(running.sessions[0].terminal_sessions, [])
+            store_key = f"{running.sessions[0].instance_id}:{running.sessions[0].session_id}"
+            retained = engine.terminals.summaries(store_key)
+            self.assertEqual(retained[0].process_id, "777")
+            self.assertEqual(retained[0].chunks[0].text, "ready\n")
+            self.assertFalse(retained[0].process_active)
+            self.assertEqual(discovery.calls, discovery_calls)
+            self.assertEqual(sockets.calls, socket_calls)
+
+            confirmed = engine.sample()
+            terminal = confirmed.sessions[0].terminal_sessions[0]
             self.assertEqual(terminal.process_id, "777")
             self.assertEqual(terminal.status, "running")
-            self.assertEqual(terminal.chunks[0].text, "ready\n")
+            self.assertTrue(terminal.process_active)
+            discovery_calls = discovery.calls
+            socket_calls = sockets.calls
 
             append(
                 {
@@ -664,7 +817,7 @@ class EngineTests(unittest.TestCase):
                     "output": "request complete\n",
                 }
             )
-            refreshed = engine.refresh_events(running)
+            refreshed = engine.refresh_events(confirmed)
 
             terminal = refreshed.sessions[0].terminal_sessions[0]
             self.assertEqual(terminal.status, "running")
@@ -1089,6 +1242,18 @@ class EngineTests(unittest.TestCase):
                 discovery=SequencedDiscovery([active, active, empty]),
                 sockets=FakeSockets([{}, {}, {}]),
                 proc=FakeProc(),
+                process_activity=FixedProcessActivity(
+                    ProcessTreeActivity(
+                        available=True,
+                        sampled_at=time.time(),
+                        child_count=1,
+                        children=(
+                            ChildProcessActivity(
+                                ProcessIdentity(8880, 1), command="server", state="S"
+                            ),
+                        ),
+                    )
+                ),
             )
             engine.baseline()
             active_snapshot = engine.sample()
@@ -1100,9 +1265,103 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(
                 any(event.kind == "PROCESS_EXITED" for event in exited.sessions[0].events)
             )
-            self.assertEqual(exited.sessions[0].terminal_sessions[0].process_id, "888")
-            self.assertTrue(exited.sessions[0].terminal_sessions[0].stale)
+            self.assertEqual(exited.sessions[0].terminal_sessions, [])
+            store_key = (
+                f"{active_snapshot.sessions[0].instance_id}:"
+                f"{active_snapshot.sessions[0].session_id}"
+            )
+            retained = engine.terminals.summaries(store_key)
+            self.assertEqual(retained[0].process_id, "888")
+            self.assertTrue(retained[0].stale)
             self.assertEqual(exit_code(exited), 0)
+            engine.close()
+
+    def test_new_command_replaces_session_without_reusing_old_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one",
+                62,
+                "session-before-new",
+                False,
+            )
+            discovery = DiscoveryResult([process], {instance.instance_id: instance})
+            old_rollout = next(instance.paths.sessions_dir.glob("*.jsonl"))
+            proc = SwitchingRolloutProc([old_rollout])
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(discovery),
+                sockets=FakeSockets([{}, {}, {}]),
+                proc=proc,
+            )
+            engine.baseline()
+            before = engine.sample()
+            self.assertEqual(before.sessions[0].session_id, "session-before-new")
+
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            new_rollout = instance.paths.sessions_dir / "rollout-session-after-new.jsonl"
+            new_rollout.write_text(
+                json.dumps(
+                    {
+                        "timestamp": timestamp,
+                        "type": "session_meta",
+                        "payload": {"id": "session-after-new"},
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "timestamp": timestamp,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "new session task"}
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            old_mtime = old_rollout.stat().st_mtime_ns
+            os.utime(new_rollout, ns=(old_mtime + 1_000_000, old_mtime + 1_000_000))
+            state = sqlite3.connect(instance.paths.state_db)
+            state.execute(
+                "INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "session-after-new",
+                    str(new_rollout),
+                    str(instance.paths.codex_home),
+                    "New session",
+                    "gpt-test",
+                    "high",
+                    "new session task",
+                    "new session task",
+                ),
+            )
+            state.commit()
+            state.close()
+            # A short transition may expose both descriptors. The newer main
+            # rollout must replace the still-existing cached path.
+            proc.rollouts = [old_rollout, new_rollout]
+
+            after = engine.sample()
+            sessions = {session.session_id: session for session in after.sessions}
+            current = sessions["session-after-new"]
+            closed = sessions["session-before-new"]
+            self.assertFalse(current.process_exited)
+            self.assertEqual(current.process.rollout_path, str(new_rollout))
+            self.assertTrue(closed.process_exited)
+            self.assertEqual(closed.network.reason, "当前 Codex 窗口已切换到新会话")
+            self.assertTrue(
+                any(
+                    event.kind == "SESSION_CLOSED"
+                    and event.summary == "会话已由 /new 关闭"
+                    for event in closed.events
+                )
+            )
             engine.close()
 
     def test_resumed_session_clears_retained_exit_state(self) -> None:

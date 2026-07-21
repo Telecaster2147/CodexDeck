@@ -89,6 +89,9 @@ class TerminalCapability(StringEnum):
     METADATA_ONLY = "METADATA_ONLY"
 
 
+RUNNING_TERMINAL_STATUSES = frozenset({"running", "in_progress"})
+
+
 @dataclass(frozen=True)
 class Provenance:
     source: str
@@ -230,6 +233,7 @@ class SourceCapabilities:
 @dataclass(frozen=True)
 class ChildProcessActivity:
     identity: ProcessIdentity
+    parent_pid: int = 0
     command: str = ""
     state: str = ""
     elapsed_seconds: float = 0.0
@@ -327,6 +331,9 @@ class ProcessInfo:
     reasoning_effort: str = ""
     rollout_path: str = ""
     activity: ProcessTreeActivity = field(default_factory=ProcessTreeActivity)
+    process_group_id: int | None = None
+    foreground_process_group_id: int | None = None
+    terminal: str = ""
 
     @property
     def pid(self) -> int:
@@ -335,6 +342,22 @@ class ProcessInfo:
     @property
     def stable_key(self) -> str:
         return self.identity.key
+
+    @property
+    def foreground_active(self) -> bool | None:
+        """Whether this process owns its controlling terminal's foreground job."""
+
+        if "Z" in self.process_state or "X" in self.process_state:
+            return False
+        if "T" in self.process_state:
+            return False
+        if self.terminal in {"", "?", "-"}:
+            return None
+        if not self.process_group_id or not self.foreground_process_group_id:
+            return None
+        if self.foreground_process_group_id < 0:
+            return None
+        return self.process_group_id == self.foreground_process_group_id
 
 
 @dataclass
@@ -589,6 +612,7 @@ class TerminalSessionSummary:
     dropped_bytes: int = 0
     upstream_truncated: bool = False
     stale: bool = False
+    process_active: bool = False
     source: str = "rollout"
     chunks: tuple[TerminalChunk, ...] = ()
 

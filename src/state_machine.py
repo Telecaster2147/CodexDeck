@@ -97,6 +97,7 @@ ATTENTION_CLEAR_KINDS = PROGRESS_KINDS | {
     "TURN_STARTED",
     "ITEM_COMPLETED",
     "PROCESS_EXITED",
+    "SESSION_CLOSED",
 }
 NON_SEMANTIC_KINDS = {
     "KEEPALIVE",
@@ -1243,25 +1244,6 @@ class SessionStateMachine:
                     ),
                 )
             )
-        if state.compactions:
-            compact = state.compactions[-1]
-            if compact.terminal_at is not None and compact.started_at is None:
-                findings.append(
-                    DiagnosisFinding(
-                        "warning",
-                        "compact protocol drift",
-                        "收到 compact terminal edge，但当前保留窗口没有可信 start",
-                        tuple(
-                            f"{item.edge} · {item.source}" for item in compact.evidence
-                        ),
-                        Provenance(
-                            compact.source or "compact-state-machine",
-                            compact.confidence,
-                            derived=True,
-                            complete=False,
-                        ),
-                    )
-                )
         if state.observation.auto_compact_expected:
             findings.append(
                 DiagnosisFinding(
@@ -1413,7 +1395,7 @@ class SessionStateMachine:
                 observed_at=attention_event.observed_at,
                 provenance=attention_event.provenance,
             )
-        process_exit = self._latest(all_events, "PROCESS_EXITED")
+        process_exit = self._latest(all_events, "PROCESS_EXITED", "SESSION_CLOSED")
         if process_exit and process_exit is all_events[-1]:
             # Process termination is historical lifecycle evidence, not a turn failure.
             current_turn = False

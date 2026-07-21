@@ -93,10 +93,10 @@ class HookEventTests(unittest.TestCase):
 
 
 class CompactFixtureTests(unittest.TestCase):
-    def test_manual_rollout_fixture_reconstructs_candidate_start(self) -> None:
+    def test_manual_rollout_fixture_reconstructs_start_after_completion(self) -> None:
         events = RolloutReader().read(FIXTURES / "manual_compact_rollout.jsonl")
         kinds = [event.kind for event in events]
-        self.assertIn("COMPACT_CANDIDATE", kinds)
+        self.assertNotIn("COMPACT_CANDIDATE", kinds)
         self.assertEqual(kinds[-2:], ["COMPACTING", "COMPACT_COMPLETED"])
         self.assertTrue(events[-2].metadata["reconstructed"])
 
@@ -105,6 +105,76 @@ class CompactFixtureTests(unittest.TestCase):
         self.assertEqual([event.kind for event in auto], ["COMPACTING", "COMPACT_COMPLETED"])
         completion = RolloutReader().read(FIXTURES / "completion_only_rollout.jsonl")
         self.assertEqual([event.kind for event in completion], ["COMPACT_COMPLETED"])
+
+    def test_auto_completion_reconstructs_start_from_pre_compact_token_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user", "content": "continue"},
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:10Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "context_tokens": 229_274,
+                            "model_context_window": 258_400,
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:54Z",
+                    "type": "compacted",
+                    "payload": {"window_number": 2},
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:54.010Z",
+                    "type": "event_msg",
+                    "payload": {"type": "context_compacted"},
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            events = RolloutReader().read(path)
+
+        compact_events = [event for event in events if event.kind.startswith("COMPACT")]
+        self.assertEqual(
+            [event.kind for event in compact_events],
+            ["COMPACTING", "COMPACT_COMPLETED"],
+        )
+        self.assertEqual(compact_events[0].timestamp, 1_767_225_610.0)
+        self.assertEqual(compact_events[1].timestamp, 1_767_225_654.0)
+        self.assertEqual(compact_events[0].metadata["trigger"], "auto")
+        self.assertEqual(
+            compact_events[0].metadata["reconstruction_basis"],
+            "pre_compact_token_snapshot",
+        )
+        self.assertTrue(compact_events[0].derived)
+        self.assertTrue(compact_events[0].metadata["reconstructed"])
+
+    def test_compact_completion_companion_is_deduplicated_in_reverse_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-01-01T00:00:54Z",
+                    "type": "event_msg",
+                    "payload": {"type": "context_compacted"},
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:54.010Z",
+                    "type": "compacted",
+                    "payload": {"window_number": 2},
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            events = RolloutReader().read(path)
+
+        compact_events = [event for event in events if event.kind == "COMPACT_COMPLETED"]
+        self.assertEqual(len(compact_events), 1)
 
     def test_remote_and_retry_structured_log_fixtures(self) -> None:
         records = []
@@ -224,7 +294,7 @@ class CompactStateMachineTests(unittest.TestCase):
         self.assertEqual(compact.status, "completed")
         self.assertIsNone(compact.started_at)
         self.assertIsNone(compact.duration_seconds)
-        self.assertIn(
+        self.assertNotIn(
             "compact protocol drift",
             {finding.conclusion for finding in state.diagnosis},
         )

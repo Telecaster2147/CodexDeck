@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -119,9 +120,9 @@ class PathTests(unittest.TestCase):
 
     def test_launcher_inherits_child_session_instance(self) -> None:
         output = (
-            "10 1 1000 node 100 0.0 S epoll node /usr/bin/codex\n"
-            "11 10 1000 codex 99 1.0 S futex /opt/codex resume\n"
-            "12 1 2000 codex 80 0.0 S futex codex --other-user\n"
+            "10 1 1000 10 10 pts/1 node 100 0.0 S epoll node /usr/bin/codex\n"
+            "11 10 1000 10 10 pts/1 codex 99 1.0 S futex /opt/codex resume\n"
+            "12 1 2000 12 12 pts/2 codex 80 0.0 S futex codex --other-user\n"
         )
         result = ProcessDiscovery(FakeRunner(output), FamilyProc(), user_id=1000).discover()
         by_pid = {process.pid: process for process in result.processes}
@@ -129,9 +130,47 @@ class PathTests(unittest.TestCase):
         self.assertEqual(by_pid[10].discovery_method, "process-family")
         self.assertNotIn(12, by_pid)
         self.assertEqual(len(result.instances), 1)
+        self.assertTrue(by_pid[11].foreground_active)
+        self.assertEqual(by_pid[11].terminal, "pts/1")
+
+    def test_foreground_status_distinguishes_background_and_headless_sessions(self) -> None:
+        output = (
+            "21 1 1000 21 99 pts/3 codex 20 0.0 S futex codex resume background\n"
+            "22 1 1000 22 -1 ? codex 10 0.0 S futex codex app-server\n"
+        )
+
+        result = ProcessDiscovery(FakeRunner(output), FamilyProc(), user_id=1000).discover()
+        by_pid = {process.pid: process for process in result.processes}
+
+        self.assertFalse(by_pid[21].foreground_active)
+        self.assertIsNone(by_pid[22].foreground_active)
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_read_only_store_created_in_worker_can_close_on_app_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            state = home / "state_5.sqlite"
+            logs = home / "logs_2.sqlite"
+            with sqlite3.connect(state) as connection:
+                connection.execute("CREATE TABLE threads (id TEXT)")
+            with sqlite3.connect(logs) as connection:
+                connection.execute("CREATE TABLE logs (id INTEGER, ts REAL, target TEXT)")
+            paths = CodexPaths(
+                home,
+                home,
+                state,
+                logs,
+                home / "session_index.jsonl",
+                home / "sessions",
+            )
+            stores: list[StateStore] = []
+            worker = threading.Thread(target=lambda: stores.append(StateStore(paths)))
+            worker.start()
+            worker.join()
+
+            stores[0].close()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -240,7 +279,7 @@ class RolloutTests(unittest.TestCase):
 
             self.assertEqual(
                 [event.kind for event in started],
-                ["TURN_STARTED", "COMPACT_CANDIDATE"],
+                ["TURN_STARTED"],
             )
 
             with path.open("a") as handle:
@@ -304,6 +343,85 @@ class RolloutTests(unittest.TestCase):
                 [event.kind for event in events],
                 ["TOKEN_USAGE", "TURN_COMPLETED", "TURN_STARTED"],
             )
+
+    def test_normal_task_started_before_turn_context_is_not_compact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "turn_complete", "turn_id": "old"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "normal-turn"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01.010Z",
+                    "type": "turn_context",
+                    "payload": {"turn_id": "normal-turn", "model": "gpt-test"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01.020Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "continue"}],
+                    },
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+            events = RolloutReader().read(path)
+
+            self.assertEqual(
+                [event.kind for event in events],
+                ["TURN_COMPLETED", "TURN_STARTED", "MODEL_CONFIG"],
+            )
+            self.assertFalse(any(event.kind.startswith("COMPACT") for event in events))
+
+    def test_compacted_and_legacy_companion_emit_one_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-17T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "normal-turn"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:00.010Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "continue"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01Z",
+                    "type": "compacted",
+                    "payload": {"message": "summary"},
+                },
+                {
+                    "timestamp": "2026-07-17T00:00:01.010Z",
+                    "type": "event_msg",
+                    "payload": {"type": "context_compacted"},
+                },
+            ]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            reader = RolloutReader()
+
+            events = reader.read(path)
+
+            completions = [event for event in events if event.kind == "COMPACT_COMPLETED"]
+            self.assertEqual(len(completions), 1)
+            self.assertEqual(completions[0].metadata["trigger"], "auto")
+            self.assertEqual(reader.unknown_counts({str(path)}), {})
+
     def test_partial_jsonl_record_is_completed_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "rollout.jsonl"
@@ -325,6 +443,23 @@ class RolloutTests(unittest.TestCase):
             self.assertEqual([event.kind for event in events], ["TURN_STARTED"])
             self.assertEqual(reader.read(path), [])
 
+    def test_invalid_utf8_record_is_ignored_without_losing_later_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout.jsonl"
+            valid = json.dumps(
+                {
+                    "timestamp": "2026-07-15T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "t1"},
+                }
+            ).encode()
+            path.write_bytes(b'{"invalid":"\xe6"}\n' + valid + b"\n")
+
+            result = RolloutReader().read_with_activity(path)
+
+            self.assertEqual([event.kind for event in result.events], ["TURN_STARTED"])
+            self.assertEqual(result.activity.ignored_record_count, 1)
+
     def test_unknown_types_are_counted_but_known_non_health_events_are_not(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "rollout.jsonl"
@@ -333,6 +468,16 @@ class RolloutTests(unittest.TestCase):
                     "timestamp": "2026-07-15T00:00:00Z",
                     "type": "event_msg",
                     "payload": {"type": "user_message"},
+                },
+                {
+                    "timestamp": "2026-07-15T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "system", "content": []},
+                },
+                {
+                    "timestamp": "2026-07-15T00:00:00Z",
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "developer", "content": []},
                 },
                 {
                     "timestamp": "2026-07-15T00:00:01Z",
