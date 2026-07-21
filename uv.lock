@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.10"
 
 [[package]]
-name = "codex-net-health"
+name = "codexdeck"
 source = { editable = "." }
 dependencies = [
     { name = "textual" },

@@ -1,13 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codex-net-health"
+name = "codexdeck"
 dynamic = ["version"]
-description = "Terminal monitor for Codex process, network, and conversation health"
+description = "Read-only operations console for Codex sessions, tools, terminals, and network health"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["codex", "network", "monitoring", "terminal", "tui"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -24,8 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-codexnet = "cli:run"
-codex-net-health = "cli:run"
+codexdeck = "cli:run"
 
 [tool.setuptools]
 py-modules = [
@@ -36,6 +37,7 @@ py-modules = [
   "engine",
   "history",
   "models",
+  "preferences",
   "snapshot_publisher",
   "state_machine",
   "utils",
