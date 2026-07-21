@@ -24,6 +24,8 @@ def session_title(session: SessionHealth) -> str:
 def session_status(session: SessionHealth) -> str:
     if session.process_exited:
         return "进程已退出"
+    if session.process.foreground_active is False:
+        return "终端后台作业"
     if session.attention_request:
         labels = {
             "APPROVAL": "等待审批",
@@ -97,6 +99,22 @@ def matches_session(session: SessionHealth, query: str) -> bool:
     return query.casefold() in " ".join(values).casefold()
 
 
+def session_is_visible(session: SessionHealth) -> bool:
+    """Keep unknown/headless sessions, but hide exited or confirmed background jobs."""
+
+    return not session.process_exited and session.process.foreground_active is not False
+
+
+def session_hidden_label(session: SessionHealth) -> str:
+    if session.process_exited:
+        if any(event.kind == "SESSION_CLOSED" for event in session.events):
+            return "CLOSED"
+        return "EXITED"
+    if session.process.foreground_active is False:
+        return "BG"
+    return ""
+
+
 def session_workspace(session: SessionHealth) -> str:
     cwd = session.process.cwd.strip()
     return compact_path(cwd) if cwd else "工作区未知"
@@ -133,11 +151,14 @@ class NavigationItem(ListItem):
         self.instance_id = instance_id
         self.session_key = session_key
 
-    def update_from(self, item: "NavigationItem") -> None:
+    def update_from(self, item: "NavigationItem") -> bool:
         """Refresh row content without replacing the focused widget."""
 
+        changed = self._content != item._content
         self._content = item._content
         self.kind = item.kind
         self.instance_id = item.instance_id
         self.session_key = item.session_key
-        self.query_one(Static).update(self._content)
+        if changed:
+            self.query_one(Static).update(self._content)
+        return changed

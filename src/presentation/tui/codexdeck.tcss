@@ -1,0 +1,569 @@
+Screen {
+    layers: base startup;
+    background: $background;
+    color: $text;
+}
+
+#startup-overlay {
+    layer: startup;
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+    background: $background;
+    color: $text;
+    content-align: center middle;
+    text-align: center;
+}
+
+#app-header {
+    height: 1;
+    padding: 0 2;
+    background: $surface;
+}
+
+#workspace {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#navigation {
+    width: 42;
+    min-width: 34;
+    height: 1fr;
+    border-right: solid $border;
+    padding-right: 1;
+}
+
+#search {
+    height: 3;
+    margin-bottom: 1;
+    border: tall $primary;
+    background: $surface;
+}
+
+#search.settled {
+    display: none;
+}
+
+#session-list {
+    height: 1fr;
+    background: transparent;
+    scrollbar-size: 1 1;
+}
+
+#session-list > ListItem {
+    height: auto;
+    min-height: 2;
+    padding: 0 1;
+    margin-bottom: 0;
+    background: transparent;
+    border-left: thick transparent;
+}
+
+#session-list > ListItem.-highlight {
+    background: $panel;
+    border-left: thick $primary;
+    color: $text;
+}
+
+#session-list:focus > ListItem.-highlight {
+    background: $panel;
+    border-left: thick $primary;
+    color: $text;
+    text-style: none;
+}
+
+#session-list > .workspace-row {
+    margin-top: 1;
+    min-height: 2;
+    color: $text;
+}
+
+#session-list > .session-row {
+    min-height: 2;
+}
+
+#session-list > .aux-row {
+    color: $text-muted;
+}
+
+#inspector {
+    width: 1fr;
+    height: 1fr;
+    padding-left: 2;
+}
+
+.zoom-navigation #navigation {
+    width: 1fr;
+    min-width: 1;
+    padding-right: 0;
+    border-right: none;
+}
+
+.zoom-navigation #inspector {
+    display: none;
+}
+
+.zoom-inspector #navigation {
+    display: none;
+}
+
+.zoom-inspector #inspector {
+    width: 1fr;
+    padding-left: 0;
+}
+
+#session-title {
+    height: 3;
+    padding: 1 1 0 1;
+    background: $surface;
+    border-bottom: solid $border;
+}
+
+#health-strip {
+    height: 2;
+    padding: 0 1;
+    color: $text-muted;
+    background: $surface;
+}
+
+#detail-tabs {
+    height: 2;
+    background: $background;
+    border-bottom: solid $border;
+}
+
+#detail-tabs Tab.-active {
+    color: $primary;
+    background: transparent;
+    text-style: bold;
+}
+
+#detail-content {
+    height: 1fr;
+    background: $background;
+}
+
+#activity-panel,
+#diagnosis-panel,
+#terminal-panel {
+    height: 1fr;
+    padding: 1;
+    background: $background;
+    scrollbar-size: 1 1;
+}
+
+#terminal-panel {
+    padding: 0;
+    layout: vertical;
+}
+
+#terminal-header {
+    height: 2;
+    padding: 0 2;
+    background: $surface-darken-1;
+    color: $text-muted;
+    border-bottom: solid $border;
+}
+
+#terminal-search {
+    height: 3;
+    margin: 0 1;
+    border: tall $primary;
+    background: $surface;
+}
+
+#terminal-search.settled {
+    display: none;
+}
+
+#terminal-list {
+    height: auto;
+    max-height: 5;
+    min-height: 2;
+    background: $surface-darken-1;
+    scrollbar-size: 1 1;
+    border-bottom: solid $border;
+}
+
+#terminal-panel.single-terminal #terminal-list {
+    display: none;
+}
+
+#terminal-list > .datatable--cursor {
+    background: $panel;
+    color: $text;
+    text-style: none;
+}
+
+#terminal-output {
+    height: 1fr;
+    padding: 1 2;
+    background: $background-darken-1;
+    scrollbar-size: 1 1;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+#terminal-output:focus {
+    border-left: thick $primary;
+}
+
+#activity-panel {
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+#diagnosis-details {
+    margin-top: 1;
+}
+
+#diagnosis-details-content {
+    padding: 0 1 1 2;
+}
+
+#status-line {
+    height: 1;
+    padding: 0 2;
+    color: $text-muted;
+    background: $surface;
+}
+
+#shortcut-footer {
+    height: 1;
+    layout: horizontal;
+    padding: 0;
+    background: $footer-background;
+    color: $footer-foreground;
+}
+
+.shortcut-mode {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    color: $primary-background;
+    background: $primary;
+    text-style: bold;
+}
+
+.shortcut-key {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    background: $footer-item-background;
+}
+
+.shortcut-key:hover {
+    background: $surface-active;
+    text-style: bold;
+    pointer: pointer;
+}
+
+.shortcut-quit {
+    dock: right;
+    padding: 0 2;
+    background: $error-muted;
+    border-left: vkey $border;
+}
+
+.shortcut-quit:hover {
+    background: $error-darken-2;
+}
+
+#too-small {
+    display: none;
+    width: 100%;
+    height: 1fr;
+    content-align: center middle;
+    text-align: center;
+    color: $warning;
+}
+
+.compact #navigation {
+    width: 100%;
+    min-width: 1;
+    border-right: none;
+    padding-right: 0;
+}
+
+.compact #inspector {
+    display: none;
+    padding-left: 0;
+}
+
+.compact.detail-open #navigation {
+    display: none;
+}
+
+.compact.detail-open #inspector {
+    display: block;
+    width: 100%;
+}
+
+.compact #terminal-list {
+    height: 3;
+    min-height: 3;
+}
+
+.compact #session-title {
+    height: 2;
+    padding: 0 1;
+}
+
+.compact #health-strip {
+    height: 3;
+}
+
+.too-small #workspace,
+.too-small #status-line,
+.too-small #shortcut-footer {
+    display: none;
+}
+
+.too-small #too-small {
+    display: block;
+}
+
+ControlsScreen {
+    align: center middle;
+    background: $background 78%;
+}
+
+#controls-dialog {
+    width: 84;
+    max-width: 94%;
+    height: 92%;
+    max-height: 92%;
+    padding: 0 2;
+    background: $surface;
+    border: round $border;
+}
+
+#controls-header {
+    height: 3;
+    align-vertical: middle;
+    border-bottom: solid $border;
+}
+
+#controls-brand {
+    width: auto;
+    color: $primary;
+    text-style: bold;
+}
+
+#controls-title {
+    width: 1fr;
+    padding-left: 2;
+    color: $text;
+    text-style: bold;
+}
+
+#controls-version {
+    width: auto;
+    color: $text-muted;
+    text-align: right;
+}
+
+#controls-subtitle {
+    height: 3;
+    padding: 1 0 0 0;
+    color: $text-muted;
+}
+
+#controls-scroll {
+    height: 1fr;
+    padding: 0;
+    scrollbar-size: 1 1;
+    scrollbar-color: $scrollbar;
+    scrollbar-color-hover: $scrollbar-hover;
+    scrollbar-color-active: $scrollbar-active;
+}
+
+.control-section {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.control-section-title {
+    height: 2;
+    padding-top: 1;
+}
+
+.control-row {
+    height: auto;
+    min-height: 2;
+    padding: 0 1;
+}
+
+.control-row:hover {
+    background: $surface-active;
+}
+
+.control-key {
+    width: 12;
+    height: 1;
+    margin-right: 1;
+    padding: 0 1;
+    color: $text-primary;
+    background: $primary-muted;
+    text-style: bold;
+}
+
+.control-detail {
+    width: 1fr;
+    height: auto;
+    color: $text;
+}
+
+#controls-hint {
+    height: 2;
+    padding-top: 1;
+    color: $text-muted;
+    border-top: solid $border;
+}
+
+.controls-hint-left {
+    width: 1fr;
+}
+
+.controls-hint-right {
+    width: auto;
+    text-align: right;
+}
+
+ControlsScreen.narrow #controls-dialog {
+    max-width: 96%;
+    height: 94%;
+    max-height: 94%;
+    padding: 0 1;
+}
+
+ControlsScreen.narrow #controls-subtitle {
+    height: auto;
+    min-height: 3;
+}
+
+ControlsScreen.narrow .control-key {
+    width: 10;
+}
+
+ControlsScreen.narrow .control-row {
+    padding: 0;
+}
+
+SettingsScreen {
+    align: center middle;
+    background: $background 78%;
+}
+
+#settings-dialog {
+    width: 76;
+    max-width: 94%;
+    height: 90%;
+    max-height: 90%;
+    padding: 0 2;
+    background: $surface;
+    border: round $border;
+}
+
+#settings-header {
+    height: 3;
+    align-vertical: middle;
+    border-bottom: solid $border;
+}
+
+#settings-brand {
+    width: auto;
+    color: $primary;
+    text-style: bold;
+}
+
+#settings-title {
+    width: 1fr;
+    padding-left: 2;
+    color: $text;
+    text-style: bold;
+}
+
+#settings-version {
+    width: auto;
+    color: $text-muted;
+}
+
+#settings-subtitle {
+    height: 3;
+    padding: 1 0 0 0;
+    color: $text-muted;
+}
+
+#settings-scroll {
+    height: 1fr;
+    scrollbar-size: 1 1;
+    scrollbar-color: $scrollbar;
+    scrollbar-color-hover: $scrollbar-hover;
+    scrollbar-color-active: $scrollbar-active;
+}
+
+.setting-section {
+    height: 2;
+    padding-top: 1;
+    color: $primary;
+    text-style: bold;
+}
+
+.setting-row {
+    height: 4;
+    padding: 1;
+    align-vertical: middle;
+}
+
+.setting-copy {
+    width: 1fr;
+    height: auto;
+}
+
+.setting-label {
+    height: 1;
+    color: $text;
+    text-style: bold;
+}
+
+.setting-detail {
+    height: 1;
+    color: $text-muted;
+}
+
+.setting-row Switch {
+    width: auto;
+}
+
+.setting-row Select {
+    width: 20;
+}
+
+#settings-hint {
+    height: 2;
+    padding: 0;
+    color: $text-muted;
+    text-align: right;
+    content-align: right middle;
+    border-top: solid $border;
+}
+
+SettingsScreen.narrow #settings-dialog {
+    width: 96%;
+    padding: 0 1;
+}
+
+SettingsScreen.narrow #settings-subtitle {
+    height: auto;
+    min-height: 3;
+}
+
+SettingsScreen.narrow .setting-row {
+    padding: 1 0;
+}
+
+SettingsScreen.narrow .setting-row Select {
+    width: 16;
+}

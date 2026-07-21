@@ -10,15 +10,17 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, RichLog, Static
 
-from models import SessionHealth, TerminalCapability, TerminalSessionSummary
+from models import (
+    RUNNING_TERMINAL_STATUSES,
+    SessionHealth,
+    TerminalCapability,
+    TerminalSessionSummary,
+)
 from utils import compact_path, format_duration
 
 
 class TerminalLog(RichLog):
     can_focus = True
-
-
-RUNNING_TERMINAL_STATUSES = frozenset({"running", "in_progress"})
 
 
 class TerminalPanel(Vertical):
@@ -58,6 +60,7 @@ class TerminalPanel(Vertical):
         self._selected_terminal_id = ""
         self._output_signatures: tuple[tuple[object, ...], ...] = ()
         self._output_terminal_id = ""
+        self._output_render_width = 0
         self._search_query = ""
         self._match_rows: list[int] = []
         self._match_index = -1
@@ -86,6 +89,7 @@ class TerminalPanel(Vertical):
             for terminal in (session.terminal_sessions if session else [])
             if terminal.status in RUNNING_TERMINAL_STATUSES
             and bool(terminal.process_id)
+            and terminal.process_active
             and not terminal.stale
         ]
         self._session_key = session.key if session else ""
@@ -104,7 +108,11 @@ class TerminalPanel(Vertical):
                 )
             self._row_keys = row_keys
             selected = previous if previous in row_keys else next(
-                (item.terminal_id for item in reversed(terminals) if item.status == "running"),
+                (
+                    item.terminal_id
+                    for item in reversed(terminals)
+                    if item.status in RUNNING_TERMINAL_STATUSES
+                ),
                 row_keys[-1] if row_keys else "",
             )
             self._selected_terminal_id = selected
@@ -149,9 +157,12 @@ class TerminalPanel(Vertical):
 
     def _prompt_renderable(self, terminal: TerminalSessionSummary) -> Text:
         prompt_path = compact_path(terminal.cwd) if terminal.cwd else "~"
+        command = terminal.command
+        if not command:
+            command = f"后台进程 PID {terminal.process_id}" if terminal.process_id else "后台进程"
         prompt = Text(prompt_path, style="bold #38bdf8")
         prompt.append(" $ ", style="bold #4ade80")
-        prompt.append(terminal.command or "command unavailable", style="#f8fafc")
+        prompt.append(command, style="#f8fafc")
         if self._search_query:
             prompt.highlight_regex(
                 re.escape(self._search_query),
@@ -228,6 +239,10 @@ class TerminalPanel(Vertical):
                 log.scroll_home(animate=False, immediate=True, x_axis=True, y_axis=True)
             self._output_terminal_id = ""
             self._output_signatures = ()
+            self._output_render_width = 0
+            return
+        render_width = log.size.width
+        if render_width < 24:
             return
         signatures = (
             ("prompt", terminal.cwd, terminal.command, self._search_query),
@@ -243,6 +258,7 @@ class TerminalPanel(Vertical):
             ),
         )
         same_terminal = self._output_terminal_id == terminal.terminal_id
+        same_width = self._output_render_width == render_width
         previous = self._output_signatures
         was_at_end = log.is_vertical_scroll_end
         scroll_y = log.scroll_y
@@ -250,17 +266,18 @@ class TerminalPanel(Vertical):
         log.auto_scroll = False
         if (
             same_terminal
+            and same_width
             and len(previous) > 1
             and signatures[: len(previous)] == previous
         ):
             previous_chunk_count = len(previous) - 1
             for chunk in terminal.chunks[previous_chunk_count:]:
                 for row in self._chunk_renderables(chunk):
-                    log.write(row, scroll_end=False)
-        elif signatures != previous or not same_terminal:
+                    log.write(row, width=render_width, scroll_end=False)
+        elif signatures != previous or not same_terminal or not same_width:
             log.clear()
             for row in rows:
-                log.write(row, scroll_end=False)
+                log.write(row, width=render_width, scroll_end=False)
         if should_follow:
             log.scroll_end(animate=False, immediate=True, x_axis=False)
             log.scroll_to(x=0, animate=False, immediate=True)
@@ -271,6 +288,15 @@ class TerminalPanel(Vertical):
         log.auto_scroll = follow
         self._output_terminal_id = terminal.terminal_id
         self._output_signatures = signatures
+        self._output_render_width = render_width
+
+    def reflow(self, *, follow: bool) -> bool:
+        log = self.query_one("#terminal-output", TerminalLog)
+        if log.size.width < 24:
+            return False
+        self._output_render_width = 0
+        self._render_selected(follow)
+        return True
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id != "terminal-list" or event.row_key is None:

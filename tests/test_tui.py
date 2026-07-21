@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from rich.console import Console
 
@@ -36,27 +39,38 @@ from models import (  # noqa: E402
     TokenUsageSummary,
     UnparsedPayload,
 )
+from preferences import CodexDeckPreferences  # noqa: E402
 from presentation.tui.textual_app import (  # noqa: E402
-    CodexNetApp,
+    CodexDeckApp,
     NavigationItem,
     SampleCompleted,
+    SessionInspector,
+    SettingsScreen,
+    ShortcutFooter,
+    StartupOverlay,
     TerminalPanel,
+    _diagnosis_details_renderable,
     _diagnosis_renderable,
     _timeline_line,
     binding_key_label,
     keyboard_reference,
     session_marker,
+    session_hidden_label,
     session_status,
+    startup_renderable,
     timeline_entries,
 )
 from textual.widgets import (  # noqa: E402
+    Collapsible,
     ContentSwitcher,
     DataTable,
-    Footer,
     Input,
     ListView,
     RichLog,
+    Select,
     Static,
+    Switch,
+    Tabs,
 )
 
 
@@ -131,8 +145,12 @@ class FakeEngine:
     def __init__(self, snapshot: MonitorSnapshot) -> None:
         self.snapshot = snapshot
         self.pinned: SessionHealth | None = None
+        self.baselines = 0
         self.full_samples = 0
         self.event_samples = 0
+
+    def baseline(self) -> None:
+        self.baselines += 1
 
     def pin_session(self, session: SessionHealth | None) -> None:
         self.pinned = session
@@ -147,6 +165,178 @@ class FakeEngine:
 
 
 class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_classic_blue_is_the_default_palette_and_cycles_all_themes(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            self.assertEqual(app.theme, "codexdeck-blue")
+            variables = app.get_css_variables()
+            self.assertEqual(variables["background"], "#0F172A")
+            self.assertEqual(variables["surface"], "#111827")
+            self.assertEqual(variables["panel"], "#1F2937")
+            self.assertEqual(variables["primary"], "#38BDF8")
+
+            await pilot.press("t")
+            self.assertEqual(app.theme, "textual-dark")
+            await pilot.press("t")
+            self.assertEqual(app.theme, "textual-light")
+            await pilot.press("t")
+            self.assertEqual(app.theme, "codexdeck-blue")
+
+    def test_startup_renderable_has_wide_and_compact_brand_frames(self) -> None:
+        wide = render_plain(startup_renderable(0), width=120)
+        ready = render_plain(startup_renderable(99), width=120)
+        compact = render_plain(startup_renderable(2, compact=True), width=50)
+
+        self.assertIn("██████", wide)
+        self.assertIn("██████╗ ███████╗ ██████╗██╗  ██╗", wide)
+        self.assertIn("CORE", wide)
+        self.assertIn("CONSOLE READY", ready)
+        self.assertIn("CODEXDECK", compact)
+        self.assertNotIn("██████", compact)
+        self.assertLessEqual(max(map(len, compact.splitlines())), 50)
+
+    async def test_startup_overlay_plays_fully_while_initial_sample_prepares(self) -> None:
+        snapshot = make_snapshot(1)
+        engine = FakeEngine(snapshot)
+        empty = MonitorSnapshot("", 2.0, [])
+        app = CodexDeckApp(
+            engine,
+            empty,
+            sampling=False,
+            startup_animation=True,
+            prepare_on_start=True,
+        )
+        app.STARTUP_FRAME_INTERVAL = 0.01
+        app.STARTUP_DURATION = 1.0
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            overlay = app.query_one(StartupOverlay)
+            self.assertTrue(overlay.display)
+            await pilot.pause(0.03)
+            self.assertTrue(overlay.display)
+            self.assertEqual(engine.baselines, 1)
+            self.assertEqual(engine.full_samples, 1)
+            self.assertEqual(len(app.snapshot.sessions), 1)
+            await pilot.pause(1.05)
+            self.assertFalse(overlay.display)
+            await pilot.press("3")
+            self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "terminal-tab")
+
+    async def test_settings_persists_and_applies_all_preferences(self) -> None:
+        snapshot = make_snapshot(1)
+        with TemporaryDirectory() as temp:
+            preference_file = Path(temp) / "preferences.json"
+            app = CodexDeckApp(
+                FakeEngine(snapshot),
+                snapshot,
+                sampling=False,
+                startup_animation=True,
+                preferences_file=preference_file,
+            )
+            app.STARTUP_DURATION = 0.01
+
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause(0.03)
+                self.assertFalse(app.query_one(StartupOverlay).display)
+                dark_background = app.query_one("#app-header").styles.background
+                await pilot.press("s")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsScreen)
+                switch = app.screen.query_one("#startup-animation-switch", Switch)
+                self.assertTrue(switch.value)
+                switch.value = False
+                app.screen.query_one("#group-sessions-switch", Switch).value = False
+                app.screen.query_one("#show-hidden-switch", Switch).value = True
+                app.screen.query_one("#follow-output-switch", Switch).value = False
+                app.screen.query_one("#notifications-switch", Switch).value = False
+                app.screen.query_one("#theme-select", Select).value = "textual-light"
+                app.screen.query_one("#default-tab-select", Select).value = "terminal"
+                await pilot.press("s")
+                await pilot.pause()
+
+                self.assertFalse(app.grouped)
+                self.assertTrue(app.show_hidden)
+                self.assertFalse(app.follow)
+                self.assertFalse(app.notifications_enabled)
+                self.assertEqual(app.theme, "textual-light")
+                self.assertNotEqual(
+                    app.query_one("#app-header").styles.background,
+                    dark_background,
+                )
+                self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "terminal-tab")
+
+            self.assertEqual(
+                json.loads(preference_file.read_text()),
+                {
+                    "startup_animation": False,
+                    "group_sessions": False,
+                    "show_hidden_sessions": True,
+                    "follow_output": False,
+                    "notifications": False,
+                    "theme": "textual-light",
+                    "default_tab": "terminal",
+                },
+            )
+
+    async def test_settings_scrolls_cleanly_on_narrow_terminal(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(72, 24)) as pilot:
+            await pilot.press("s")
+            await pilot.pause()
+
+            dialog = app.screen.query_one("#settings-dialog")
+            scroll = app.screen.query_one("#settings-scroll")
+            self.assertLessEqual(dialog.size.width, 68)
+            self.assertGreater(scroll.virtual_size.height, scroll.size.height)
+            self.assertEqual(len(app.screen.query(".setting-row")), 7)
+            self.assertEqual(len(app.screen.query(Switch)), 5)
+            self.assertEqual(len(app.screen.query(Select)), 2)
+
+            scroll.scroll_end(animate=False)
+            await pilot.pause()
+            self.assertGreater(scroll.scroll_y, 0)
+            self.assertTrue(app.screen.query_one("#theme-select", Select).display)
+
+        minimum = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+        async with minimum.run_test(size=(50, 20)) as pilot:
+            await pilot.press("s")
+            await pilot.pause()
+            dialog = minimum.screen.query_one("#settings-dialog")
+            scroll = minimum.screen.query_one("#settings-scroll")
+            hint = minimum.screen.query_one("#settings-hint", Static)
+            self.assertLessEqual(dialog.size.width, 48)
+            self.assertGreater(scroll.size.height, 0)
+            self.assertGreater(scroll.virtual_size.height, scroll.size.height)
+            self.assertIn("放弃修改", str(hint.render()))
+            self.assertIn("保存设置", str(hint.render()))
+
+    async def test_settings_escape_discards_changes_and_flat_override_survives_save(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(
+            FakeEngine(snapshot),
+            snapshot,
+            flat=True,
+            sampling=False,
+            preferences=CodexDeckPreferences(group_sessions=True),
+        )
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            self.assertFalse(app.grouped)
+            await pilot.press("s")
+            app.screen.query_one("#show-hidden-switch", Switch).value = True
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(app.show_hidden)
+
+            await pilot.press("s")
+            await pilot.press("s")
+            await pilot.pause()
+            self.assertFalse(app.grouped)
+
     async def test_overview_prioritizes_action_required_and_anomaly_key_selects_it(self) -> None:
         snapshot = make_snapshot(2)
         waiting = snapshot.sessions[1]
@@ -161,7 +351,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         waiting.current_operation = CurrentOperationSummary(
             "attention", "等待用户操作", "Approve command", 10.0
         )
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
@@ -181,7 +371,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_attention_emits_cross_session_notification(self) -> None:
         snapshot = make_snapshot(1)
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
         notices: list[tuple[str, dict[str, object]]] = []
 
         async with app.run_test(size=(120, 24)) as pilot:
@@ -199,6 +389,29 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(notices[0][0], "Choose an option")
         self.assertIn("ACTION REQUIRED", str(notices[0][1]["title"]))
+
+    async def test_disabled_notifications_suppress_transition_notice(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(
+            FakeEngine(snapshot),
+            snapshot,
+            sampling=False,
+            preferences=CodexDeckPreferences(notifications=False),
+        )
+        notices: list[tuple[str, dict[str, object]]] = []
+
+        async with app.run_test(size=(120, 24)) as pilot:
+            app.notify = lambda message, **kwargs: notices.append((message, kwargs))  # type: ignore[method-assign]
+            refreshed = make_snapshot(1)
+            refreshed.sessions[0].attention_request = AttentionRequest(
+                AttentionState.USER_INPUT,
+                summary="等待用户操作",
+                detail="Choose an option",
+            )
+            app._apply_snapshot(refreshed)
+            await pilot.pause()
+
+        self.assertEqual(notices, [])
 
     def test_unparsed_trace_shows_identity_without_raw_object(self) -> None:
         line = _timeline_line(
@@ -304,6 +517,114 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("历史趋势", rendered)
         self.assertNotIn("15m", rendered)
         self.assertNotIn("p50", rendered)
+        detail_count, _ = _diagnosis_details_renderable(session, instance)
+        self.assertEqual(detail_count, 0)
+
+    def test_diagnosis_details_show_full_redacted_unknown_payload(self) -> None:
+        snapshot = make_snapshot(1)
+        session = snapshot.sessions[0]
+        full_payload = '{"detail":"' + "x" * 400 + '","token":"[REDACTED]"}'
+        session.events = [
+            NormalizedEvent(
+                10.0,
+                "UNPARSED_PAYLOAD",
+                "event_msg:future_protocol_event",
+                source="rollout",
+                source_id="rollout:42",
+                complete=False,
+                metadata={"diagnostic_payload": full_payload},
+                unparsed=UnparsedPayload(
+                    "event_msg:future_protocol_event",
+                    len(full_payload),
+                    "a" * 64,
+                    full_payload[:240],
+                    True,
+                ),
+            )
+        ]
+
+        count, details = _diagnosis_details_renderable(session, snapshot.instances[0])
+        rendered = render_plain(details, width=160)
+
+        self.assertEqual(count, 1)
+        self.assertIn("完整脱敏 payload", rendered)
+        self.assertIn("x" * 300, "".join(rendered.splitlines()))
+        self.assertIn("[REDACTED]", rendered)
+
+    def test_diagnosis_details_label_truncated_unknown_payload(self) -> None:
+        snapshot = make_snapshot(1)
+        session = snapshot.sessions[0]
+        session.events = [
+            NormalizedEvent(
+                10.0,
+                "UNPARSED_PAYLOAD",
+                "event_msg:future_protocol_event",
+                metadata={
+                    "diagnostic_payload": '{"detail":"retained"}',
+                    "diagnostic_payload_dropped_chars": 5904,
+                },
+                unparsed=UnparsedPayload(
+                    "event_msg:future_protocol_event", 10_000, "a" * 64, "preview", True
+                ),
+            )
+        ]
+
+        _, details = _diagnosis_details_renderable(session, snapshot.instances[0])
+        rendered = render_plain(details, width=160)
+        self.assertIn("已截断，省略 5904 chars", rendered)
+        self.assertIn("retained", rendered)
+
+    def test_derived_tool_boundaries_are_not_protocol_anomalies(self) -> None:
+        snapshot = make_snapshot(1)
+        session = snapshot.sessions[0]
+        session.events = [
+            NormalizedEvent(
+                10.0,
+                "TOOL_RUNNING",
+                "exec_command",
+                source="rollout",
+                source_id="tool-start",
+                derived=True,
+                complete=False,
+            ),
+            NormalizedEvent(
+                11.0,
+                "TOOL_COMPLETED",
+                "exec_command",
+                source="rollout",
+                source_id="tool-complete",
+                derived=True,
+                complete=False,
+            ),
+        ]
+
+        summary = render_plain(_diagnosis_renderable(session, snapshot.instances[0]))
+        detail_count, _ = _diagnosis_details_renderable(session, snapshot.instances[0])
+
+        self.assertNotIn("不完整协议事件", summary)
+        self.assertEqual(detail_count, 0)
+
+    async def test_diagnosis_details_are_collapsed_and_expandable(self) -> None:
+        snapshot = make_snapshot(1)
+        snapshot.instances[0].diagnostics = ["完整采集异常详情：source fixture failed"]
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            details = app.query_one("#diagnosis-details", Collapsible)
+            self.assertTrue(details.collapsed)
+            self.assertIn("异常详情 (1)", str(details.title))
+
+            details.collapsed = False
+            await pilot.pause()
+
+            self.assertFalse(details.collapsed)
+            content = app.query_one("#diagnosis-details-content", Static).content
+            self.assertIn(
+                "完整采集异常详情：source fixture failed",
+                render_plain(content),
+            )
 
     def test_timeline_restores_trimmed_compact_from_summary(self) -> None:
         session = make_snapshot(1).sessions[0]
@@ -323,7 +644,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [entry["kind"] for entry in entries],
-            ["COMPACT_COMPLETED"],
+            ["COMPACTING", "COMPACT_COMPLETED"],
         )
     def test_active_compact_edges_remain_visible_until_success_terminal(self) -> None:
         session = make_snapshot(1).sessions[0]
@@ -506,7 +827,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
     def test_live_poll_uses_fast_event_refresh_between_full_samples(self) -> None:
         snapshot = make_snapshot(1)
         engine = FakeEngine(snapshot)
-        app = CodexNetApp(engine, snapshot, sampling=False)
+        app = CodexDeckApp(engine, snapshot, sampling=False)
         samples: list[bool] = []
         app._start_sample = lambda *, full: samples.append(full)  # type: ignore[method-assign]
 
@@ -521,7 +842,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         snapshot = make_snapshot(1)
         snapshot.sessions[0].events = [NormalizedEvent(10, "MODEL_PROGRESS", "progress")]
         engine = FakeEngine(snapshot)
-        app = CodexNetApp(engine, snapshot, sampling=False)
+        app = CodexDeckApp(engine, snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
@@ -537,11 +858,51 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(engine.full_samples, 0)
             self.assertEqual(engine.event_samples, 0)
 
+    async def test_clock_tick_does_not_rebuild_inspector_logs(self) -> None:
+        snapshot = make_snapshot(1)
+        snapshot.sessions[0].events = [NormalizedEvent(10, "MODEL_PROGRESS", "progress")]
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            inspector = app.query_one(SessionInspector)
+            log = app.query_one("#activity-panel", RichLog)
+            with (
+                patch.object(inspector, "show_session", wraps=inspector.show_session) as show,
+                patch.object(log, "clear", wraps=log.clear) as clear,
+                patch.object(log, "write", wraps=log.write) as write,
+            ):
+                await app._clock_tick()
+                await pilot.pause()
+
+            show.assert_not_called()
+            clear.assert_not_called()
+            write.assert_not_called()
+
+    async def test_unchanged_fast_samples_do_not_update_widgets(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(72, 24)) as pilot:
+            await pilot.pause()
+            inspector = app.query_one(SessionInspector)
+            status = app.query_one("#status-line", Static)
+            with (
+                patch.object(inspector, "show_session", wraps=inspector.show_session) as show,
+                patch.object(status, "update", wraps=status.update) as update,
+            ):
+                for _ in range(100):
+                    app._finish_sample(snapshot, "")
+                await pilot.pause()
+
+            show.assert_not_called()
+            update.assert_not_called()
+
     async def test_wide_layout_header_and_inspector_refresh(self) -> None:
         snapshot = make_snapshot()
         snapshot.generated_at = "2000-01-01T03:04:05+00:00"
         engine = FakeEngine(snapshot)
-        app = CodexNetApp(engine, snapshot, sampling=False)
+        app = CodexDeckApp(engine, snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
@@ -552,6 +913,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.screen.has_class("compact"))
             header = str(app.query_one("#app-header", Static).render())
             self.assertIn("SESSIONS 3", header)
+            self.assertIn("HIDDEN 0", header)
             self.assertIn("ISSUES 0", header)
             self.assertNotIn("03:04:05", header)
             self.assertNotIn("SAMPLE", header)
@@ -566,13 +928,61 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 str(app.query_one("#session-title", Static).render()),
             )
 
+    async def test_navigation_hides_exited_and_confirmed_background_sessions(self) -> None:
+        snapshot = make_snapshot(3)
+        foreground, background, exited = snapshot.sessions
+        foreground.process.process_group_id = 1000
+        foreground.process.foreground_process_group_id = 1000
+        foreground.process.terminal = "pts/1"
+        background.process.process_group_id = 1001
+        background.process.foreground_process_group_id = 2001
+        background.process.terminal = "pts/2"
+        exited.process_exited = True
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            rows = [item for item in app.query(NavigationItem) if item.kind == "session"]
+            header = str(app.query_one("#app-header", Static).render())
+
+            self.assertEqual([item.session_key for item in rows], [foreground.key])
+            self.assertEqual(app.selected_session.key, foreground.key)
+            self.assertIn("SESSIONS 1", header)
+            self.assertIn("HIDDEN 2", header)
+            self.assertIn("VIEW ACTIVE", header)
+
+            await pilot.press("h")
+            await pilot.pause()
+            rows = [item for item in app.query(NavigationItem) if item.kind == "session"]
+            rendered_rows = [str(item.query_one(Static).render()) for item in rows]
+            header = str(app.query_one("#app-header", Static).render())
+
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(rows[0].session_key, foreground.key)
+            self.assertTrue(any("BG" in row for row in rendered_rows))
+            self.assertTrue(any("EXITED" in row for row in rendered_rows))
+            self.assertIn("VIEW ALL", header)
+
+            hidden_row = next(item for item in rows if item.session_key == background.key)
+            app.query_one("#session-list", ListView).index = list(
+                app.query_one("#session-list", ListView).children
+            ).index(hidden_row)
+            app._select_item(hidden_row)
+            self.assertEqual(app.selected_session.key, background.key)
+
+            await pilot.press("h")
+            await pilot.pause()
+            rows = [item for item in app.query(NavigationItem) if item.kind == "session"]
+            self.assertEqual([item.session_key for item in rows], [foreground.key])
+            self.assertEqual(app.selected_session.key, foreground.key)
+
     async def test_refresh_preserves_log_scroll_focus_and_navigation_widgets(self) -> None:
         snapshot = make_snapshot(1)
         snapshot.sessions[0].events = [
             NormalizedEvent(float(index), "WARNING", f"Event {index}", "detail")
             for index in range(80)
         ]
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 24)) as pilot:
             await pilot.pause()
@@ -612,6 +1022,59 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(log.scroll_x, 0)
             self.assertTrue(log.is_vertical_scroll_end)
 
+    async def test_activity_reflows_after_hidden_update_and_resize(self) -> None:
+        snapshot = make_snapshot(1)
+        snapshot.sessions[0].events = [
+            NormalizedEvent(
+                float(index),
+                "WARNING",
+                f"Visible activity event {index}",
+                "detail remains readable after layout changes",
+            )
+            for index in range(20)
+        ]
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one("#activity-panel", RichLog)
+
+            await pilot.press("2")
+            await pilot.pause()
+            refreshed = make_snapshot(1)
+            refreshed.sessions[0].events = [
+                *snapshot.sessions[0].events,
+                NormalizedEvent(
+                    21.0,
+                    "WARNING",
+                    "Visible activity event 21",
+                    "latest hidden-tab update",
+                ),
+            ]
+            app._apply_snapshot(refreshed)
+            await pilot.pause()
+
+            await pilot.press("1")
+            await pilot.pause()
+            visible = "\n".join(
+                log.render_line(row).text for row in range(log.size.height)
+            )
+            self.assertIn("Visible activity event 21", visible)
+
+            await pilot.resize_terminal(50, 20)
+            await pilot.pause(0.1)
+            await pilot.resize_terminal(120, 30)
+            await pilot.pause(0.1)
+            visible = "\n".join(
+                log.render_line(row).text for row in range(log.size.height)
+            )
+            self.assertIn("EVENT", visible)
+            self.assertIn("Visible activity event 21", visible)
+            self.assertNotEqual(
+                {line.strip() for line in visible.splitlines() if line.strip()},
+                {"..."},
+            )
+
     async def test_session_row_and_health_refresh_in_place(self) -> None:
         snapshot = make_snapshot(1)
         session = snapshot.sessions[0]
@@ -619,7 +1082,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         session.phase = "请求已发送"
         session.alert = "PRE_REQUEST_STALL"
         session.alert_level = "警告"
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 24)) as pilot:
             await pilot.pause()
@@ -645,7 +1108,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sample_completed_message_applies_worker_result(self) -> None:
         snapshot = make_snapshot(1)
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 24)) as pilot:
             refreshed = make_snapshot(1)
@@ -661,7 +1124,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_collector_error_survives_clock_tick_until_successful_sample(self) -> None:
         snapshot = make_snapshot(1)
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 24)) as pilot:
             app._show_collector_error("socket probe failed")
@@ -680,7 +1143,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_navigation_rebuild_coalesces_concurrent_requests(self) -> None:
         snapshot = make_snapshot(1)
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 24)):
             app.rebuilding = True
@@ -732,22 +1195,11 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         session.network.state = NetworkState.STALLED
         self.assertEqual(session_marker(session)[0], "!")
 
-    async def test_compact_layout_drilldown_and_command_palette(self) -> None:
-        snapshot = make_snapshot()
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
-
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            self.assertTrue(app.screen.has_class("compact"))
-            self.assertIn("SESSIONS 3", str(app.query_one("#app-header", Static).render()))
-            await pilot.press("enter")
-            await pilot.pause()
-            self.assertTrue(app.screen.has_class("detail-open"))
-            await pilot.press("escape")
-            await pilot.pause()
-            self.assertFalse(app.screen.has_class("detail-open"))
-            commands = list(app.get_system_commands(app.screen))
-            self.assertNotIn("Screenshot", {command.title for command in commands})
+        session.process_exited = True
+        session.events.append(
+            NormalizedEvent(30.0, "SESSION_CLOSED", "会话已由 /new 关闭")
+        )
+        self.assertEqual(session_hidden_label(session), "CLOSED")
 
     async def test_responsive_breakpoints_rows_and_terminal_floor(self) -> None:
         for size, compact in (((120, 30), False), ((96, 24), False), ((80, 24), True), ((60, 20), True)):
@@ -766,6 +1218,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                         "terminal-floor",
                         process_id="700",
                         status="running",
+                        process_active=True,
                         capability=TerminalCapability.POLL_TRANSCRIPT,
                         chunks=(TerminalChunk("floor", 1.0, text="visible output\n"),),
                     )
@@ -774,13 +1227,13 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                         snapshot.sessions[0].terminal_sessions.append(
                             replace(terminal, terminal_id="terminal-floor-2")
                         )
-                app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+                app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
                 async with app.run_test(size=size) as pilot:
                     await pilot.pause()
                     self.assertEqual(app.screen.has_class("compact"), compact)
                     self.assertEqual(app.query_one("#app-header", Static).size.height, 1)
                     self.assertEqual(app.query_one("#status-line", Static).size.height, 1)
-                    self.assertEqual(app.query_one(Footer).size.height, 1)
+                    self.assertEqual(app.query_one(ShortcutFooter).size.height, 1)
                     row = next(
                         item for item in app.query(NavigationItem) if item.kind == "session"
                     )
@@ -799,7 +1252,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                         )
 
         small_snapshot = make_snapshot()
-        small_app = CodexNetApp(FakeEngine(small_snapshot), small_snapshot, sampling=False)
+        small_app = CodexDeckApp(FakeEngine(small_snapshot), small_snapshot, sampling=False)
         async with small_app.run_test(size=(40, 10)) as pilot:
             await pilot.pause()
             self.assertTrue(small_app.screen.has_class("too-small"))
@@ -812,7 +1265,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         snapshot = make_snapshot(2)
         snapshot.sessions[0].process.cwd = "/workspace/project-a"
         snapshot.sessions[1].process.cwd = "/workspace/project-b"
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
@@ -825,9 +1278,9 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/workspace/project-b", labels)
             self.assertIn("CODEX_HOME CODEX_HOME", labels)
 
-    async def test_tabs_help_and_search_are_framework_managed(self) -> None:
+    async def test_tabs_controls_and_search_are_application_managed(self) -> None:
         snapshot = make_snapshot()
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
@@ -839,11 +1292,120 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("?")
             await pilot.pause()
             self.assertEqual(len(app.screen_stack), 2)
+            controls = "\n".join(
+                str(item.render()) for item in app.screen.query(".control-detail")
+            )
+            self.assertIn("Terminal 搜索时跳到下一个匹配", controls)
+            self.assertEqual(len(app.screen.query("#controls-runtime-strip")), 0)
+            self.assertEqual(len(app.screen.query("#controls-runtime")), 0)
             await pilot.press("escape")
             search = app.query_one("#search", Input)
             search.value = "Session 2"
             await pilot.pause()
             self.assertEqual(len(app.query(NavigationItem)), 2)
+
+        narrow_snapshot = make_snapshot(1)
+        narrow = CodexDeckApp(FakeEngine(narrow_snapshot), narrow_snapshot, sampling=False)
+        async with narrow.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            await pilot.press("?")
+            await pilot.pause()
+            dialog = narrow.screen.query_one("#controls-dialog")
+            scroll = narrow.screen.query_one("#controls-scroll")
+            self.assertLessEqual(dialog.size.width, 56)
+            self.assertGreater(scroll.size.height, 0)
+            self.assertGreater(scroll.virtual_size.height, scroll.size.height)
+            await pilot.press("escape")
+            self.assertEqual(len(narrow.screen_stack), 1)
+
+    async def test_zooming_navigation_keeps_the_session_list_visible(self) -> None:
+        snapshot = make_snapshot(2)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            self.assertFalse(app.ENABLE_COMMAND_PALETTE)
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 1)
+
+            initial_theme = app.theme
+            await pilot.press("t")
+            await pilot.pause()
+            self.assertNotEqual(app.theme, initial_theme)
+            self.assertIn("THEME", str(app.query_one("#status-line", Static).render()))
+
+            session_list = app.query_one("#session-list", ListView)
+            session_list.focus()
+            await pilot.press("z")
+            await pilot.pause()
+
+            self.assertEqual(app.zoom_mode, "navigation")
+            self.assertTrue(app.screen.has_class("zoom-navigation"))
+            self.assertGreater(app.query_one("#navigation").size.width, 80)
+            self.assertGreater(session_list.size.height, 0)
+            self.assertFalse(app.query_one("#inspector").display)
+
+            await pilot.press("z")
+            await pilot.pause()
+            self.assertEqual(app.zoom_mode, "")
+            self.assertTrue(app.query_one("#inspector").display)
+
+            await pilot.press("2")
+            app.query_one("#diagnosis-panel").focus()
+            await pilot.press("z")
+            await pilot.pause()
+            self.assertEqual(app.zoom_mode, "inspector")
+            self.assertTrue(app.screen.has_class("zoom-inspector"))
+            self.assertGreater(app.query_one("#inspector").size.width, 0)
+            self.assertIn("ZOOM", str(app.query_one("#status-line", Static).render()))
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(app.zoom_mode, "")
+            self.assertFalse(app.screen.has_class("zoom-inspector"))
+
+            session_list.focus()
+            await pilot.press("z")
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            self.assertTrue(app.compact)
+            self.assertEqual(app.zoom_mode, "")
+            self.assertFalse(app.screen.has_class("zoom-navigation"))
+
+    async def test_footer_changes_with_focus_and_active_page(self) -> None:
+        snapshot = make_snapshot(1)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            footer = app.query_one(ShortcutFooter)
+            rendered = " ".join(
+                str(item.render()) for item in footer.query(".shortcut-key")
+            )
+            self.assertIn("Enter 打开", rendered)
+            self.assertIn("SESSIONS", str(footer.query_one(".shortcut-mode").render()))
+            quit_key = footer.query_one(".shortcut-quit")
+            self.assertEqual(str(quit_key.render()), "q 退出")
+            self.assertEqual(quit_key.region.right, footer.region.right)
+
+            await pilot.press("3")
+            await pilot.pause()
+            rendered = " ".join(
+                str(item.render()) for item in footer.query(".shortcut-key")
+            )
+            self.assertIn("n/N 匹配", rendered)
+            self.assertNotIn("palette", rendered.lower())
+            self.assertEqual(len(footer.query(".shortcut-quit")), 1)
+
+            help_key = next(
+                item
+                for item in footer.query(".shortcut-key")
+                if getattr(item, "trigger", "") == "question_mark"
+            )
+            await pilot.click(help_key)
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 2)
+            await pilot.press("escape")
 
     async def test_terminal_tab_shows_read_only_transcript_and_preserves_scroll(self) -> None:
         snapshot = make_snapshot(1)
@@ -864,12 +1426,13 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 command="server --watch",
                 cwd="/work/repository",
                 status="running",
+                process_active=True,
                 capability=TerminalCapability.POLL_TRANSCRIPT,
                 retained_bytes=320,
                 chunks=chunks,
             )
         ]
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("3")
@@ -937,6 +1500,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             command="npm run dev",
             cwd="/workspace-a",
             status="running",
+            process_active=True,
             capability=TerminalCapability.POLL_TRANSCRIPT,
             chunks=(TerminalChunk("running", 1.0, text="ready\n"),),
         )
@@ -949,8 +1513,14 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             chunks=(TerminalChunk("completed", 1.0, text="passed\n"),),
         )
         stale = replace(running, terminal_id="stale-terminal", process_id="779", stale=True)
-        snapshot.sessions[0].terminal_sessions = [completed, running, stale]
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        unconfirmed = replace(
+            running,
+            terminal_id="unconfirmed-terminal",
+            process_id="780",
+            process_active=False,
+        )
+        snapshot.sessions[0].terminal_sessions = [completed, running, stale, unconfirmed]
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("3")
@@ -1001,34 +1571,77 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 command=command,
                 cwd="/workspace-a",
                 status="running",
+                process_active=True,
                 capability=TerminalCapability.POLL_TRANSCRIPT,
                 chunks=(TerminalChunk("running", 1.0, text="ready\n"),),
             )
         ]
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         async with app.run_test(size=(72, 24)) as pilot:
-            content = app.query_one("#detail-content", ContentSwitcher)
-            await pilot.press("o")
-            await pilot.pause()
-            self.assertEqual(content.current, "activity-panel")
-
             await pilot.press("3")
             await pilot.pause()
 
             log = app.query_one("#terminal-output", RichLog)
             self.assertTrue(log.wrap)
             rendered = "\n".join(line.text for line in log.lines)
+            visible = "\n".join(
+                log.render_line(row).text.rstrip() for row in range(log.size.height)
+            )
             self.assertIn(f"/workspace-a $ {command}", rendered.replace("\n", ""))
             self.assertNotIn("…", rendered)
+            self.assertIn("/workspace-a $ python -m worker --config", visible)
+            self.assertIn("/workspace-a/config/production.toml --queue background-jobs", visible)
+            self.assertIn("--concurrency 12 --log-level debug", visible)
+            self.assertIn("TTY │ ready", visible)
+            self.assertLessEqual(log.virtual_size.height, log.size.height)
+
+    async def test_terminal_reflows_after_hidden_tab_and_resize(self) -> None:
+        snapshot = make_snapshot(1)
+        command = "python -m worker --config /workspace-a/config.toml"
+        snapshot.sessions[0].terminal_sessions = [
+            TerminalSessionSummary(
+                "terminal-reflow",
+                root_call_id="call-reflow",
+                process_id="17",
+                command=command,
+                cwd="/workspace-a",
+                status="running",
+                process_active=True,
+                capability=TerminalCapability.POLL_TRANSCRIPT,
+                chunks=(TerminalChunk("chunk-1", 10.0, "stdout", "ready\n", 1),),
+            )
+        ]
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            log = app.query_one("#terminal-output", RichLog)
+            visible = "\n".join(log.render_line(row).text for row in range(log.size.height))
+            self.assertIn("python -m worker --config", visible)
+            self.assertGreaterEqual(log.virtual_size.width, 24)
+
+            await pilot.resize_terminal(50, 20)
+            await pilot.pause(0.1)
+            await pilot.resize_terminal(120, 30)
+            await pilot.pause(0.1)
+            visible = "\n".join(log.render_line(row).text for row in range(log.size.height))
+            self.assertIn("python -m worker --config", visible)
+            self.assertIn("OUT │ ready", visible)
+            self.assertGreaterEqual(log.virtual_size.width, 24)
 
     async def test_removed_display_shortcuts_have_no_actions(self) -> None:
         snapshot = make_snapshot(1)
-        app = CodexNetApp(FakeEngine(snapshot), snapshot, sampling=False)
+        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
         keys = {binding.key for binding in app.BINDINGS}
         self.assertNotIn("comma", keys)
         self.assertNotIn("a", keys)
+        self.assertNotIn("o", keys)
+        self.assertNotIn("x", keys)
+        self.assertNotIn("ctrl+p", keys)
 
         async with app.run_test(size=(120, 36)) as pilot:
             grouped = app.grouped
@@ -1040,7 +1653,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
     def test_help_and_readme_follow_application_bindings(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         reference = keyboard_reference()
-        for binding in CodexNetApp.BINDINGS:
+        for binding in CodexDeckApp.BINDINGS:
             label = binding_key_label(binding.key)
             self.assertIn(label, reference)
             self.assertIn(f"`{label}`", readme)

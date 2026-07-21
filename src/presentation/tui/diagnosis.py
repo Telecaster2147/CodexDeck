@@ -77,16 +77,11 @@ def _diagnosis_renderable(
         quality_issues.extend(instance_quality_issues(instance))
 
     unparsed_events = [event for event in session.events if event.unparsed]
-    incomplete_events = [
-        event for event in session.events if not event.complete and not event.unparsed
-    ]
     for event in unparsed_events[-3:]:
         payload = event.unparsed
         quality_issues.append(
             f"未解析 {payload.source_type} · {payload.length} chars · {payload.sha256[:10]}"
         )
-    if incomplete_events:
-        quality_issues.append(f"不完整协议事件 × {len(incomplete_events)}")
 
     quality = Text("\n数据质量\n", style="bold #64748b")
     quality.append("新鲜度  " + " · ".join(freshness_parts), style="#94a3b8")
@@ -95,7 +90,7 @@ def _diagnosis_renderable(
             quality.append(f"\n  ! {issue}", style="#fbbf24")
         remaining = len(quality_issues) - 3
         if remaining > 0:
-            quality.append(f"\n  … 另有 {remaining} 项，使用 doctor 查看", style="#64748b")
+            quality.append(f"\n  … 另有 {remaining} 项，可展开异常详情", style="#64748b")
     else:
         quality.append("\n采集源未发现降级", style="#4ade80")
     blocks.append(quality)
@@ -177,3 +172,114 @@ def _diagnosis_renderable(
         blocks.append(capacity)
 
     return Group(*blocks)
+
+
+def _diagnosis_details_renderable(
+    session: SessionHealth,
+    instance: InstanceSnapshot | None,
+) -> tuple[int, object]:
+    """Render complete, redacted diagnostic evidence behind a collapsed disclosure."""
+
+    blocks: list[object] = []
+    count = 0
+
+    for finding in session.diagnosis:
+        if finding.severity.lower() == "info":
+            continue
+        count += 1
+        detail = Text(f"{finding.severity.upper()}  {finding.conclusion}", style="bold #fbbf24")
+        if finding.reason:
+            detail.append(f"\n原因  {finding.reason}", style="#e2e8f0")
+        for evidence in finding.evidence:
+            detail.append(f"\n证据  {evidence}", style="#cbd5e1")
+        provenance = finding.provenance
+        detail.append(
+            f"\n来源  {provenance.source or '未知'} · 置信度 {provenance.confidence.value}"
+            f" · {'推导' if provenance.derived else '直接'}"
+            f" · {'完整' if provenance.complete else '不完整'}",
+            style="#94a3b8",
+        )
+        if finding.action:
+            detail.append(f"\n建议  {finding.action}", style="#fbbf24")
+        blocks.append(detail)
+
+    if session.observation.collector_stale:
+        count += 1
+        blocks.append(
+            Text(
+                "采集证据陈旧\n" + (
+                    session.observation.collector_stale_reason or "会话采集证据已陈旧"
+                ),
+                style="#fbbf24",
+            )
+        )
+
+    if instance:
+        for message in instance.diagnostics:
+            count += 1
+            blocks.append(Text(f"实例诊断\n{message}", style="#fbbf24"))
+        for collector in instance.collector_health:
+            if not collector.error and collector.stale_age_seconds is None:
+                continue
+            count += 1
+            collector_detail = Text(f"采集器  {collector.name}", style="bold #fbbf24")
+            collector_detail.append(
+                f"\n错误  {collector.error or '-'}"
+                f"\n连续失败  {collector.consecutive_failures}"
+                f"\n耗时  {collector.duration_seconds:.3f}s"
+                f"\n陈旧  {collector.stale_age_seconds if collector.stale_age_seconds is not None else '-'}"
+                f"\n超出预算  {'是' if collector.budget_exceeded else '否'}",
+                style="#cbd5e1",
+            )
+            blocks.append(collector_detail)
+        for event_type, event_count in instance.unknown_event_types.items():
+            if any(
+                event.unparsed and event.unparsed.source_type == event_type
+                for event in session.events
+            ):
+                continue
+            count += 1
+            blocks.append(
+                Text(f"未知协议类型\n{event_type} × {event_count}", style="#fbbf24")
+            )
+
+    for event in (event for event in session.events if event.unparsed):
+        count += 1
+        payload = event.unparsed
+        protocol = Text(f"未知协议  {payload.source_type}", style="bold #fbbf24")
+        protocol.append(
+            f"\n时间  {event.timestamp:.3f}"
+            f"\n来源  {event.source_id or event.source}"
+            f"\n长度  {payload.length} chars"
+            f"\nSHA-256  {payload.sha256}",
+            style="#94a3b8",
+        )
+        full_payload = str(event.metadata.get("diagnostic_payload") or payload.preview)
+        dropped_chars = int(event.metadata.get("diagnostic_payload_dropped_chars") or 0)
+        payload_label = (
+            f"脱敏 payload（已截断，省略 {dropped_chars} chars）"
+            if dropped_chars
+            else "完整脱敏 payload"
+        )
+        protocol.append(f"\n{payload_label}\n{full_payload}", style="#cbd5e1")
+        blocks.append(protocol)
+
+    for connection in session.network.connections:
+        if connection.health.value in {"IDLE", "ACTIVE"}:
+            continue
+        count += 1
+        blocks.append(
+            Text(
+                f"异常连接  {connection.local} -> {connection.peer}"
+                f"\n状态  {connection.state} / {connection.health.value}"
+                f"\n原因  {connection.reason}"
+                f"\n队列  recv {connection.recv_q} / send {connection.send_q}"
+                f"\n增量  sent {connection.sent_delta} / recv {connection.received_delta}"
+                f" / ack {connection.acked_delta} / retrans {connection.retrans_delta}",
+                style="#fbbf24",
+            )
+        )
+
+    if not blocks:
+        return 0, Text("当前没有异常详情", style="#64748b")
+    return count, Group(*blocks)
