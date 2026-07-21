@@ -134,6 +134,7 @@ class OutputTests(unittest.TestCase):
                 process_id="321",
                 command="server --watch",
                 status="running",
+                process_active=True,
                 capability=TerminalCapability.POLL_TRANSCRIPT,
                 retained_bytes=12,
                 chunks=(TerminalChunk("source", 1.0, text=transcript),),
@@ -153,7 +154,11 @@ class OutputTests(unittest.TestCase):
                 "shell",
                 source="rollout",
                 confidence=Confidence.HIGH,
-                metadata={"output": transcript, "nested": {"stderr": transcript}},
+                metadata={
+                    "output": transcript,
+                    "diagnostic_payload": transcript,
+                    "nested": {"stderr": transcript},
+                },
             )
         ]
 
@@ -166,11 +171,12 @@ class OutputTests(unittest.TestCase):
         exported = json.dumps(session_export(result.sessions[0], result.sessions[0].events))
 
         self.assertEqual(terminal["process_id"], "321")
+        self.assertTrue(terminal["process_active"])
         self.assertEqual(terminal["capability"], "POLL_TRANSCRIPT")
         self.assertNotIn("chunks", terminal)
         self.assertIn("Terminal：1 个，运行中 1 个 | POLL_TRANSCRIPT", rendered_text)
         self.assertIn(
-            'codexnet_terminal_sessions{capability="POLL_TRANSCRIPT",instance="i1"} 1',
+            'codexdeck_terminal_sessions{capability="POLL_TRANSCRIPT",instance="i1"} 1',
             metrics,
         )
         self.assertNotIn(transcript, rendered_json + rendered_text + metrics)
@@ -178,6 +184,7 @@ class OutputTests(unittest.TestCase):
         self.assertIsNone(public_session["tool_executions"][0]["output"])
         self.assertIsNone(public_session["turns"][0]["tools"][0]["output"])
         self.assertIsNone(public_session["events"][0]["metadata"]["output"])
+        self.assertEqual(public_session["events"][0]["metadata"]["diagnostic_payload"], "")
         self.assertIsNone(public_session["events"][0]["metadata"]["nested"]["stderr"])
         self.assertNotIn("terminal_sessions", exported)
         self.assertNotIn(transcript, exported)
@@ -204,7 +211,7 @@ class OutputTests(unittest.TestCase):
         self.assertIn("待操作 1", rendered_text)
         self.assertIn("Approve command", rendered_text)
         self.assertIn(
-            'codexnet_attention_sessions{instance="i1",state="APPROVAL"} 1',
+            'codexdeck_attention_sessions{instance="i1",state="APPROVAL"} 1',
             metrics,
         )
 

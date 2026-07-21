@@ -114,7 +114,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(engine.samples, 1)
         self.assertEqual(engine.baselines, 0)
-        self.assertIn("codexnet doctor: healthy", output.getvalue())
+        self.assertIn("codexdeck doctor: healthy", output.getvalue())
 
     def test_text_prioritizes_paths_and_degraded_details(self) -> None:
         instance = make_instance()

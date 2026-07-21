@@ -334,21 +334,21 @@ class MetricsTests(unittest.TestCase):
                 )
             ]
             output = render_prometheus(snapshot)
-        self.assertIn('codexnet_sessions{instance="home\\"one",state="GENERATING"} 1', output)
-        self.assertIn('codexnet_network_sessions{instance="home\\"one",state="ACTIVE"} 1', output)
-        self.assertIn('codexnet_alerts{category="warning",instance="home\\"one"} 1', output)
-        self.assertIn('codexnet_snapshot_events{event_type="TURN_FAILED",instance="home\\"one"} 1', output)
-        self.assertIn('codexnet_tokens{category="total",instance="home\\"one"} 15', output)
+        self.assertIn('codexdeck_sessions{instance="home\\"one",state="GENERATING"} 1', output)
+        self.assertIn('codexdeck_network_sessions{instance="home\\"one",state="ACTIVE"} 1', output)
+        self.assertIn('codexdeck_alerts{category="warning",instance="home\\"one"} 1', output)
+        self.assertIn('codexdeck_snapshot_events{event_type="TURN_FAILED",instance="home\\"one"} 1', output)
+        self.assertIn('codexdeck_tokens{category="total",instance="home\\"one"} 15', output)
         self.assertIn(
-            'codexnet_collector_healthy{category="state_db",instance="home\\"one"} 1',
+            'codexdeck_collector_healthy{category="state_db",instance="home\\"one"} 1',
             output,
         )
         self.assertIn(
-            'codexnet_silence_sessions{instance="home\\"one",state="QUIET_UNKNOWN"} 1',
+            'codexdeck_silence_sessions{instance="home\\"one",state="QUIET_UNKNOWN"} 1',
             output,
         )
         self.assertIn(
-            'codexnet_compact_total{instance="home\\"one",status="completed",trigger="manual"} 1',
+            'codexdeck_compact_total{instance="home\\"one",status="completed",trigger="manual"} 1',
             output,
         )
         self.assertNotIn("state_db:home", output)

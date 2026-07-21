@@ -170,7 +170,7 @@ def render_doctor_text(snapshot: MonitorSnapshot) -> str:
     report = doctor_dict(snapshot)
     collection = report["collection"]
     lines = [
-        f"codexnet doctor: {report['status']}",
+        f"codexdeck doctor: {report['status']}",
         (
             f"采集: {collection['duration_seconds']:.3f}s / "
             f"{collection['budget_seconds']:.1f}s; "

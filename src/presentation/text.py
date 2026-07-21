@@ -5,7 +5,13 @@ from __future__ import annotations
 import time
 
 from config import LIFECYCLE_LABELS, NETWORK_LABELS, RECOVERY_LABELS
-from models import AgentNode, MonitorSnapshot, SessionHealth, TokenUsageSummary
+from models import (
+    RUNNING_TERMINAL_STATUSES,
+    AgentNode,
+    MonitorSnapshot,
+    SessionHealth,
+    TokenUsageSummary,
+)
 from utils import format_duration
 
 
@@ -76,7 +82,8 @@ def _session_metrics(session: SessionHealth) -> list[str]:
 
     if session.terminal_sessions:
         running_terminals = sum(
-            terminal.status == "running" for terminal in session.terminal_sessions
+            terminal.status in RUNNING_TERMINAL_STATUSES
+            for terminal in session.terminal_sessions
         )
         capabilities = ", ".join(
             sorted({terminal.capability.value for terminal in session.terminal_sessions})
@@ -128,7 +135,7 @@ def _session_metrics(session: SessionHealth) -> list[str]:
 def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
     summary = snapshot.summary()
     lines = [
-        f"Codex Net Health  {snapshot.generated_at}  刷新 {snapshot.interval_seconds:g}s",
+        f"CodexDeck  {snapshot.generated_at}  刷新 {snapshot.interval_seconds:g}s",
         (
             f"实例 {summary['instances']}  会话 {summary['sessions']}  "
             f"待操作 {summary['action_required']}  失败 {summary['current_failures']}  "

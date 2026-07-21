@@ -106,14 +106,14 @@ class CliFeatureTests(unittest.TestCase):
         if not system_python.exists():
             self.skipTest("system Python is unavailable")
         result = subprocess.run(
-            [str(system_python), str(PROJECT_ROOT / "codex-net-health"), "--version"],
+            [str(system_python), str(PROJECT_ROOT / "codexdeck"), "--version"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r"^codexnet 0\.\d+\.\d+\s*$")
+        self.assertRegex(result.stdout, r"^codexdeck 0\.\d+\.\d+\s*$")
 
     def test_parser_exposes_export_metrics_and_history(self) -> None:
         args = build_parser().parse_args(
@@ -129,6 +129,31 @@ class CliFeatureTests(unittest.TestCase):
         self.assertEqual(hook.command, "hook-event")
         self.assertEqual(hook.hook_events, Path("/tmp/compact-hooks.jsonl"))
 
+        before = build_parser().parse_args(
+            ["--pid", "42", "export", "--current-incidents"]
+        )
+        self.assertEqual(before.pid, [42])
+        self.assertTrue(before.current_incidents)
+
+    def test_subcommand_help_describes_constraints_and_output(self) -> None:
+        expectations = {
+            "doctor": ("不等待普通监控的基线窗口", "doctor_schema_version 1"),
+            "export": ("必须且只能指定", "terminal transcript 正文不会进入导出"),
+            "metrics": ("Prometheus text format", "不会启动 HTTP server"),
+            "hook-event": ("必须指定 --hook-events PATH", "0600"),
+        }
+
+        for command, phrases in expectations.items():
+            with self.subTest(command=command):
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                    build_parser().parse_args([command, "--help"])
+                self.assertEqual(raised.exception.code, 0)
+                rendered = output.getvalue()
+                self.assertIn(f"usage: codexdeck {command}", rendered)
+                for phrase in phrases:
+                    self.assertIn(phrase, rendered)
+
     def test_metrics_samples_immediately_and_emits_prometheus(self) -> None:
         snapshot, machine = fixture()
         engine = FakeEngine(snapshot, machine)
@@ -138,7 +163,7 @@ class CliFeatureTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(engine.samples, 1)
         self.assertEqual(engine.baselines, 0)
-        self.assertIn("# TYPE codexnet_instances gauge", output.getvalue())
+        self.assertIn("# TYPE codexdeck_instances gauge", output.getvalue())
 
     def test_current_incidents_export_is_immediate_json(self) -> None:
         snapshot, machine = fixture()

@@ -472,7 +472,7 @@ class PacketInspector:
         self.error = ""
         self._stop.clear()
         self._packet_socket = packet_socket
-        self._thread = threading.Thread(target=self._run, name="codexnet-packets", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="codexdeck-packets", daemon=True)
         self._thread.start()
         return True
 

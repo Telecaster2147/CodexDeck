@@ -344,7 +344,7 @@ class HistoryStore:
             now,
             "LIFECYCLE_TRANSITION",
             f"{old} -> {current}",
-            source="codexnet-history",
+            source="codexdeck-history",
             source_id=f"{old}:{current}:{now}",
             derived=True,
             metadata={"from": old, "to": current},

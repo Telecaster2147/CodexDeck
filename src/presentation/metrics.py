@@ -9,22 +9,22 @@ from models import MonitorSnapshot
 
 
 METRIC_FAMILIES = (
-    "codexnet_collection_duration_seconds",
-    "codexnet_instances",
-    "codexnet_sessions",
-    "codexnet_network_sessions",
-    "codexnet_silence_sessions",
-    "codexnet_compact_active",
-    "codexnet_terminal_sessions",
-    "codexnet_terminal_dropped_bytes",
-    "codexnet_terminal_upstream_truncated",
-    "codexnet_compact_total",
-    "codexnet_compact_duration_seconds_sum",
-    "codexnet_alerts",
-    "codexnet_attention_sessions",
-    "codexnet_snapshot_events",
-    "codexnet_tokens",
-    "codexnet_collector_healthy",
+    "codexdeck_collection_duration_seconds",
+    "codexdeck_instances",
+    "codexdeck_sessions",
+    "codexdeck_network_sessions",
+    "codexdeck_silence_sessions",
+    "codexdeck_compact_active",
+    "codexdeck_terminal_sessions",
+    "codexdeck_terminal_dropped_bytes",
+    "codexdeck_terminal_upstream_truncated",
+    "codexdeck_compact_total",
+    "codexdeck_compact_duration_seconds_sum",
+    "codexdeck_alerts",
+    "codexdeck_attention_sessions",
+    "codexdeck_snapshot_events",
+    "codexdeck_tokens",
+    "codexdeck_collector_healthy",
 )
 
 
@@ -52,18 +52,18 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     lines: list[str] = []
     lines.extend(
         _family(
-            "codexnet_collection_duration_seconds",
+            "codexdeck_collection_duration_seconds",
             "Duration of the latest monitor collection.",
             "gauge",
-            [_sample("codexnet_collection_duration_seconds", snapshot.collection_duration_seconds)],
+            [_sample("codexdeck_collection_duration_seconds", snapshot.collection_duration_seconds)],
         )
     )
     lines.extend(
         _family(
-            "codexnet_instances",
+            "codexdeck_instances",
             "Discovered Codex instances.",
             "gauge",
-            [_sample("codexnet_instances", len(snapshot.instances))],
+            [_sample("codexdeck_instances", len(snapshot.instances))],
         )
     )
 
@@ -102,12 +102,12 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         )
         for state, count in sorted(lifecycle.items()):
             session_samples.append(
-                _sample("codexnet_sessions", count, instance=instance.instance_id, state=state)
+                _sample("codexdeck_sessions", count, instance=instance.instance_id, state=state)
             )
         for state, count in sorted(network.items()):
             network_samples.append(
                 _sample(
-                    "codexnet_network_sessions",
+                    "codexdeck_network_sessions",
                     count,
                     instance=instance.instance_id,
                     state=state,
@@ -116,7 +116,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for category, count in sorted(alerts.items()):
             alert_samples.append(
                 _sample(
-                    "codexnet_alerts",
+                    "codexdeck_alerts",
                     count,
                     instance=instance.instance_id,
                     category=category,
@@ -125,7 +125,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for state, count in sorted(attention.items()):
             attention_samples.append(
                 _sample(
-                    "codexnet_attention_sessions",
+                    "codexdeck_attention_sessions",
                     count,
                     instance=instance.instance_id,
                     state=state,
@@ -134,7 +134,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for state, count in sorted(silence.items()):
             silence_samples.append(
                 _sample(
-                    "codexnet_silence_sessions",
+                    "codexdeck_silence_sessions",
                     count,
                     instance=instance.instance_id,
                     state=state,
@@ -148,7 +148,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for capability, count in sorted(terminals.items()):
             terminal_samples.append(
                 _sample(
-                    "codexnet_terminal_sessions",
+                    "codexdeck_terminal_sessions",
                     count,
                     instance=instance.instance_id,
                     capability=capability,
@@ -156,7 +156,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
             )
         terminal_dropped_samples.append(
             _sample(
-                "codexnet_terminal_dropped_bytes",
+                "codexdeck_terminal_dropped_bytes",
                 sum(
                     terminal.dropped_bytes
                     for session in instance.sessions
@@ -167,7 +167,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         )
         terminal_truncated_samples.append(
             _sample(
-                "codexnet_terminal_upstream_truncated",
+                "codexdeck_terminal_upstream_truncated",
                 sum(
                     terminal.upstream_truncated
                     for session in instance.sessions
@@ -191,7 +191,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for trigger, count in sorted(active_compacts.items()):
             compact_active_samples.append(
                 _sample(
-                    "codexnet_compact_active",
+                    "codexdeck_compact_active",
                     count,
                     instance=instance.instance_id,
                     trigger=trigger,
@@ -200,7 +200,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for (trigger, status), count in sorted(terminal_compacts.items()):
             compact_terminal_samples.append(
                 _sample(
-                    "codexnet_compact_total",
+                    "codexdeck_compact_total",
                     count,
                     instance=instance.instance_id,
                     trigger=trigger,
@@ -210,7 +210,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for (trigger, status), total in sorted(duration_totals.items()):
             compact_duration_samples.append(
                 _sample(
-                    "codexnet_compact_duration_seconds_sum",
+                    "codexdeck_compact_duration_seconds_sum",
                     total,
                     instance=instance.instance_id,
                     trigger=trigger,
@@ -220,7 +220,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for event_type, count in sorted(events.items()):
             event_samples.append(
                 _sample(
-                    "codexnet_snapshot_events",
+                    "codexdeck_snapshot_events",
                     count,
                     instance=instance.instance_id,
                     event_type=event_type,
@@ -244,7 +244,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
         for category, value in sorted(token_totals.items()):
             token_samples.append(
                 _sample(
-                    "codexnet_tokens",
+                    "codexdeck_tokens",
                     value,
                     instance=instance.instance_id,
                     category=category,
@@ -255,17 +255,17 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
             category = (collector.name or "unknown").split(":", 1)[0]
             collector_samples.append(
                 _sample(
-                    "codexnet_collector_healthy",
+                    "codexdeck_collector_healthy",
                     int(not collector.error and not collector.budget_exceeded),
                     instance=instance.instance_id,
                     category=category,
                 )
             )
 
-    lines.extend(_family("codexnet_sessions", "Sessions by lifecycle state.", "gauge", session_samples))
+    lines.extend(_family("codexdeck_sessions", "Sessions by lifecycle state.", "gauge", session_samples))
     lines.extend(
         _family(
-            "codexnet_network_sessions",
+            "codexdeck_network_sessions",
             "Sessions by network state.",
             "gauge",
             network_samples,
@@ -273,7 +273,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_silence_sessions",
+            "codexdeck_silence_sessions",
             "Sessions by silence assessment state.",
             "gauge",
             silence_samples,
@@ -281,7 +281,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_compact_active",
+            "codexdeck_compact_active",
             "Active compact operations by trigger.",
             "gauge",
             compact_active_samples,
@@ -289,7 +289,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_terminal_sessions",
+            "codexdeck_terminal_sessions",
             "Retained terminal sessions by output capability.",
             "gauge",
             terminal_samples,
@@ -297,15 +297,15 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_terminal_dropped_bytes",
-            "Terminal transcript bytes dropped by CodexNet bounds.",
+            "codexdeck_terminal_dropped_bytes",
+            "Terminal transcript bytes dropped by CodexDeck bounds.",
             "gauge",
             terminal_dropped_samples,
         )
     )
     lines.extend(
         _family(
-            "codexnet_terminal_upstream_truncated",
+            "codexdeck_terminal_upstream_truncated",
             "Terminal transcripts marked truncated by the upstream source.",
             "gauge",
             terminal_truncated_samples,
@@ -313,7 +313,7 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_compact_total",
+            "codexdeck_compact_total",
             "Compact terminal operations retained in the snapshot.",
             "counter",
             compact_terminal_samples,
@@ -321,16 +321,16 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_compact_duration_seconds_sum",
+            "codexdeck_compact_duration_seconds_sum",
             "Sum of compact operation durations retained in the snapshot.",
             "counter",
             compact_duration_samples,
         )
     )
-    lines.extend(_family("codexnet_alerts", "Active alerts by category.", "gauge", alert_samples))
+    lines.extend(_family("codexdeck_alerts", "Active alerts by category.", "gauge", alert_samples))
     lines.extend(
         _family(
-            "codexnet_attention_sessions",
+            "codexdeck_attention_sessions",
             "Sessions waiting for user action by attention state.",
             "gauge",
             attention_samples,
@@ -338,18 +338,18 @@ def render_prometheus(snapshot: MonitorSnapshot) -> str:
     )
     lines.extend(
         _family(
-            "codexnet_snapshot_events",
+            "codexdeck_snapshot_events",
             "Events retained in the current snapshot by type.",
             "gauge",
             event_samples,
         )
     )
     lines.extend(
-        _family("codexnet_tokens", "Latest aggregate token usage.", "gauge", token_samples)
+        _family("codexdeck_tokens", "Latest aggregate token usage.", "gauge", token_samples)
     )
     lines.extend(
         _family(
-            "codexnet_collector_healthy",
+            "codexdeck_collector_healthy",
             "Whether the latest instance collector sample is healthy.",
             "gauge",
             collector_samples,
