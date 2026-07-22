@@ -2,7 +2,7 @@
 
 # CodexDeck
 
-### 管理所有 Codex 会话实时连接状态，一块准确只读的终端仪表盘
+### 所有本地 Codex 会话，一块准确、只读的运行态观测控制台
 
 [![Version](https://img.shields.io/badge/version-0.1.1-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -17,20 +17,27 @@
 
 <br>
 
-<img src="assets/screenshots/overview.png" alt="CodexDeck 宽屏工作台，左侧为按工作区组织的会话，右侧为 Activity Inspector" width="100%">
+<img src="assets/screenshots/overview.png" alt="CodexDeck 六会话宽屏工作台，左侧按工作区组织会话，右侧显示待审批会话的 Diagnosis 证据" width="100%">
 
 <p align="center">
-  <sub>匿名 Textual fixture，使用 <code>CODEX_HOME_A</code>、<code>workspace-a</code> 与 <code>SESSION_ID</code>。</sub>
+  <sub>六个匿名会话同时覆盖生成、待审批、后台终端、恢复、网络停顿和采集盲区。</sub>
 </p>
 
 Codex CLI 擅长完成单个会话中的交互，但当多个工作区、后台命令和 Codex Home 同时运行时，
-运行状态会分散在不同终端和数据源中。CodexDeck 补上的是这层跨会话可观测性：
+运行状态会分散在不同终端和数据源中。CodexDeck 不接管任务，而是汇总当前用户可读的
+协议、进程、终端和网络证据，集中回答三个问题：
+
+- **谁还在工作？** 当前是在生成、compact、运行具体工具，还是等待上游响应？
+- **谁需要处理？** 哪个会话正在等待审批、权限、输入或登录，哪个会话刚刚失败？
+- **谁真的停顿？** 静默是正常等待、已恢复的旧故障、采集盲区，还是多窗口证据确认的 stall？
+
+这些结论来自同一份只读快照，并保留证据来源与新鲜度：
 
 | Codex 原生使用中的不便 | CodexDeck 如何补齐 |
 | --- | --- |
 | 多个 Codex 会话散落在不同终端，需要逐个切换确认状态 | 自动发现当前用户的会话，按真实工作区分组，并区分不同 Codex Home |
 | 界面上的静默很难判断是仍在生成、等待上游、执行工具还是已经停顿 | 组合 rollout、进程和网络证据，给出明确生命周期、静默判断与证据新鲜度 |
-| 后台 exec 离开首个输出后，命令、PID、后续 poll 和最终结果不容易连贯追踪 | 把初始 exec、yield、poll/write、子进程和完成记录关联为同一个只读 Terminal transcript |
+| 后台 exec 离开首个输出后，命令、PID、后续 poll 和最终结果不容易连贯追踪 | 把 Codex 已持久化的初始 exec、yield、poll/write、子进程和完成记录关联为同一个只读 Terminal transcript |
 | 审批、权限、用户输入、登录等待和模型失败混在各自会话中 | 在统一导航中突出 action required、失败、恢复和异常会话，并可一键跳转 |
 | TCP 已连接并不代表模型仍在推进，单一信号容易造成误判 | 以协议事件决定生命周期，网络只作为支持证据，并聚合同进程的全部连接 |
 
@@ -273,10 +280,13 @@ CodexDeck 不把 `NormalizedEvent.detail` 拼成伪终端，而是维护独立�
 | Capability | 何时出现 |
 | --- | --- |
 | `FILE_TAIL` | 子进程 fd 1/2 指向 workspace 或 `/tmp` 下允许读取的普通文件 |
-| `POLL_TRANSCRIPT` | Codex rollout 持久化了初始 yield 或后续 poll/write 输出 |
+| `POLL_TRANSCRIPT` | Codex 写入初始 yield 或后续 poll/write 结果时，持久化 transcript 随记录增长；不是字节级实时流 |
 | `FINAL_TRANSCRIPT` | 只有完成记录或聚合输出可用 |
 | `METADATA_ONLY` | 能看到命令/进程元数据，但没有可读输出 |
 | `STREAMING` | 为未来官方、外部可订阅的只读 delta 源预留 |
+
+普通 Codex TUI rollout 不公开其进程内瞬时 output delta。CodexDeck 只展示已经形成耐久证据的
+poll/final transcript，或符合边界检查的普通文件 tail，不附着或消费 Codex PTY。
 
 | 保留范围 | 上限 |
 | --- | ---: |
