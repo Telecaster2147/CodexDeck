@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from threading import Thread
 
 from rich.console import Console
 from rich.text import Text
@@ -540,7 +541,11 @@ class CodexDeckApp(App[MonitorSnapshot]):
             self.set_interval(TUI_EVENT_POLL_INTERVAL, self._poll_live_events)
         if self.prepare_on_start:
             if self.sampling_coordinator.begin_initial():
-                self._initial_sample_worker()
+                Thread(
+                    target=self._initial_sample_worker,
+                    name="codexdeck-initial-sample",
+                    daemon=True,
+                ).start()
 
     def _render_startup(self) -> None:
         if not self._startup_visible:
@@ -1320,7 +1325,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
             return
         self.post_message(SampleCompleted(snapshot))
 
-    @work(thread=True, group="snapshot")
     def _initial_sample_worker(self) -> None:
         try:
             self.engine.baseline()
