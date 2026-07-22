@@ -10,6 +10,9 @@ from pathlib import Path
 from models import ChildProcessActivity, ProcessIdentity, ProcessTreeActivity
 
 
+MAX_PROCESS_COMMAND_BYTES = 64 * 1024
+
+
 @dataclass(frozen=True)
 class ProcSample:
     identity: ProcessIdentity
@@ -217,7 +220,7 @@ class ProcessActivityCollector:
     def _command_line(directory: Path, fallback: str) -> str:
         try:
             with (directory / "cmdline").open("rb") as handle:
-                raw = handle.read(8 * 1024)
+                raw = handle.read(MAX_PROCESS_COMMAND_BYTES)
         except OSError:
             return fallback
         values = [value.decode(errors="replace") for value in raw.split(b"\0") if value]

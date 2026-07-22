@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,13 @@ class HistoryWindowStats:
     compact_context_samples: int = 0
     compact_context_before_average: float | None = None
     compact_context_after_average: float | None = None
+    phase_duration_seconds: tuple[tuple[str, float], ...] = ()
+    waiting_upstream_seconds: float = 0.0
+    attention_wait_seconds: float = 0.0
+    observer_blind_samples: int = 0
+    observer_blind_frequency: float | None = None
+    protocol_degraded_samples: int = 0
+    protocol_degraded_frequency: float | None = None
 
 
 @dataclass(frozen=True)
@@ -208,7 +216,102 @@ class ProcessIdentity:
 
     @property
     def key(self) -> str:
+        return self.storage_key
+
+    @property
+    def storage_key(self) -> str:
         return f"{self.pid}:{self.start_time}"
+
+    @property
+    def display_key(self) -> str:
+        return str(self.pid)
+
+
+@dataclass(frozen=True)
+class InstanceIdentity:
+    codex_home: Path
+    sqlite_home: Path
+    storage_id: str = field(default="", repr=False)
+
+    @classmethod
+    def from_storage_key(cls, storage_key: str) -> "InstanceIdentity":
+        marker = Path("/") / storage_key
+        return cls(marker, marker, storage_key)
+
+    @property
+    def storage_key(self) -> str:
+        if self.storage_id:
+            return self.storage_id
+        payload = f"{self.codex_home}\0{self.sqlite_home}".encode()
+        return hashlib.blake2s(payload, digest_size=8).hexdigest()
+
+    @property
+    def display_key(self) -> str:
+        return self.storage_key[:8]
+
+
+@dataclass(frozen=True)
+class SessionIdentity:
+    instance: InstanceIdentity
+    session_id: str
+
+    @property
+    def storage_key(self) -> str:
+        return f"{self.instance.storage_key}:{self.session_id}"
+
+    @property
+    def display_key(self) -> str:
+        return self.session_id[:8] or self.instance.display_key
+
+
+@dataclass(frozen=True)
+class RolloutIdentity:
+    path: Path
+    device: int
+    inode: int
+    generation: int = 0
+
+    @property
+    def storage_key(self) -> str:
+        return f"{self.device}:{self.inode}:{self.generation}:{self.path}"
+
+    @property
+    def display_key(self) -> str:
+        return self.path.name
+
+
+@dataclass(frozen=True)
+class TerminalIdentity:
+    session: SessionIdentity
+    process_id: str
+    root_call_id: str
+    invocation: int
+
+    @property
+    def storage_key(self) -> str:
+        anchor = self.process_id or self.root_call_id or "terminal"
+        return f"{self.session.storage_key}:{anchor}:{self.invocation}"
+
+    @property
+    def display_key(self) -> str:
+        return self.process_id or self.root_call_id or f"terminal-{self.invocation}"
+
+
+@dataclass(frozen=True)
+class SocketFlowIdentity:
+    local: str
+    peer: str
+    pid: int
+    fd: int | None = None
+
+    @property
+    def storage_key(self) -> str:
+        fd = "" if self.fd is None else str(self.fd)
+        return f"{self.pid}:{fd}:{self.local}->{self.peer}"
+
+    @property
+    def display_key(self) -> str:
+        return f"{self.local}->{self.peer}"
 
 
 @dataclass(frozen=True)
@@ -334,6 +437,10 @@ class ProcessInfo:
     process_group_id: int | None = None
     foreground_process_group_id: int | None = None
     terminal: str = ""
+    instance_identity: InstanceIdentity | None = field(
+        default=None,
+        metadata={"public": False},
+    )
 
     @property
     def pid(self) -> int:
@@ -385,7 +492,11 @@ class SocketInfo:
 
     @property
     def key(self) -> str:
-        return f"{self.local}->{self.peer}"
+        return self.identity.display_key
+
+    @property
+    def identity(self) -> SocketFlowIdentity:
+        return SocketFlowIdentity(self.local, self.peer, self.pid, self.fd)
 
 
 @dataclass
@@ -489,6 +600,23 @@ class AttentionRequest:
     detail: str = ""
     started_at: float | None = None
     observed_at: float | None = None
+    provenance: Provenance = field(
+        default_factory=lambda: Provenance("", Confidence.LOW, complete=False)
+    )
+
+
+@dataclass(frozen=True)
+class AttentionItem:
+    session: SessionIdentity
+    workspace: str
+    category: str
+    severity: str
+    summary: str
+    detail: str = ""
+    opened_at: float | None = None
+    last_evidence_at: float | None = None
+    source: str = ""
+    confidence: Confidence = Confidence.LOW
     provenance: Provenance = field(
         default_factory=lambda: Provenance("", Confidence.LOW, complete=False)
     )
@@ -615,6 +743,10 @@ class TerminalSessionSummary:
     process_active: bool = False
     source: str = "rollout"
     chunks: tuple[TerminalChunk, ...] = ()
+    identity: TerminalIdentity | None = field(
+        default=None,
+        metadata={"public": False},
+    )
 
 
 @dataclass(frozen=True)
@@ -763,10 +895,21 @@ class SessionHealth:
     process_exited: bool = False
     process_exited_at: float | None = None
     events: list[NormalizedEvent] = field(default_factory=list)
+    identity: SessionIdentity | None = field(
+        default=None,
+        metadata={"public": False},
+    )
 
     @property
     def key(self) -> str:
-        return f"{self.instance_id}:{self.session_id}:{self.process.stable_key}"
+        return self.session_identity.storage_key
+
+    @property
+    def session_identity(self) -> SessionIdentity:
+        return self.identity or SessionIdentity(
+            InstanceIdentity.from_storage_key(self.instance_id),
+            self.session_id,
+        )
 
 
 @dataclass
@@ -781,6 +924,7 @@ class InstanceSnapshot:
     collector_health: list[CollectorHealth] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     unknown_event_types: dict[str, int] = field(default_factory=dict)
+    protocol_shape_families: dict[str, int] = field(default_factory=dict)
     rollout_context_truncated: bool = False
     rollout_activity: list[dict[str, Any]] = field(default_factory=list)
     process_data_stale_age_seconds: float | None = None
@@ -794,6 +938,14 @@ class InstanceSnapshot:
     hook_events: CompactSourceStatus = field(default_factory=CompactSourceStatus)
     processes: list[ProcessInfo] = field(default_factory=list)
     sessions: list[SessionHealth] = field(default_factory=list)
+    identity: InstanceIdentity | None = field(
+        default=None,
+        metadata={"public": False},
+    )
+
+    @property
+    def instance_identity(self) -> InstanceIdentity:
+        return self.identity or InstanceIdentity.from_storage_key(self.instance_id)
 
 
 @dataclass
@@ -850,7 +1002,8 @@ def json_value(value: Any) -> Any:
     if hasattr(value, "__dataclass_fields__"):
         return {
             name: json_value(getattr(value, name))
-            for name in value.__dataclass_fields__
+            for name, definition in value.__dataclass_fields__.items()
+            if definition.metadata.get("public", True)
         }
     if isinstance(value, dict):
         return {str(key): json_value(item) for key, item in value.items()}

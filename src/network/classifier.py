@@ -73,11 +73,11 @@ def assess_process_network(
     after: list[SocketInfo],
     idle_threshold: float,
 ) -> NetworkEvidence:
-    before_by_key = {socket.key: socket for socket in before}
+    before_by_key = {socket.identity: socket for socket in before}
     routed_after = [socket for socket in after if socket.route in {"external", "proxy", "lan"}]
     routed_before = [socket for socket in before if socket.route in {"external", "proxy", "lan"}]
     connections = [
-        assess_connection(before_by_key.get(socket.key), socket, idle_threshold)
+        assess_connection(before_by_key.get(socket.identity), socket, idle_threshold)
         for socket in routed_after
     ]
     active = [item for item in connections if item.health == NetworkState.ACTIVE]

@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
+from typing import Any
 
 from config import (
     ALERT_HTTP_RESPONSE,
@@ -45,6 +46,7 @@ from models import (
     RateLimitSummary,
     RateLimitWindow,
     RecoveryState,
+    SessionIdentity,
     SessionHealth,
     SilenceAssessment,
     SilenceState,
@@ -111,20 +113,24 @@ NON_SEMANTIC_KINDS = {
 class SessionStateMachine:
     def __init__(self, lookback_seconds: int) -> None:
         self.lookback_seconds = lookback_seconds
-        self.events: dict[str, list[NormalizedEvent]] = defaultdict(list)
-        self.seen: dict[str, set[str]] = defaultdict(set)
-        self.pending_recovery: dict[str, RecoveryState] = {}
-        self.alerts: dict[str, list[AlertOccurrence]] = defaultdict(list)
-        self.compactions: dict[str, list[CompactionSummary]] = defaultdict(list)
+        self.events: dict[str | SessionIdentity, list[NormalizedEvent]] = defaultdict(list)
+        self.seen: dict[str | SessionIdentity, set[str]] = defaultdict(set)
+        self.pending_recovery: dict[str | SessionIdentity, RecoveryState] = {}
+        self.alerts: dict[str | SessionIdentity, list[AlertOccurrence]] = defaultdict(list)
+        self.compactions: dict[str | SessionIdentity, list[CompactionSummary]] = defaultdict(list)
 
     @staticmethod
-    def _alert_id(key: str, kind: str, opened_at: float) -> str:
-        identity = f"{key}\0{kind}\0{opened_at:.6f}".encode()
+    def _storage_key(key: str | SessionIdentity) -> str:
+        return key.storage_key if isinstance(key, SessionIdentity) else key
+
+    @staticmethod
+    def _alert_id(key: str | SessionIdentity, kind: str, opened_at: float) -> str:
+        identity = f"{SessionStateMachine._storage_key(key)}\0{kind}\0{opened_at:.6f}".encode()
         return "alert_" + hashlib.sha256(identity).hexdigest()[:20]
 
     def acknowledge_alert(
         self,
-        key: str,
+        key: str | SessionIdentity,
         alert_id: str,
         now: float | None = None,
     ) -> bool:
@@ -144,12 +150,17 @@ class SessionStateMachine:
             return True
         return False
 
-    def retained_events(self, key: str) -> tuple[NormalizedEvent, ...]:
+    def retained_events(self, key: str | SessionIdentity) -> tuple[NormalizedEvent, ...]:
         """Return the complete bounded event history, independent of UI lookback."""
 
-        return tuple(self.events.get(key, ()))
+        events = self.events.get(key)
+        if events is None and isinstance(key, SessionIdentity):
+            events = self.events.get(key.storage_key)
+        return tuple(events or ())
 
-    def _record_compaction(self, key: str, event: NormalizedEvent) -> None:
+    def _record_compaction(
+        self, key: str | SessionIdentity, event: NormalizedEvent
+    ) -> None:
         metadata = event.metadata
         context_tokens = self._int(metadata.get("context_tokens"))
         context_window = self._int(metadata.get("context_window"))
@@ -216,7 +227,7 @@ class SessionStateMachine:
             key=confidence_rank.__getitem__,
             default=event.confidence,
         )
-        updates: dict[str, object] = {
+        updates: dict[str, Any] = {
             "trigger": trigger or current.trigger or "unknown",
             "turn_id": event.turn_id or current.turn_id,
             "source": current.source or event.source,
@@ -266,7 +277,7 @@ class SessionStateMachine:
 
     def observe_compaction(
         self,
-        key: str,
+        key: str | SessionIdentity,
         *,
         timestamp: float,
         source: str,
@@ -294,7 +305,9 @@ class SessionStateMachine:
             ),
         )
 
-    def _reconcile_alert(self, key: str, state: SessionHealth, now: float) -> None:
+    def _reconcile_alert(
+        self, key: str | SessionIdentity, state: SessionHealth, now: float
+    ) -> None:
         history = self.alerts[key]
         active = next((item for item in reversed(history) if item.active), None)
         if not state.alert:
@@ -341,7 +354,7 @@ class SessionStateMachine:
                 )
         state.alerts = deepcopy(history)
 
-    def ingest(self, key: str, incoming: list[NormalizedEvent]) -> None:
+    def ingest(self, key: str | SessionIdentity, incoming: list[NormalizedEvent]) -> None:
         bucket = self.events[key]
         for event in sorted(incoming, key=lambda item: (item.timestamp, item.source_id)):
             dedupe_key = event.source_id or (
@@ -489,11 +502,11 @@ class SessionStateMachine:
         usage = payload.get("total_token_usage") or payload.get("total_usage") or payload
         if not isinstance(usage, dict):
             return None, None
-        used = usage.get("total_tokens") or usage.get("input_tokens")
-        limit = payload.get("model_context_window") or payload.get("context_window")
+        used_value = usage.get("total_tokens") or usage.get("input_tokens")
+        limit_value = payload.get("model_context_window") or payload.get("context_window")
         return (
-            int(used) if isinstance(used, (int, float)) else None,
-            int(limit) if isinstance(limit, (int, float)) else None,
+            int(used_value) if isinstance(used_value, (int, float)) else None,
+            int(limit_value) if isinstance(limit_value, (int, float)) else None,
         )
 
     @staticmethod
@@ -1288,7 +1301,7 @@ class SessionStateMachine:
 
     def derive(
         self,
-        key: str,
+        key: str | SessionIdentity,
         process: ProcessInfo,
         network: NetworkEvidence,
         now: float | None = None,
@@ -1316,6 +1329,7 @@ class SessionStateMachine:
             process,
             network=network,
             events=visible,
+            identity=key if isinstance(key, SessionIdentity) else None,
         )
         if not all_events:
             state.observation = self._finalize_observation(
@@ -1455,6 +1469,7 @@ class SessionStateMachine:
         if network.state.value == "SUSPECT" and state.recovery == RecoveryState.NONE:
             state.recovery = RecoveryState.SUSPECT
 
+        phase_event: NormalizedEvent | None
         if state.process_exited and process_exit:
             phase_event = process_exit
         elif task_terminal and not current_turn:
@@ -1561,7 +1576,11 @@ class SessionStateMachine:
             (pulse.last_network_progress_at, "network", "TCP RX/TX/ACK 有进展"),
             (pulse.last_log_activity_at, "log", "structured log 有新记录"),
         ]
-        available = [item for item in evidence if item[0] is not None]
+        available: list[tuple[float, str, str]] = [
+            (float(observed_at), source, detail)
+            for observed_at, source, detail in evidence
+            if observed_at is not None
+        ]
         latest = max(available, key=lambda item: float(item[0])) if available else None
         return replace(
             pulse,
@@ -1649,7 +1668,7 @@ class SessionStateMachine:
                 "info",
                 Provenance("state-machine", Confidence.MEDIUM, derived=True),
             )
-        thresholds = {
+        thresholds: dict[LifecycleState, float] = {
             LifecycleState.STARTING: 60,
             LifecycleState.WAITING_RESPONSE: 90,
             LifecycleState.GENERATING: 120,
@@ -1661,7 +1680,7 @@ class SessionStateMachine:
             threshold = max(threshold, pulse.silence_p95_seconds * 1.5)
         phase_age = max(0.0, now - (state.phase_since or semantic_at))
         if phase_age >= threshold and pulse.quiet_full_samples >= 2:
-            severe_thresholds = {
+            severe_thresholds: dict[LifecycleState, float] = {
                 LifecycleState.STARTING: 180,
                 LifecycleState.WAITING_RESPONSE: 180,
                 LifecycleState.GENERATING: 300,
@@ -1767,7 +1786,9 @@ class SessionStateMachine:
             state.alert_reason = reason
             state.alert_age_seconds = age
 
-    def prune(self, active_keys: set[str], now: float | None = None) -> None:
+    def prune(
+        self, active_keys: set[str | SessionIdentity], now: float | None = None
+    ) -> None:
         now = time.time() if now is None else now
         expiry = now - self.lookback_seconds
         for key in list(self.events):

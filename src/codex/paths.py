@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +11,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 only.
     import tomli as tomllib
 
-from models import CodexPaths, ProcessIdentity
+from models import CodexPaths, InstanceIdentity, ProcessIdentity
 
 
 @dataclass(frozen=True)
@@ -20,6 +19,14 @@ class ResolvedInstance:
     instance_id: str
     paths: CodexPaths
     method: str
+
+    @property
+    def identity(self) -> InstanceIdentity:
+        return InstanceIdentity(
+            self.paths.codex_home,
+            self.paths.sqlite_home,
+            self.instance_id,
+        )
 
 
 class ProcReader:
@@ -107,8 +114,7 @@ def _configured_sqlite_home(codex_home: Path, cwd: Path) -> Path | None:
 
 
 def instance_id(codex_home: Path, sqlite_home: Path) -> str:
-    payload = f"{codex_home}\0{sqlite_home}".encode()
-    return hashlib.blake2s(payload, digest_size=8).hexdigest()
+    return InstanceIdentity(codex_home, sqlite_home).storage_key
 
 
 def open_rollout_paths(pid: int, sessions_dir: Path, proc: ProcReader) -> list[Path]:

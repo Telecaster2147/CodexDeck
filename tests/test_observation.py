@@ -186,6 +186,47 @@ class ProcessActivityTests(unittest.TestCase):
 
             self.assertEqual(snapshot.children[0].command, "/bin/bash -c python worker.py")
 
+    def test_child_command_keeps_command_after_large_sandbox_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "uptime").write_text("1000.0 0.0\n")
+            _write_proc(
+                root,
+                100,
+                ppid=1,
+                start=1000,
+                utime=0,
+                stime=0,
+                io_bytes=0,
+                children="200",
+            )
+            sandbox_setup = " ".join(
+                f"restore-variable-{index}" for index in range(700)
+            )
+            background_command = "python worker.py --watch"
+            cmdline = (
+                b"codex-linux-sandbox\0/bin/bash\0-c\0"
+                + sandbox_setup.encode()
+                + b"\0/bin/bash\0-c\0"
+                + background_command.encode()
+                + b"\0"
+            )
+            self.assertGreater(len(cmdline), 8 * 1024)
+            _write_proc(
+                root,
+                200,
+                ppid=100,
+                start=2000,
+                utime=0,
+                stime=0,
+                io_bytes=0,
+                cmdline=cmdline,
+            )
+
+            snapshot = ProcessActivityCollector(root).snapshot(ProcessIdentity(100, 1000))
+
+            self.assertIn(background_command, snapshot.children[0].command)
+
     def test_children_started_by_non_leader_thread_are_included(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

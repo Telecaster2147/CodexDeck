@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime
 
 from diagnostics import CollectorTracker
@@ -53,19 +54,21 @@ class SnapshotPublisher:
             collector_health=self.collectors.snapshot(),
         )
         if self.history is not None:
-            self._record_history(snapshot, started, diagnostics)
+            snapshot = self._record_history(snapshot, started)
         return snapshot
 
     def _record_history(
         self,
         snapshot: MonitorSnapshot,
         started: float,
-        diagnostics: list[str],
-    ) -> None:
+    ) -> MonitorSnapshot:
         history_started = time.monotonic()
+        instances = snapshot.instances
+        diagnostics = snapshot.diagnostics
         try:
             self.history.record_snapshot(snapshot)
             history_now = datetime.fromisoformat(snapshot.generated_at).timestamp()
+            refreshed_instances: list[InstanceSnapshot] = []
             for instance in snapshot.instances:
                 stats_bucket = int(history_now // 10)
                 cached = self.history_windows_cache.get(instance.instance_id)
@@ -77,7 +80,8 @@ class SnapshotPublisher:
                     self.history_windows_cache[instance.instance_id] = (stats_bucket, stats)
                 else:
                     stats = cached[1]
-                instance.history_windows = list(stats)
+                refreshed_instances.append(replace(instance, history_windows=list(stats)))
+            instances = refreshed_instances
             active_instances = {instance.instance_id for instance in snapshot.instances}
             self.history_windows_cache = {
                 key: value
@@ -87,6 +91,11 @@ class SnapshotPublisher:
             self.collectors.record("history", history_started)
         except Exception as exc:
             self.collectors.record("history", history_started, exc)
-            diagnostics.append(f"历史库写入失败：{exc}")
-        snapshot.collection_duration_seconds = time.monotonic() - started
-        snapshot.collector_health = self.collectors.snapshot()
+            diagnostics = [*diagnostics, f"历史库写入失败：{exc}"]
+        return replace(
+            snapshot,
+            instances=instances,
+            diagnostics=diagnostics,
+            collection_duration_seconds=time.monotonic() - started,
+            collector_health=self.collectors.snapshot(),
+        )

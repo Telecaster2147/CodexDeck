@@ -8,20 +8,33 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.events import normalize_log, normalize_rollout_record  # noqa: E402
+from codex.events import (  # noqa: E402
+    normalize_attention_record,
+    normalize_collaboration_record,
+    normalize_compaction_record,
+    normalize_log,
+    normalize_response_item,
+    normalize_rollout_record,
+    normalize_tool_record,
+)
 from codex.state_store import LogRecord  # noqa: E402
 from models import (  # noqa: E402
     AlertStatus,
     AttentionState,
     Confidence,
+    InstanceIdentity,
     LifecycleState,
     NetworkEvidence,
     NetworkState,
     NormalizedEvent,
     ProcessIdentity,
     ProcessInfo,
+    RolloutIdentity,
     RecoveryState,
+    SessionIdentity,
     SocketInfo,
+    SocketFlowIdentity,
+    TerminalIdentity,
 )
 from network.classifier import assess_process_network  # noqa: E402
 from network.sockets import parse_ss_output  # noqa: E402
@@ -57,7 +70,92 @@ def event(timestamp: float, kind: str, source_id: str, detail: str = "") -> Norm
     )
 
 
+class IdentityValueTests(unittest.TestCase):
+    def test_composite_identities_keep_independent_domains_distinct(self) -> None:
+        instance_a = InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A"))
+        instance_b = InstanceIdentity(Path("/CODEX_HOME_B"), Path("/SQLITE_HOME_B"))
+        session_a = SessionIdentity(instance_a, "SESSION_ID")
+        session_b = SessionIdentity(instance_b, "SESSION_ID")
+
+        self.assertNotEqual(instance_a, instance_b)
+        self.assertNotEqual(session_a, session_b)
+        self.assertNotEqual(session_a.storage_key, session_b.storage_key)
+        self.assertEqual(session_a.display_key, "SESSION_")
+        self.assertNotEqual(ProcessIdentity(42, 100), ProcessIdentity(42, 101))
+        self.assertNotEqual(
+            RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10),
+            RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 11),
+        )
+        self.assertNotEqual(
+            TerminalIdentity(session_a, "PROCESS_ID", "CALL_ID", 1),
+            TerminalIdentity(session_a, "PROCESS_ID", "CALL_ID", 2),
+        )
+        self.assertNotEqual(
+            SocketFlowIdentity("127.0.0.1:1", "192.0.2.1:443", 42, 3),
+            SocketFlowIdentity("127.0.0.1:1", "192.0.2.1:443", 42, 4),
+        )
+
+
 class EventNormalizationTests(unittest.TestCase):
+    def test_rollout_handlers_own_their_record_families(self) -> None:
+        cases = (
+            (
+                "attention",
+                normalize_attention_record(1.0, "request_user_input", {}, "source", "turn"),
+                "ACTION_REQUIRED",
+            ),
+            (
+                "tool",
+                normalize_tool_record(
+                    1.0,
+                    "exec_command_begin",
+                    {"type": "exec_command_begin", "command": "true"},
+                    "source",
+                    "turn",
+                ),
+                "TOOL_RUNNING",
+            ),
+            (
+                "collaboration",
+                normalize_collaboration_record(
+                    1.0,
+                    "collab_agent_spawn_end",
+                    {"type": "collab_agent_spawn_end", "thread_id": "child"},
+                    "source",
+                    "turn",
+                ),
+                "AGENT_SPAWNED",
+            ),
+            (
+                "response",
+                normalize_response_item(
+                    1.0,
+                    "agent_message",
+                    {"type": "agent_message", "message": "progress"},
+                    "source",
+                    "turn",
+                ),
+                "MODEL_PROGRESS",
+            ),
+            (
+                "compaction",
+                normalize_compaction_record(
+                    1.0,
+                    "event_msg",
+                    "item_started",
+                    {"type": "item_started", "item": {"type": "compaction"}},
+                    "source",
+                    "turn",
+                ),
+                "COMPACTING",
+            ),
+        )
+
+        for name, events, expected_kind in cases:
+            with self.subTest(name=name):
+                self.assertIsNotNone(events)
+                self.assertEqual(events[0].kind, expected_kind)  # type: ignore[index]
+
     def test_action_required_protocol_events_are_typed(self) -> None:
         fixtures = {
             "exec_approval_request": AttentionState.APPROVAL,

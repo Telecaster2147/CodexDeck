@@ -132,6 +132,7 @@ class ProcessDiscovery:
                     process_group_id=process_group_id,
                     foreground_process_group_id=foreground_process_group_id,
                     terminal=terminal,
+                    instance_identity=resolved.identity,
                 )
             )
         active = {process.stable_key for process in processes}
@@ -157,6 +158,7 @@ class ProcessDiscovery:
                 relative = relatives[0]
                 process.instance_id = relative.instance_id
                 process.discovery_method = "process-family"
+                process.instance_identity = relative.instance_identity
         used_instances = {process.instance_id for process in processes}
         instances = {key: value for key, value in instances.items() if key in used_instances}
         return DiscoveryResult(sorted(processes, key=lambda item: item.pid), instances)
