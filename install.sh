@@ -19,7 +19,7 @@ Install CodexDeck into an isolated user-owned virtual environment.
 Usage: ./install.sh [options]
 
 Options:
-  --version VERSION       Install a specific GitHub release tag (for example 0.1.0).
+  --version VERSION       Install a specific GitHub release tag (for example 0.1.1).
   --wheel PATH_OR_URL     Install a local or remote wheel instead of a GitHub release.
   --checksum PATH_OR_URL  SHA-256 file for --wheel; defaults to PATH_OR_URL.sha256.
   --install-root PATH     Installation data directory.
@@ -93,6 +93,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(uname -s)" = "Linux" ] || fail "Linux is required"
+
+absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+    esac
+}
+
+INSTALL_ROOT=$(absolute_path "$INSTALL_ROOT")
+BIN_DIR=$(absolute_path "$BIN_DIR")
 
 find_python() {
     for candidate in python3 python; do

@@ -9,6 +9,8 @@ import tempfile
 import unittest
 import zipfile
 
+from config import VERSION
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,16 +57,17 @@ class InstallScriptTests(unittest.TestCase):
 
         self.assertIn("## 许可证", readme)
         self.assertIn("codexdeck-VERSION-py3-none-any.whl.sha256", readme)
+        self.assertNotIn("sha256sum dist/codexdeck-VERSION", readme)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
 
-    def test_local_install_keeps_venv_entrypoint_path_and_uninstalls(self) -> None:
+    def test_relative_install_paths_keep_venv_entrypoint_and_uninstall(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             home = root / "home"
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            wheel = root / "codexdeck-0.1.0-py3-none-any.whl"
+            wheel = root / f"codexdeck-{VERSION}-py3-none-any.whl"
             wheel.write_bytes(b"fixture wheel")
             checksum = root / f"{wheel.name}.sha256"
             checksum.write_text(
@@ -92,10 +95,10 @@ if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
     exit 0
 fi
 case "$1" in
-    */codexdeck) printf 'codexdeck 0.1.0\n'; exit 0 ;;
+    */codexdeck) printf 'codexdeck VERSION_PLACEHOLDER\n'; exit 0 ;;
 esac
 exit 1
-""",
+""".replace("VERSION_PLACEHOLDER", VERSION),
                 encoding="ascii",
             )
             fake_python.chmod(0o755)
@@ -114,15 +117,20 @@ exit 1
                     str(wheel),
                     "--checksum",
                     str(checksum),
+                    "--install-root",
+                    "install-data",
+                    "--bin-dir",
+                    "command-bin",
                 ],
                 check=False,
                 capture_output=True,
                 text=True,
                 env=environment,
+                cwd=root,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
 
-            command = home / ".local" / "bin" / "codexdeck"
+            command = root / "command-bin" / "codexdeck"
             version = subprocess.run(
                 [str(command), "--version"],
                 check=False,
@@ -131,21 +139,28 @@ exit 1
                 env=environment,
             )
             self.assertEqual(version.returncode, 0, version.stderr)
-            self.assertEqual(version.stdout.strip(), "codexdeck 0.1.0")
+            self.assertEqual(version.stdout.strip(), f"codexdeck {VERSION}")
 
             uninstall = subprocess.run(
-                [str(PROJECT_ROOT / "uninstall.sh")],
+                [
+                    str(PROJECT_ROOT / "uninstall.sh"),
+                    "--install-root",
+                    "install-data",
+                    "--bin-dir",
+                    "command-bin",
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
                 env=environment,
+                cwd=root,
             )
             self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
             self.assertFalse(command.exists())
 
     def test_built_artifacts_include_license_and_source_installers(self) -> None:
-        wheel = PROJECT_ROOT / "dist" / "codexdeck-0.1.0-py3-none-any.whl"
-        source = PROJECT_ROOT / "dist" / "codexdeck-0.1.0.tar.gz"
+        wheel = PROJECT_ROOT / "dist" / f"codexdeck-{VERSION}-py3-none-any.whl"
+        source = PROJECT_ROOT / "dist" / f"codexdeck-{VERSION}.tar.gz"
         if not wheel.is_file() or not source.is_file():
             self.skipTest("build artifacts are not present")
 

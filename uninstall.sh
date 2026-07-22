@@ -52,6 +52,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+    esac
+}
+
+INSTALL_ROOT=$(absolute_path "$INSTALL_ROOT")
+BIN_DIR=$(absolute_path "$BIN_DIR")
+
 COMMAND_LINK="$BIN_DIR/codexdeck"
 if [ -L "$COMMAND_LINK" ]; then
     LINK_TARGET=$(readlink "$COMMAND_LINK")
