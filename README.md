@@ -4,7 +4,7 @@
 
 ### 所有本地 Codex 会话，一块准确、只读的运行态观测控制台
 
-[![Version](https://img.shields.io/badge/version-0.1.1-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
+[![Version](https://img.shields.io/badge/version-0.2.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Textual](https://img.shields.io/badge/Textual-8.2.8-111827?style=flat-square)](https://textual.textualize.io/)
 [![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square&logo=linux&logoColor=111827)](#运行要求)
@@ -52,7 +52,7 @@ Codex CLI 擅长完成单个会话中的交互，但当多个工作区、后台�
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.1.1/install.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.2.0/install.sh \
   -o /tmp/codexdeck-install.sh
 
 less /tmp/codexdeck-install.sh
@@ -71,7 +71,7 @@ codexdeck
 如 `~/.local/bin` 尚未位于 `PATH`，安装器会打印需要添加的目录。固定安装某个版本：
 
 ```bash
-sh /tmp/codexdeck-install.sh --version 0.1.1
+sh /tmp/codexdeck-install.sh --version 0.2.0
 ```
 
 升级时重新运行安装器即可。旧版本只有在新环境安装并通过 `codexdeck --version` 验证后才会被替换。
@@ -80,7 +80,7 @@ sh /tmp/codexdeck-install.sh --version 0.1.1
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.1.1/uninstall.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.2.0/uninstall.sh \
   -o /tmp/codexdeck-uninstall.sh
 
 less /tmp/codexdeck-uninstall.sh
@@ -115,8 +115,8 @@ codexdeck
 
 ```bash
 ./install.sh \
-  --wheel dist/codexdeck-0.1.1-py3-none-any.whl \
-  --checksum dist/codexdeck-0.1.1-py3-none-any.whl.sha256
+  --wheel dist/codexdeck-0.2.0-py3-none-any.whl \
+  --checksum dist/codexdeck-0.2.0-py3-none-any.whl.sha256
 ```
 
 当 stdin 与 stdout 都连接到 TTY 时，CodexDeck 自动进入 Textual 界面；管道或文件环境自动输出文本。

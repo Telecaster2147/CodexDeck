@@ -19,7 +19,7 @@ Install CodexDeck into an isolated user-owned virtual environment.
 Usage: ./install.sh [options]
 
 Options:
-  --version VERSION       Install a specific GitHub release tag (for example 0.1.1).
+  --version VERSION       Install a specific GitHub release tag (for example 0.2.0).
   --wheel PATH_OR_URL     Install a local or remote wheel instead of a GitHub release.
   --checksum PATH_OR_URL  SHA-256 file for --wheel; defaults to PATH_OR_URL.sha256.
   --install-root PATH     Installation data directory.
