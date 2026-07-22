@@ -229,6 +229,7 @@ class ExportTests(unittest.TestCase):
                 "export_schema_version",
                 "export_type",
                 "generated_at",
+                "incident_summary",
                 "session",
                 "turns",
                 "compactions",
@@ -244,7 +245,16 @@ class ExportTests(unittest.TestCase):
         self.assertIn("observation", payload["session"])
         self.assertIn("silence", payload["session"])
         self.assertIn("compactions", payload)
-        self.assertEqual(payload["export_schema_version"], 1)
+        self.assertEqual(payload["export_schema_version"], 2)
+        self.assertEqual(payload["incident_summary"]["first_abnormal_at"], 2)
+        self.assertFalse(payload["incident_summary"]["recovered"])
+        self.assertEqual(
+            payload["incident_summary"]["last_reliable_evidence"]["event"],
+            "TURN_FAILED",
+        )
+        self.assertEqual(
+            payload["incident_summary"]["current_axes"]["network"], "STALLED"
+        )
         self.assertEqual(payload["retention"]["event_count"], 3)
         self.assertEqual(len(payload["events"]), 3)
         self.assertEqual(payload["events"][0]["provenance"]["source"], "test")
@@ -272,6 +282,7 @@ class ExportTests(unittest.TestCase):
         )
         self.assertEqual(payload["incident_count"], 1)
         self.assertEqual(payload["incidents"][0]["alerts"][0]["status"], "OPENED")
+        self.assertIn("incident_summary", payload["incidents"][0])
 
 
 if __name__ == "__main__":

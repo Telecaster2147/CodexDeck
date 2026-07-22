@@ -12,12 +12,40 @@ from models import AlertStatus, NormalizedEvent, SessionHealth, json_value
 from utils import redact_sensitive, strip_transcript_bodies
 
 
-EXPORT_SCHEMA_VERSION = 1
+EXPORT_SCHEMA_VERSION = 2
 _SENSITIVE_KEY = re.compile(
     r"(?i)(?:^|_)(?:authorization|cookie|api_?key|secret|password|passwd|"
     r"access_token|refresh_token|auth_token|bearer_token)(?:$|_)"
 )
 _RECOVERY_KINDS = {"RECONNECTING", "TRANSPORT_FALLBACK", "RECOVERED"}
+_ABNORMAL_KINDS = {
+    "ACTION_REQUIRED",
+    "OPERATION_ERROR",
+    "SUBAGENT_ERROR",
+    "TURN_FAILED",
+    "WARNING",
+    "SUSPECT",
+    "RECONNECTING",
+    "TRANSPORT_FALLBACK",
+    "UNPARSED_PAYLOAD",
+}
+_AXIS_BY_EVENT = {
+    "ACTION_REQUIRED": "attention",
+    "ACTION_RESOLVED": "attention",
+    "RECONNECTING": "recovery",
+    "TRANSPORT_FALLBACK": "recovery",
+    "RECOVERED": "recovery",
+    "REQUEST_SENT": "lifecycle",
+    "RESPONSE_STARTED": "lifecycle",
+    "MODEL_PROGRESS": "lifecycle",
+    "TOOL_RUNNING": "lifecycle",
+    "TOOL_COMPLETED": "lifecycle",
+    "COMPACTING": "lifecycle",
+    "COMPACT_COMPLETED": "lifecycle",
+    "TURN_COMPLETED": "lifecycle",
+    "TURN_FAILED": "lifecycle",
+    "TURN_ABORTED": "lifecycle",
+}
 
 
 def _generated_at(value: str | None) -> str:
@@ -44,6 +72,94 @@ def _event_value(event: NormalizedEvent) -> dict[str, Any]:
     return value
 
 
+def incident_summary(
+    session: SessionHealth,
+    retained_events: Sequence[NormalizedEvent],
+) -> dict[str, Any]:
+    """Project a bounded, transcript-free explanation of a session incident."""
+
+    events = sorted(retained_events, key=lambda event: event.timestamp)
+    abnormal = [event for event in events if event.kind.upper() in _ABNORMAL_KINDS]
+    reliable = [
+        event
+        for event in events
+        if event.provenance.complete and event.provenance.source
+    ]
+    last_problem_at = abnormal[-1].timestamp if abnormal else None
+    recovered_events = [
+        event
+        for event in events
+        if event.kind.upper() == "RECOVERED"
+        and (last_problem_at is None or event.timestamp >= last_problem_at)
+    ]
+    recovered_at = recovered_events[-1].timestamp if recovered_events else None
+
+    if session.attention_request is not None:
+        what_happened = session.attention_request.summary or session.attention.value
+    elif session.current_failure is not None:
+        what_happened = session.current_failure.message or session.current_failure.category
+    elif session.network.reason:
+        what_happened = session.network.reason
+    elif session.alert:
+        what_happened = session.alert
+    elif abnormal:
+        what_happened = abnormal[-1].summary or abnormal[-1].kind
+    else:
+        what_happened = session.phase
+
+    last_reliable = reliable[-1] if reliable else None
+    blind_spots: list[str] = []
+    if session.observation.collector_stale:
+        blind_spots.append(
+            session.observation.collector_stale_reason or "collector evidence is stale"
+        )
+    if session.silence.state.value == "OBSERVER_BLIND":
+        blind_spots.append(session.silence.reason or "observer blind spot")
+    if any(not finding.provenance.complete for finding in session.diagnosis):
+        blind_spots.append("one or more diagnosis findings use incomplete evidence")
+
+    axis_changes = [
+        {
+            "timestamp": event.timestamp,
+            "axis": _AXIS_BY_EVENT[event.kind.upper()],
+            "event": event.kind,
+            "summary": event.summary,
+            "source": event.source,
+        }
+        for event in events
+        if event.kind.upper() in _AXIS_BY_EVENT
+    ][-32:]
+
+    return {
+        "what_happened": what_happened,
+        "first_abnormal_at": abnormal[0].timestamp if abnormal else None,
+        "last_reliable_evidence": (
+            {
+                "timestamp": last_reliable.timestamp,
+                "event": last_reliable.kind,
+                "summary": last_reliable.summary,
+                "source": last_reliable.source,
+                "confidence": last_reliable.provenance.confidence,
+                "complete": last_reliable.provenance.complete,
+            }
+            if last_reliable is not None
+            else None
+        ),
+        "recovered": recovered_at is not None,
+        "recovered_at": recovered_at,
+        "requires_interaction": session.attention_request is not None,
+        "current_axes": {
+            "lifecycle": session.lifecycle,
+            "recovery": session.recovery,
+            "attention": session.attention,
+            "network": session.network.state,
+            "silence": session.silence.state,
+        },
+        "axis_changes": axis_changes,
+        "blind_spots": blind_spots,
+    }
+
+
 def session_export(
     session: SessionHealth,
     retained_events: Sequence[NormalizedEvent],
@@ -63,6 +179,7 @@ def session_export(
         "export_schema_version": EXPORT_SCHEMA_VERSION,
         "export_type": "session_review",
         "generated_at": _generated_at(generated_at),
+        "incident_summary": incident_summary(session, events),
         "session": {
             "key": session.key,
             "instance_id": session.instance_id,
@@ -140,6 +257,7 @@ def current_incidents_export(
                 "network": session.network,
                 "alerts": active_alerts,
                 "current_failure": session.current_failure,
+                "incident_summary": incident_summary(session, session.events),
             }
         )
     payload = {

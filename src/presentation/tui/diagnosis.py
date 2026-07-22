@@ -42,13 +42,15 @@ def _diagnosis_renderable(
                 else "未知"
             )
             mode = "推导" if provenance.derived else "直接"
+            completeness = "完整" if provenance.complete else "不完整"
             conclusion.append(
                 f"\n证据属性  {mode} · 置信度 {confidence_label(provenance.confidence)}"
-                f" · 来源 {provenance.source or '未知'} · 新鲜度 {freshness}",
+                f" · 来源 {provenance.source or '未知'} · 新鲜度 {freshness}"
+                f" · 完整度 {completeness}",
                 style="#94a3b8",
             )
             for evidence in finding.evidence[:3]:
-                conclusion.append(f"\n  • {evidence}", style="#cbd5e1")
+                conclusion.append(f"\n主要证据  {evidence}", style="#cbd5e1")
             if finding.action:
                 conclusion.append(f"\n建议  {finding.action}", style="#fbbf24")
             blocks.append(conclusion)

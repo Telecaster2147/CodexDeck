@@ -60,6 +60,7 @@ from presentation.tui.textual_app import (  # noqa: E402
     startup_renderable,
     timeline_entries,
 )
+from presentation.tui.sampling import SamplingCoordinator  # noqa: E402
 from textual.css.query import NoMatches  # noqa: E402
 from textual.widgets import (  # noqa: E402
     Collapsible,
@@ -79,6 +80,26 @@ def render_plain(renderable: object, width: int = 120) -> str:
     output = io.StringIO()
     Console(width=width, file=output, color_system=None).print(renderable)
     return output.getvalue()
+
+
+class SamplingCoordinatorTests(unittest.TestCase):
+    def test_coordinates_fast_full_and_manual_samples(self) -> None:
+        coordinator = SamplingCoordinator.starting_at(2.0, 10.0)
+
+        self.assertFalse(coordinator.begin_due(10.1))
+        self.assertIsNone(coordinator.begin_due(12.0))
+        coordinator.finish()
+
+        self.assertTrue(coordinator.begin_due(12.0))
+        self.assertEqual(coordinator.next_full_at, 14.0)
+        coordinator.finish()
+
+        self.assertTrue(coordinator.begin_manual(13.0))
+        self.assertEqual(coordinator.next_full_at, 15.0)
+        coordinator.finish()
+
+        self.assertTrue(coordinator.begin_initial())
+        self.assertFalse(coordinator.begin_initial())
 
 
 def make_snapshot(count: int = 3) -> MonitorSnapshot:
@@ -362,15 +383,17 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 "ATTENTION · Approve command",
                 str(sessions[0].query_one(Static).render()),
             )
+            self.assertIn("ATTENTION 1", str(app.query_one("#app-header").render()))
             app.selected_session = snapshot.sessions[0]
             await pilot.press("]")
             self.assertIs(app.selected_session, waiting)
+            self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "diagnosis-tab")
             selected = app.selected_session
             await pilot.press("tab")
             self.assertIs(app.selected_session, selected)
             self.assertIsNot(app.focused, app.query_one("#session-list", ListView))
 
-    async def test_new_attention_emits_cross_session_notification(self) -> None:
+    async def test_attention_transition_notifications_follow_preference(self) -> None:
         snapshot = make_snapshot(1)
         app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
         notices: list[tuple[str, dict[str, object]]] = []
@@ -387,32 +410,21 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             )
             app._apply_snapshot(refreshed)
             await pilot.pause()
+            self.assertEqual(notices[0][0], "Choose an option")
+            self.assertIn("ACTION REQUIRED", str(notices[0][1]["title"]))
 
-        self.assertEqual(notices[0][0], "Choose an option")
-        self.assertIn("ACTION REQUIRED", str(notices[0][1]["title"]))
-
-    async def test_disabled_notifications_suppress_transition_notice(self) -> None:
-        snapshot = make_snapshot(1)
-        app = CodexDeckApp(
-            FakeEngine(snapshot),
-            snapshot,
-            sampling=False,
-            preferences=CodexDeckPreferences(notifications=False),
-        )
-        notices: list[tuple[str, dict[str, object]]] = []
-
-        async with app.run_test(size=(120, 24)) as pilot:
-            app.notify = lambda message, **kwargs: notices.append((message, kwargs))  # type: ignore[method-assign]
-            refreshed = make_snapshot(1)
-            refreshed.sessions[0].attention_request = AttentionRequest(
+            app.notifications_enabled = False
+            resolved = make_snapshot(1)
+            app._apply_snapshot(resolved)
+            suppressed = make_snapshot(1)
+            suppressed.sessions[0].attention_request = AttentionRequest(
                 AttentionState.USER_INPUT,
                 summary="等待用户操作",
-                detail="Choose an option",
+                detail="Choose another option",
             )
-            app._apply_snapshot(refreshed)
+            app._apply_snapshot(suppressed)
             await pilot.pause()
-
-        self.assertEqual(notices, [])
+            self.assertEqual(len(notices), 1)
 
     def test_unparsed_trace_shows_identity_without_raw_object(self) -> None:
         line = _timeline_line(
@@ -512,6 +524,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("诊断结论", rendered)
         self.assertIn("证据属性  推导", rendered)
         self.assertIn("置信度 中", rendered)
+        self.assertIn("完整度 完整", rendered)
         self.assertIn("数据质量", rendered)
         self.assertNotIn("自动 compact 边界", rendered)
         self.assertNotIn("config.toml", rendered)
@@ -839,7 +852,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.full_samples, 0)
         self.assertEqual(engine.event_samples, 0)
 
-    async def test_clock_tick_only_updates_existing_widgets_and_timeline_age(self) -> None:
+    async def test_clock_tick_updates_ages_without_rebuilding_widgets_or_logs(self) -> None:
         snapshot = make_snapshot(1)
         snapshot.sessions[0].events = [NormalizedEvent(10, "MODEL_PROGRESS", "progress")]
         engine = FakeEngine(snapshot)
@@ -858,16 +871,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(log.lines), line_count)
             self.assertEqual(engine.full_samples, 0)
             self.assertEqual(engine.event_samples, 0)
-
-    async def test_clock_tick_does_not_rebuild_inspector_logs(self) -> None:
-        snapshot = make_snapshot(1)
-        snapshot.sessions[0].events = [NormalizedEvent(10, "MODEL_PROGRESS", "progress")]
-        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause()
             inspector = app.query_one(SessionInspector)
-            log = app.query_one("#activity-panel", RichLog)
             with (
                 patch.object(inspector, "show_session", wraps=inspector.show_session) as show,
                 patch.object(log, "clear", wraps=log.clear) as clear,
@@ -880,7 +884,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             clear.assert_not_called()
             write.assert_not_called()
 
-    async def test_navigation_rebuild_ignores_unmounted_widgets(self) -> None:
+    async def test_navigation_rebuild_handles_unmounted_and_concurrent_requests(self) -> None:
         snapshot = make_snapshot(1)
         app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
@@ -889,6 +893,9 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 await app._rebuild_navigation()
 
             self.assertFalse(app.rebuilding)
+            app.rebuilding = True
+            await app._rebuild_navigation()
+            self.assertTrue(app.navigation_dirty)
 
     async def test_unchanged_fast_samples_do_not_update_widgets(self) -> None:
         snapshot = make_snapshot(1)
@@ -1117,7 +1124,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("gpt-refreshed", str(runtime.render()))
             self.assertEqual(tuple(app.query(NavigationItem)), previous_navigation)
 
-    async def test_sample_completed_message_applies_worker_result(self) -> None:
+    async def test_sample_result_and_collector_error_follow_publication_lifecycle(self) -> None:
         snapshot = make_snapshot(1)
         app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
@@ -1132,12 +1139,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 "gpt-worker-result",
                 str(app.query_one("#health-strip", Static).render()),
             )
-
-    async def test_collector_error_survives_clock_tick_until_successful_sample(self) -> None:
-        snapshot = make_snapshot(1)
-        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
-
-        async with app.run_test(size=(120, 24)) as pilot:
             app._show_collector_error("socket probe failed")
             await app._clock_tick()
             self.assertIn(
@@ -1151,15 +1152,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 "COLLECTOR ERROR",
                 str(app.query_one("#status-line", Static).render()),
             )
-
-    async def test_navigation_rebuild_coalesces_concurrent_requests(self) -> None:
-        snapshot = make_snapshot(1)
-        app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
-
-        async with app.run_test(size=(120, 24)):
-            app.rebuilding = True
-            await app._rebuild_navigation()
-            self.assertTrue(app.navigation_dirty)
 
     def test_session_status_and_markers_preserve_live_phase(self) -> None:
         session = make_snapshot(1).sessions[0]

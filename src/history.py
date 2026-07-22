@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -166,7 +167,7 @@ class HistoryStore:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            INSERT INTO history_meta(key, value) VALUES ('schema_version', '3')
+            INSERT INTO history_meta(key, value) VALUES ('schema_version', '4')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 
             CREATE TABLE IF NOT EXISTS events (
@@ -273,6 +274,17 @@ class HistoryStore:
             );
             CREATE INDEX IF NOT EXISTS compact_metrics_time_idx
                 ON compact_metrics(timestamp);
+
+            CREATE TABLE IF NOT EXISTS operational_durations (
+                bucket_start INTEGER NOT NULL,
+                instance_id TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                seconds_sum REAL NOT NULL,
+                occurrences INTEGER NOT NULL,
+                PRIMARY KEY(bucket_start, instance_id, metric)
+            );
+            CREATE INDEX IF NOT EXISTS operational_durations_time_idx
+                ON operational_durations(bucket_start);
             """
         )
         self.connection.commit()
@@ -595,6 +607,51 @@ class HistoryStore:
             ),
         )
 
+    def _record_operational_durations(
+        self,
+        snapshot: MonitorSnapshot,
+        instance_index: int,
+        bucket: int,
+    ) -> None:
+        instance = snapshot.instances[instance_index]
+        metrics: dict[str, tuple[float, int]] = defaultdict(lambda: (0.0, 0))
+
+        def add(metric: str, seconds: float, occurrences: int = 1) -> None:
+            previous_seconds, previous_occurrences = metrics[metric]
+            metrics[metric] = (
+                previous_seconds + seconds,
+                previous_occurrences + occurrences,
+            )
+
+        for session in instance.sessions:
+            add(f"phase:{session.lifecycle.value}", snapshot.interval_seconds)
+            if session.silence.state.value == "WAITING_UPSTREAM":
+                add("waiting_upstream", snapshot.interval_seconds)
+            if session.attention_request is not None:
+                add("attention_wait", snapshot.interval_seconds)
+            if session.silence.state.value == "OBSERVER_BLIND":
+                add("observer_blind", snapshot.interval_seconds)
+
+        protocol_degraded = bool(instance.unknown_event_types) or any(
+            item.error or item.stale_age_seconds is not None
+            for item in instance.collector_health
+            if item.name.startswith(("rollout", "tui_session_log", "hook_events"))
+        )
+        if protocol_degraded:
+            add("protocol_degraded", snapshot.interval_seconds)
+
+        for metric, (seconds_sum, occurrences) in metrics.items():
+            self.connection.execute(
+                """
+                INSERT INTO operational_durations(
+                    bucket_start, instance_id, metric, seconds_sum, occurrences
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(bucket_start, instance_id, metric) DO UPDATE SET
+                    seconds_sum = seconds_sum + excluded.seconds_sum,
+                    occurrences = occurrences + excluded.occurrences
+                """,
+                (bucket, instance.instance_id, metric, seconds_sum, occurrences),
+            )
     def record_snapshot(self, snapshot: MonitorSnapshot) -> HistoryWriteResult:
         """Record important events and bounded aggregate buckets from a snapshot."""
 
@@ -623,6 +680,7 @@ class HistoryStore:
                 self._record_compact_metrics(session, now, active_compact_keys)
             for index in range(len(snapshot.instances)):
                 self._record_instance_bucket(snapshot, index, instance_bucket)
+                self._record_operational_durations(snapshot, index, session_bucket)
         self._turn_signatures = {
             key: value
             for key, value in self._turn_signatures.items()
@@ -691,6 +749,21 @@ class HistoryStore:
                 f"WHERE timestamp >= ?{instance_clause}",
                 parameters,
             ).fetchall()
+            duration_rows = self.connection.execute(
+                "SELECT metric, SUM(seconds_sum), SUM(occurrences) "
+                "FROM operational_durations WHERE bucket_start >= ?"
+                f"{instance_clause} GROUP BY metric",
+                parameters,
+            ).fetchall()
+            durations = {
+                str(metric): (float(seconds_sum or 0.0), int(occurrences or 0))
+                for metric, seconds_sum, occurrences in duration_rows
+            }
+            observation_samples = sum(
+                occurrences
+                for metric, (_, occurrences) in durations.items()
+                if metric.startswith("phase:")
+            )
             ttfts = [float(row[1]) for row in rows if row[1] is not None]
             tools = [float(row[2]) for row in rows if row[2] is not None]
             recoveries = [float(row[3]) for row in rows if row[3] is not None]
@@ -755,6 +828,33 @@ class HistoryStore:
                         if compact_contexts
                         else None
                     ),
+                    phase_duration_seconds=tuple(
+                        sorted(
+                            (metric.removeprefix("phase:"), seconds_sum)
+                            for metric, (seconds_sum, _) in durations.items()
+                            if metric.startswith("phase:")
+                        )
+                    ),
+                    waiting_upstream_seconds=durations.get(
+                        "waiting_upstream", (0.0, 0)
+                    )[0],
+                    attention_wait_seconds=durations.get("attention_wait", (0.0, 0))[0],
+                    observer_blind_samples=durations.get("observer_blind", (0.0, 0))[1],
+                    observer_blind_frequency=(
+                        durations.get("observer_blind", (0.0, 0))[1]
+                        / observation_samples
+                        if observation_samples
+                        else None
+                    ),
+                    protocol_degraded_samples=durations.get(
+                        "protocol_degraded", (0.0, 0)
+                    )[1],
+                    protocol_degraded_frequency=(
+                        durations.get("protocol_degraded", (0.0, 0))[1]
+                        / max(int(sample_row[0] or 0), 1)
+                        if int(sample_row[0] or 0)
+                        else None
+                    ),
                 )
             )
         return stats
@@ -813,6 +913,9 @@ class HistoryStore:
                 self.connection.execute(
                     "DELETE FROM compact_metrics WHERE timestamp < ?", (cutoff,)
                 )
+                self.connection.execute(
+                    "DELETE FROM operational_durations WHERE bucket_start < ?", (cutoff,)
+                )
                 self.connection.execute("DELETE FROM session_state WHERE updated_at < ?", (cutoff,))
             deleted = self.connection.total_changes > before
 
@@ -826,6 +929,7 @@ class HistoryStore:
                 ("turn_metrics", "timestamp"),
                 ("silence_samples", "bucket_start"),
                 ("compact_metrics", "timestamp"),
+                ("operational_durations", "bucket_start"),
             ]
             counts = []
             for table, column in candidates:

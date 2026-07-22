@@ -155,12 +155,17 @@ class DoctorTests(unittest.TestCase):
                 "protocol_capabilities",
                 "diagnostics",
                 "unknown_events",
+                "protocol_compatibility",
                 "rollout",
                 "compact_sources",
                 "collector_health",
             },
         )
         self.assertEqual(report["status"], "healthy")
+        self.assertEqual(
+            report["instances"][0]["protocol_compatibility"]["status"],
+            "unobserved",
+        )
         self.assertIn("compact_sources", report["instances"][0])
         self.assertEqual(report["instances"][0]["protocol_capabilities"]["turn_timing"]["mode"], "direct")
 

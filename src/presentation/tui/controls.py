@@ -90,7 +90,7 @@ SHORTCUTS = (
         "next_anomaly",
         "]",
         "导航",
-        "跳到下一个需要关注的会话：失败、等待操作、严重告警或网络停顿。",
+        "按优先级进入下一个待处理项，并打开对应会话的 Diagnosis。",
         True,
     ),
     ShortcutSpec("1", "show_tab('activity')", "1", "视图", "打开 Activity 语义时间线。"),

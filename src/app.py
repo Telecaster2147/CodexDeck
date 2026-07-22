@@ -136,7 +136,7 @@ def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
             )
         else:
             session = _select_export_session(snapshot, options.export_session or "")
-            machine_key = f"{session.instance_id}:{session.session_id}"
+            machine_key = session.session_identity
             payload = session_export(
                 session,
                 engine.machine.retained_events(machine_key),

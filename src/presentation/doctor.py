@@ -54,6 +54,9 @@ def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
     for instance in snapshot.instances:
         paths = instance.paths
         unknown = dict(getattr(instance, "unknown_event_types", {}) or {})
+        shape_families = dict(getattr(instance, "protocol_shape_families", {}) or {})
+        shape_total = sum(shape_families.values())
+        unknown_total = sum(unknown.values())
         instance_collectors = instance_collector_items(instance, global_collectors)
         instances.append(
             {
@@ -72,10 +75,19 @@ def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
                 "diagnostics": list(instance.diagnostics),
                 "unknown_events": {
                     "types": unknown,
-                    "total": sum(unknown.values()),
+                    "total": unknown_total,
+                    "rate": unknown_total / shape_total if shape_total else 0.0,
                     "parse_success_rate": primitive_value(
                         getattr(instance, "event_parse_success_rate", None)
                     ),
+                },
+                "protocol_compatibility": {
+                    "status": (
+                        "degraded"
+                        if unknown_total
+                        else "matched" if shape_families else "unobserved"
+                    ),
+                    "shape_families": shape_families,
                 },
                 "rollout": _rollout_diagnostics(instance),
                 "compact_sources": {
@@ -221,6 +233,12 @@ def render_doctor_text(snapshot: MonitorSnapshot) -> str:
             )
             for name, count in unknown["types"].items():
                 lines.append(f"    - {name}: {count}")
+        compatibility = instance["protocol_compatibility"]
+        if compatibility["status"] != "unobserved":
+            lines.append(
+                f"  protocol compatibility: {compatibility['status']}; "
+                f"families={len(compatibility['shape_families'])}"
+            )
         for diagnostic in instance["diagnostics"]:
             lines.append(f"  诊断: {diagnostic}")
         degraded = _degraded_collectors(instance["collector_health"])

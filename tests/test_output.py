@@ -240,6 +240,12 @@ class OutputTests(unittest.TestCase):
             "NORMAL",
         )
         self.assertIn("last_semantic_at", payload["instances"][0]["sessions"][0]["observation"])
+        self.assertNotIn("identity", payload["instances"][0])
+        self.assertNotIn("identity", payload["instances"][0]["sessions"][0])
+        self.assertNotIn(
+            "instance_identity",
+            payload["instances"][0]["sessions"][0]["process"],
+        )
 
     def test_metrics_family_contract_is_frozen(self) -> None:
         output = render_prometheus(snapshot_with_metrics())

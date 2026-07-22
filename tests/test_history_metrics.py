@@ -14,6 +14,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from history import HistoryStore  # noqa: E402
 from models import (  # noqa: E402
+    AttentionRequest,
+    AttentionState,
     CodexPaths,
     CollectorHealth,
     CompactionSummary,
@@ -88,6 +90,40 @@ def make_snapshot(root: Path, generated_at: str = "2026-07-16T00:00:01+00:00") -
 
 
 class HistoryTests(unittest.TestCase):
+    def test_operational_durations_track_attention_blindness_and_protocol_quality(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = make_snapshot(root)
+            session = snapshot.sessions[0]
+            session.attention_request = AttentionRequest(AttentionState.APPROVAL)
+            session.silence = SilenceAssessment(
+                SilenceState.WAITING_UPSTREAM, "waiting for upstream"
+            )
+            snapshot.instances[0].unknown_event_types = {"future_event": 1}
+
+            with HistoryStore(root / "history.sqlite", max_days=None, max_bytes=None) as store:
+                store.record_snapshot(snapshot)
+                session.attention_request = None
+                session.silence = SilenceAssessment(
+                    SilenceState.OBSERVER_BLIND, "rollout unavailable"
+                )
+                snapshot.generated_at = "2026-07-16T00:00:03+00:00"
+                store.record_snapshot(snapshot)
+                stats = store.window_stats(
+                    now=1784160010.0,
+                    instance_id=snapshot.instances[0].instance_id,
+                )[0]
+
+            self.assertEqual(dict(stats.phase_duration_seconds), {"GENERATING": 4.0})
+            self.assertEqual(stats.waiting_upstream_seconds, 2.0)
+            self.assertEqual(stats.attention_wait_seconds, 2.0)
+            self.assertEqual(stats.observer_blind_samples, 1)
+            self.assertEqual(stats.observer_blind_frequency, 0.5)
+            self.assertEqual(stats.protocol_degraded_samples, 2)
+            self.assertEqual(stats.protocol_degraded_frequency, 1.0)
+
     def test_window_stats_use_explicit_windows_samples_and_percentiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -293,8 +329,13 @@ class HistoryTests(unittest.TestCase):
                 buckets = store.connection.execute(
                     "SELECT bucket_start FROM session_buckets ORDER BY bucket_start"
                 ).fetchall()
+                duration_buckets = store.connection.execute(
+                    "SELECT DISTINCT bucket_start FROM operational_durations "
+                    "ORDER BY bucket_start"
+                ).fetchall()
             self.assertTrue(all(row[0] >= 1784160000 for row in timestamps))
             self.assertEqual(buckets, [(1784160000,)])
+            self.assertEqual(duration_buckets, [(1784160000,)])
 
     def test_size_pruning_keeps_database_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -38,6 +38,7 @@ from models import (
     SessionHealth,
     SilenceState,
 )
+from presentation.attention import attention_queue
 from presentation.tui.activity import _timeline_line, _timeline_signature, timeline_entries
 from presentation.tui.controls import (
     APP_BINDINGS,
@@ -63,6 +64,7 @@ from presentation.tui.navigation import (
     workspace_group_key,
     workspace_groups,
 )
+from presentation.tui.sampling import SamplingCoordinator
 from presentation.tui.terminal_panel import TerminalLog, TerminalPanel
 from presentation.tui.theme import CODEXDECK_BLUE_THEME, STATE_COLORS
 from preferences import (
@@ -476,8 +478,10 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self.compact_detail = False
         self.rebuilding = False
         self.navigation_dirty = False
-        self.sample_in_flight = False
-        self.next_full_sample_at = time.monotonic() + self.engine.interval
+        self.sampling_coordinator = SamplingCoordinator.starting_at(
+            self.engine.interval,
+            time.monotonic(),
+        )
         self._resize_timer = None
         self._resize_was_at_end = True
         self._resize_scroll_y = 0.0
@@ -535,8 +539,8 @@ class CodexDeckApp(App[MonitorSnapshot]):
         if self.sampling:
             self.set_interval(TUI_EVENT_POLL_INTERVAL, self._poll_live_events)
         if self.prepare_on_start:
-            self.sample_in_flight = True
-            self._initial_sample_worker()
+            if self.sampling_coordinator.begin_initial():
+                self._initial_sample_worker()
 
     def _render_startup(self) -> None:
         if not self._startup_visible:
@@ -691,6 +695,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
     def _update_header(self) -> None:
         visible = [session for session in self.snapshot.sessions if session_is_visible(session)]
         hidden = len(self.snapshot.sessions) - len(visible)
+        queue = attention_queue(visible)
         issues = sum(
             bool(item.current_failure)
             or bool(item.attention_request)
@@ -700,13 +705,14 @@ class CodexDeckApp(App[MonitorSnapshot]):
             in {SilenceState.STALL_SUSPECT, SilenceState.OBSERVER_BLIND}
             for item in visible
         )
-        signature = (len(visible), hidden, issues, self.show_hidden)
+        signature = (len(visible), hidden, issues, len(queue), self.show_hidden)
         if signature == self._header_signature:
             return
         self._header_signature = signature
         text = Text(" CODEXDECK", style="bold #38bdf8")
         text.append(
-            f"   SESSIONS {len(visible)}   HIDDEN {hidden}   ISSUES {issues}"
+            f"   SESSIONS {len(visible)}   ATTENTION {len(queue)}"
+            f"   HIDDEN {hidden}   ISSUES {issues}"
             f"   VIEW {'ALL' if self.show_hidden else 'ACTIVE'}",
             style="#cbd5e1",
         )
@@ -1238,30 +1244,34 @@ class CodexDeckApp(App[MonitorSnapshot]):
         )
 
     def action_next_anomaly(self) -> None:
-        anomalies = [
+        queue = attention_queue(
             item
             for item in self.snapshot.sessions
-            if (self.show_hidden or session_is_visible(item))
-            and (
-                item.current_failure
-                or item.attention_request
-                or item.alert_level == "严重"
-                or item.network.state.value == "STALLED"
-            )
-        ]
-        if not anomalies:
-            self._set_status_message("NO ACTIVE ANOMALIES")
+            if self.show_hidden or session_is_visible(item)
+        )
+        if not queue:
+            self._set_status_message("ATTENTION QUEUE · EMPTY")
             return
-        keys = [item.key for item in anomalies]
-        current = self.selected_session.key if self.selected_session else ""
-        index = (keys.index(current) + 1) % len(keys) if current in keys else 0
-        target = f"session:{anomalies[index].key}"
+        identities = [item.session for item in queue]
+        current = (
+            self.selected_session.session_identity if self.selected_session else None
+        )
+        index = (
+            (identities.index(current) + 1) % len(identities)
+            if current in identities
+            else 0
+        )
+        target = f"session:{queue[index].session.storage_key}"
         list_view = self.query_one("#session-list", ListView)
         for position, item in enumerate(list_view.children):
             if isinstance(item, NavigationItem) and item.key_value == target:
                 list_view.index = position
                 item.scroll_visible()
                 self._select_item(item)
+                self.action_show_tab("diagnosis")
+                self._set_status_message(
+                    f"ATTENTION {index + 1}/{len(queue)} · {queue[index].category.upper()}"
+                )
                 break
 
     def action_back(self) -> None:
@@ -1286,22 +1296,19 @@ class CodexDeckApp(App[MonitorSnapshot]):
             self.query_one("#session-list", ListView).focus()
 
     def action_sample_now(self) -> None:
-        if not self.sampling or self.sample_in_flight:
+        if not self.sampling:
             return
-        self.next_full_sample_at = time.monotonic() + self.engine.interval
-        self._start_sample(full=True)
+        if self.sampling_coordinator.begin_manual(time.monotonic()):
+            self._start_sample(full=True)
 
     def _poll_live_events(self) -> None:
-        if not self.sampling or self.sample_in_flight:
+        if not self.sampling:
             return
-        now = time.monotonic()
-        full = now >= self.next_full_sample_at
-        if full:
-            self.next_full_sample_at = now + self.engine.interval
-        self._start_sample(full=full)
+        full = self.sampling_coordinator.begin_due(time.monotonic())
+        if full is not None:
+            self._start_sample(full=full)
 
     def _start_sample(self, *, full: bool) -> None:
-        self.sample_in_flight = True
         self._sample_worker(full, self.snapshot)
 
     @work(thread=True, group="snapshot")
@@ -1331,7 +1338,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
         snapshot: MonitorSnapshot | None,
         error: str,
     ) -> None:
-        self.sample_in_flight = False
+        self.sampling_coordinator.finish()
         if error:
             self._show_collector_error(error)
         elif snapshot is not None and snapshot is not self.snapshot:
