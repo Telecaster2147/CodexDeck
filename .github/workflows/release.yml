@@ -1,0 +1,41 @@
+name: Release checks
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uvx ruff check src tests
+      - run: uv run python -m unittest discover -s tests -v
+      - name: Verify release version
+        run: |
+          version=$(uv run python -c 'from config import VERSION; print(VERSION)')
+          test "v${version}" = "${GITHUB_REF_NAME}"
+      - name: Build and checksum
+        run: |
+          uv build
+          cd dist
+          sha256sum codexdeck-*-py3-none-any.whl > codexdeck-${GITHUB_REF_NAME#v}-py3-none-any.whl.sha256
+          sha256sum -c codexdeck-${GITHUB_REF_NAME#v}-py3-none-any.whl.sha256
+      - name: Retain verified distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexdeck-${{ github.ref_name }}
+          path: |
+            dist/codexdeck-*.whl
+            dist/codexdeck-*.whl.sha256
+            dist/codexdeck-*.tar.gz
+          if-no-files-found: error

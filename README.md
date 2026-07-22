@@ -4,9 +4,9 @@
 
 ### 管理所有 Codex 会话实时连接状态，一块准确只读的终端仪表盘
 
-[![Version](https://img.shields.io/badge/version-0.1.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
+[![Version](https://img.shields.io/badge/version-0.1.1-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Textual](https://img.shields.io/badge/Textual-8.2.8%20%E2%80%93%208.x-111827?style=flat-square)](https://textual.textualize.io/)
+[![Textual](https://img.shields.io/badge/Textual-8.2.8-111827?style=flat-square)](https://textual.textualize.io/)
 [![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square&logo=linux&logoColor=111827)](#运行要求)
 [![Data access](https://img.shields.io/badge/Codex%20data-read--only-2ea043?style=flat-square)](#只读与隐私边界)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
@@ -45,7 +45,7 @@ Codex CLI 擅长完成单个会话中的交互，但当多个工作区、后台�
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/main/install.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.1.1/install.sh \
   -o /tmp/codexdeck-install.sh
 
 less /tmp/codexdeck-install.sh
@@ -64,7 +64,7 @@ codexdeck
 如 `~/.local/bin` 尚未位于 `PATH`，安装器会打印需要添加的目录。固定安装某个版本：
 
 ```bash
-sh /tmp/codexdeck-install.sh --version 0.1.0
+sh /tmp/codexdeck-install.sh --version 0.1.1
 ```
 
 升级时重新运行安装器即可。旧版本只有在新环境安装并通过 `codexdeck --version` 验证后才会被替换。
@@ -73,7 +73,7 @@ sh /tmp/codexdeck-install.sh --version 0.1.0
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/main/uninstall.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.1.1/uninstall.sh \
   -o /tmp/codexdeck-uninstall.sh
 
 less /tmp/codexdeck-uninstall.sh
@@ -108,8 +108,8 @@ codexdeck
 
 ```bash
 ./install.sh \
-  --wheel dist/codexdeck-0.1.0-py3-none-any.whl \
-  --checksum dist/codexdeck-0.1.0-py3-none-any.whl.sha256
+  --wheel dist/codexdeck-0.1.1-py3-none-any.whl \
+  --checksum dist/codexdeck-0.1.1-py3-none-any.whl.sha256
 ```
 
 当 stdin 与 stdout 都连接到 TTY 时，CodexDeck 自动进入 Textual 界面；管道或文件环境自动输出文本。
@@ -473,12 +473,20 @@ codexdeck-VERSION-py3-none-any.whl
 codexdeck-VERSION-py3-none-any.whl.sha256
 ```
 
-生成校验文件：
+生成校验文件。记录中只包含资产文件名，下载到任意目录后都可以直接复核：
 
 ```bash
-sha256sum dist/codexdeck-VERSION-py3-none-any.whl \
-  > dist/codexdeck-VERSION-py3-none-any.whl.sha256
+(
+  cd dist
+  sha256sum codexdeck-VERSION-py3-none-any.whl \
+    > codexdeck-VERSION-py3-none-any.whl.sha256
+  sha256sum -c codexdeck-VERSION-py3-none-any.whl.sha256
+)
 ```
+
+推送与 `src/config.py` 版本一致的 `vVERSION` tag 后，Release checks workflow 会重新运行
+检查、构建 wheel 与源码包、生成并复核 SHA-256，并保留经过验证的 workflow artifacts。
+日常分支和 pull request 由 CI 在 Python 3.10、3.11、3.12 上验证。
 
 TUI 改动还应在宽屏与窄屏真实 PTY 中检查焦点、滚动、选择、Terminal 标签和稳定刷新。
 
