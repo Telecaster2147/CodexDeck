@@ -15,3 +15,7 @@ build/
 *.egg-info/
 DESIGN_DECISIONS.md
 AGENTS.md
+docs/
+publish-v*.sh
+release-notes-v*.md
+release-command*.txt
