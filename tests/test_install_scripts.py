@@ -56,8 +56,9 @@ class InstallScriptTests(unittest.TestCase):
         pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
         self.assertIn("## 许可证", readme)
-        self.assertIn("codexdeck-VERSION-py3-none-any.whl.sha256", readme)
+        self.assertIn(f"codexdeck-{VERSION}-py3-none-any.whl.sha256", readme)
         self.assertNotIn("sha256sum dist/codexdeck-VERSION", readme)
+        self.assertNotIn("## 开发与验证", readme)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
 

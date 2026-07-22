@@ -457,41 +457,6 @@ codexdeck                    # 开发 checkout launcher
 
 依赖方向保持为 `cli/presentation → app → engine → codex/network → models`。底层采集器不依赖 TUI。
 
-## 开发与验证
-
-```bash
-uv sync
-uvx ruff check src tests
-uv run python -m unittest discover -s tests -v
-uv build
-```
-
-每个 GitHub Release 需要上传配套的两个安装资产：
-
-```text
-codexdeck-VERSION-py3-none-any.whl
-codexdeck-VERSION-py3-none-any.whl.sha256
-```
-
-生成校验文件。记录中只包含资产文件名，下载到任意目录后都可以直接复核：
-
-```bash
-(
-  cd dist
-  sha256sum codexdeck-VERSION-py3-none-any.whl \
-    > codexdeck-VERSION-py3-none-any.whl.sha256
-  sha256sum -c codexdeck-VERSION-py3-none-any.whl.sha256
-)
-```
-
-推送与 `src/config.py` 版本一致的 `vVERSION` tag 后，Release checks workflow 会重新运行
-检查、构建 wheel 与源码包、生成并复核 SHA-256，并保留经过验证的 workflow artifacts。
-日常分支和 pull request 由 CI 在 Python 3.10、3.11、3.12 上验证。
-
-TUI 改动还应在宽屏与窄屏真实 PTY 中检查焦点、滚动、选择、Terminal 标签和稳定刷新。
-
-版本唯一来源是 `src/config.py`。项目只发布 `codexdeck` 命令，默认完整刷新间隔严格为 2 秒。
-
 ## 许可证
 
 CodexDeck 使用 [MIT License](LICENSE)。允许使用、修改、分发和商业使用，分发时需保留版权与许可证声明。
