@@ -12,7 +12,12 @@ from config import MAX_SESSION_TAIL
 from models import NormalizedEvent
 from utils import message_text
 from .events import is_compact_command, normalize_rollout_record, parse_timestamp
-from .terminal import TerminalStore, TerminalUpdate, extract_terminal_updates
+from .terminal import (
+    TerminalProtocolParser,
+    TerminalStore,
+    TerminalUpdate,
+    extract_terminal_updates,
+)
 
 
 KNOWN_IGNORED_TYPES = {
@@ -144,6 +149,7 @@ class RolloutReader:
         self.bootstrap_truncated: set[str] = set()
         self.terminal_metadata_attempted: dict[str, set[str]] = {}
         self.terminal_metadata_backfills: dict[str, TerminalMetadataBackfillCursor] = {}
+        self.terminal_parser = TerminalProtocolParser()
 
     def read(self, path: Path) -> list[NormalizedEvent]:
         return list(self.read_with_activity(path).events)
@@ -299,6 +305,8 @@ class RolloutReader:
                         record,
                         source_id,
                         parse_timestamp(record.get("timestamp")) or observed_at,
+                        parser=self.terminal_parser,
+                        scope=f"{key}:{stat.st_ino}",
                     )
                 )
                 record_type, item_type, item = _record_shape(record)

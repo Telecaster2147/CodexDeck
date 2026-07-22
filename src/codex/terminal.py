@@ -8,7 +8,7 @@ import os
 import re
 import shlex
 import stat
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
@@ -47,6 +47,10 @@ _PROCESS_EXITED = re.compile(
     r"(?:Output|Final output):\s*(?P<output>.*)",
     re.DOTALL,
 )
+_EXPLICIT_PROCESS_ID = re.compile(
+    r"(?m)^(?:SESSION_ID|CELL_ID|PROCESS_ID)\s*=\s*(?P<process>[^\s]+)\s*$",
+    re.I,
+)
 _EXIT_CODE = re.compile(r"(?:Process exited with code|exit(?: code)?)\s*(?P<code>-?\d+)", re.I)
 _TRUNCATED = re.compile(r"(?:tokens?|bytes?|chars?)\s+(?:truncated|omitted)|truncated after", re.I)
 _TOOL_OUTPUT_TYPES = {
@@ -79,9 +83,11 @@ def _mapping(value: object) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _nested_terminal_call(value: object) -> tuple[str, dict[str, Any]]:
-    calls = _nested_terminal_calls(value)
-    return calls[0] if calls else ("", {})
+@dataclass(frozen=True)
+class _NestedToolCall:
+    ordinal: int
+    tool_name: str
+    arguments: dict[str, Any]
 
 
 def _js_string(value: str, start: int) -> tuple[str, int]:
@@ -179,25 +185,61 @@ def _js_terminal_arguments(value: str, start: int, end: int) -> dict[str, Any]:
     return arguments
 
 
-def _nested_terminal_calls(value: object) -> list[tuple[str, dict[str, Any]]]:
+def _nested_tool_calls(value: object) -> list[_NestedToolCall]:
     if not isinstance(value, str):
         return []
-    calls: list[tuple[str, dict[str, Any]]] = []
-    for match in re.finditer(
-        r"tools\.(?P<tool>exec_command|write_stdin|wait)\(\s*",
-        value,
-    ):
-        object_end = _js_object_end(value, match.end())
+    calls: list[_NestedToolCall] = []
+    index = 0
+    while index < len(value):
+        if value[index] in {'"', "'", "`"}:
+            _, index = _js_string(value, index)
+            continue
+        if value.startswith("//", index):
+            newline = value.find("\n", index + 2)
+            index = len(value) if newline < 0 else newline + 1
+            continue
+        if value.startswith("/*", index):
+            end = value.find("*/", index + 2)
+            index = len(value) if end < 0 else end + 2
+            continue
+        if not value.startswith("tools.", index):
+            index += 1
+            continue
+        name_start = index + len("tools.")
+        name_match = re.match(r"[A-Za-z_$][\w$]*", value[name_start:])
+        if not name_match:
+            index += 1
+            continue
+        tool_name = name_match.group(0)
+        call_start = name_start + len(tool_name)
+        while call_start < len(value) and value[call_start].isspace():
+            call_start += 1
+        if call_start >= len(value) or value[call_start] != "(":
+            index = call_start
+            continue
+        arguments_start = call_start + 1
+        object_end = _js_object_end(value, arguments_start)
         try:
-            parsed, consumed = json.JSONDecoder().raw_decode(value[match.end() : object_end])
+            parsed, consumed = json.JSONDecoder().raw_decode(
+                value[arguments_start:object_end]
+            )
         except (json.JSONDecodeError, TypeError):
-            parsed = _js_terminal_arguments(value, match.end(), object_end)
+            parsed = _js_terminal_arguments(value, arguments_start, object_end)
         else:
             if not consumed:
+                index = max(call_start + 1, object_end)
                 continue
         if isinstance(parsed, dict):
-            calls.append((match.group("tool"), parsed))
+            calls.append(_NestedToolCall(len(calls), tool_name, parsed))
+        index = max(call_start + 1, object_end)
     return calls
+
+
+def _nested_terminal_call(value: object) -> tuple[str, dict[str, Any]]:
+    for call in _nested_tool_calls(value):
+        if call.tool_name in _TERMINAL_TOOLS:
+            return call.tool_name, call.arguments
+    return "", {}
 
 
 def _argument_value(payload: dict[str, Any], item: dict[str, Any]) -> object:
@@ -288,6 +330,20 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
             bool(value.get("truncated") or value.get("omitted_bytes")) or bool(_TRUNCATED.search(text)),
         )
     text = sanitize_terminal_text(_content_text(value))
+    explicit_processes = list(_EXPLICIT_PROCESS_ID.finditer(text))
+    if explicit_processes:
+        process_id = _process_id(explicit_processes[-1].group("process"))
+        visible_text = _EXPLICIT_PROCESS_ID.sub("", text)
+        visible_text = re.sub(r"\n{3,}", "\n\n", visible_text).rstrip("\n")
+        if visible_text:
+            visible_text += "\n"
+        return (
+            visible_text,
+            "combined",
+            process_id,
+            None,
+            bool(_TRUNCATED.search(text)),
+        )
     running = _BACKGROUND_RUNNING.match(text)
     if running:
         return (
@@ -356,10 +412,337 @@ class TerminalUpdate:
     wait_for_completion: bool = False
 
 
-def extract_terminal_updates(
+@dataclass(frozen=True)
+class _TerminalRecordContext:
+    record_type: str
+    item_type: str
+    payload: dict[str, Any]
+    item: dict[str, Any]
+    call_id: str
+    turn_id: str
+    tool_name: str
+    argument_value: object
+    output_value: object
+
+
+@dataclass(frozen=True)
+class _ToolCallBatch:
+    outer_call_id: str
+    turn_id: str
+    calls: tuple[_NestedToolCall, ...]
+
+
+def _terminal_record_context(record: dict[str, object]) -> _TerminalRecordContext:
+    record_type = str(record.get("type") or "")
+    payload_value = record.get("payload")
+    payload = payload_value if isinstance(payload_value, dict) else {}
+    item_value = payload.get("item")
+    item = item_value if isinstance(item_value, dict) else {}
+    item_type = str(payload.get("type") or item.get("type") or "")
+    if record_type == "event_msg" and item_type in {"item_started", "item_completed"} and item:
+        payload = {**payload, **item, "item": item}
+        item_type = str(item.get("type") or "")
+    return _TerminalRecordContext(
+        record_type=record_type,
+        item_type=item_type,
+        payload=payload,
+        item=item,
+        call_id=str(
+            payload.get("call_id")
+            or payload.get("id")
+            or item.get("call_id")
+            or item.get("id")
+            or ""
+        ),
+        turn_id=str(payload.get("turn_id") or item.get("turn_id") or ""),
+        tool_name=_tool_name(payload, item, item_type).lower(),
+        argument_value=_argument_value(payload, item),
+        output_value=(
+            payload.get("output")
+            or payload.get("result")
+            or item.get("output")
+            or item.get("result")
+        ),
+    )
+
+
+def _batch_call_id(outer_call_id: str, ordinal: int, total: int) -> str:
+    if total <= 1:
+        return outer_call_id
+    return f"{outer_call_id}:tool:{ordinal}"
+
+
+def _command_result(value: object) -> bool:
+    if isinstance(value, dict):
+        return "wall_time_seconds" in value and bool(
+            {"session_id", "process_id", "cell_id", "exit_code", "chunk_id"} & value.keys()
+        )
+    text = sanitize_terminal_text(_content_text(value))
+    if (
+        _BACKGROUND_RUNNING.match(text)
+        or _PROCESS_EXITED.match(text)
+        or _EXPLICIT_PROCESS_ID.search(text)
+    ):
+        return True
+    script_result = _SCRIPT_RESULT.match(text)
+    if not script_result:
+        return False
+    nested = _mapping(script_result.group("output"))
+    return _command_result(nested) if nested else True
+
+
+def _unified_exec_results(value: object) -> tuple[object, ...] | None:
+    """Decode one functions.exec result envelope without flattening parallel results."""
+
+    if isinstance(value, list):
+        parts = [_content_text(part) for part in value]
+        if len(parts) > 1 and re.match(
+            r"^Script (?:completed|failed).*?(?:Output|Final output):\s*$",
+            parts[0],
+            re.DOTALL,
+        ):
+            return tuple(_mapping(part) or part for part in parts[1:])
+        value = "".join(parts)
+    text = _content_text(value)
+    if not text:
+        return None
+    sanitized = sanitize_terminal_text(text)
+    script_result = _SCRIPT_RESULT.match(sanitized)
+    if script_result:
+        nested = _mapping(script_result.group("output"))
+        return (nested or sanitized,)
+    if (
+        _BACKGROUND_RUNNING.match(sanitized)
+        or _PROCESS_EXITED.match(sanitized)
+        or _EXPLICIT_PROCESS_ID.search(sanitized)
+    ):
+        return (sanitized,)
+    return None
+
+
+class TerminalProtocolParser:
+    """Parse direct and wrapped terminal protocol records into stable operations."""
+
+    def __init__(self, max_pending_batches: int = 4_096) -> None:
+        self.max_pending_batches = max_pending_batches
+        self.pending_batches: OrderedDict[tuple[str, str], _ToolCallBatch] = OrderedDict()
+
+    def _remember(self, scope: str, batch: _ToolCallBatch) -> None:
+        if not batch.outer_call_id:
+            return
+        key = (scope, batch.outer_call_id)
+        self.pending_batches[key] = batch
+        self.pending_batches.move_to_end(key)
+        while len(self.pending_batches) > self.max_pending_batches:
+            self.pending_batches.popitem(last=False)
+
+    @staticmethod
+    def _combine_fragments(fragments: list[object]) -> object:
+        if len(fragments) == 1:
+            return fragments[0]
+        values = [_content_text(fragment) for fragment in fragments]
+        return "\n".join(value.rstrip("\n") for value in values if value)
+
+    @classmethod
+    def _result_slots(
+        cls,
+        calls: tuple[_NestedToolCall, ...],
+        results: tuple[object, ...],
+    ) -> list[tuple[int, _NestedToolCall, object]]:
+        if len(calls) == 1:
+            return [(0, calls[0], cls._combine_fragments(list(results)))]
+        if len(results) == len(calls) and all(
+            _mapping(result) or _command_result(result) for result in results
+        ):
+            return [
+                (ordinal, calls[ordinal], result)
+                for ordinal, result in enumerate(results)
+            ]
+
+        groups: list[object] = []
+        pending: list[object] = []
+        for result in results:
+            pending.append(result)
+            text = sanitize_terminal_text(_content_text(result))
+            boundary = bool(
+                _mapping(result)
+                or _BACKGROUND_RUNNING.match(text)
+                or _PROCESS_EXITED.match(text)
+                or _EXPLICIT_PROCESS_ID.search(text)
+            )
+            if boundary:
+                groups.append(cls._combine_fragments(pending))
+                pending = []
+        if pending:
+            groups.append(cls._combine_fragments(pending))
+        if len(groups) == len(calls):
+            return [
+                (ordinal, calls[ordinal], result)
+                for ordinal, result in enumerate(groups)
+            ]
+
+        return [
+            (ordinal, calls[ordinal], result)
+            for ordinal, result in enumerate(results[: len(calls)])
+        ]
+
+    @staticmethod
+    def _invocation_update(
+        context: _TerminalRecordContext,
+        call: _NestedToolCall,
+        total: int,
+        source_id: str,
+        observed_at: float,
+    ) -> TerminalUpdate:
+        arguments = call.arguments
+        process_id = _process_id(
+            arguments.get("process_id")
+            or arguments.get("session_id")
+            or arguments.get("cell_id")
+            or ""
+        )
+        tool_name = call.tool_name.lower()
+        return TerminalUpdate(
+            source_id=f"{source_id}:tool:{call.ordinal}",
+            observed_at=observed_at,
+            call_id=_batch_call_id(context.call_id, call.ordinal, total),
+            process_id=process_id,
+            turn_id=context.turn_id,
+            command=_command(arguments.get("cmd") or arguments.get("command")),
+            cwd=str(arguments.get("workdir") or arguments.get("cwd") or ""),
+            status="running",
+            capability=(
+                TerminalCapability.POLL_TRANSCRIPT
+                if process_id or tool_name in {"write_stdin", "wait"}
+                else TerminalCapability.METADATA_ONLY
+            ),
+            terminal_candidate=True,
+            continuation=tool_name in {"write_stdin", "wait"},
+            wait_for_completion=tool_name == "wait",
+        )
+
+    @staticmethod
+    def _result_update(
+        context: _TerminalRecordContext,
+        call: _NestedToolCall | None,
+        result: object,
+        ordinal: int,
+        total: int,
+        source_id: str,
+        observed_at: float,
+        turn_id: str = "",
+    ) -> TerminalUpdate:
+        text, stream, process_id, exit_code, truncated = _output_fields(result)
+        arguments = call.arguments if call is not None else {}
+        tool_name = call.tool_name.lower() if call is not None else "exec_command"
+        process_id = process_id or _process_id(
+            arguments.get("process_id")
+            or arguments.get("session_id")
+            or arguments.get("cell_id")
+            or ""
+        )
+        running = bool(process_id and exit_code is None)
+        return TerminalUpdate(
+            source_id=f"{source_id}:tool:{ordinal}",
+            observed_at=observed_at,
+            call_id=_batch_call_id(context.call_id, ordinal, total),
+            process_id=process_id,
+            turn_id=context.turn_id or turn_id,
+            command=_command(arguments.get("cmd") or arguments.get("command")),
+            cwd=str(arguments.get("workdir") or arguments.get("cwd") or ""),
+            status="running" if running else "completed",
+            exit_code=exit_code,
+            stream=stream,
+            output=text,
+            capability=(
+                TerminalCapability.POLL_TRANSCRIPT
+                if process_id
+                else TerminalCapability.FINAL_TRANSCRIPT
+            ),
+            terminal_candidate=True,
+            upstream_truncated=truncated,
+            continuation=tool_name in {"write_stdin", "wait"},
+            wait_for_completion=tool_name == "wait",
+        )
+
+    def parse(
+        self,
+        record: dict[str, object],
+        source_id: str,
+        observed_at: float,
+        scope: str = "",
+    ) -> tuple[TerminalUpdate, ...]:
+        context = _terminal_record_context(record)
+        nested_calls = (
+            _nested_tool_calls(context.argument_value)
+            if context.tool_name in {"exec", "functions.exec"}
+            else []
+        )
+        if nested_calls:
+            batch = _ToolCallBatch(context.call_id, context.turn_id, tuple(nested_calls))
+            self._remember(scope, batch)
+            return tuple(
+                self._invocation_update(
+                    context,
+                    call,
+                    len(nested_calls),
+                    source_id,
+                    observed_at,
+                )
+                for call in nested_calls
+                if call.tool_name.lower() in _TERMINAL_TOOLS
+            )
+
+        results = _unified_exec_results(context.output_value)
+        batch = (
+            self.pending_batches.pop((scope, context.call_id), None)
+            if results is not None
+            else None
+        )
+        if results is not None and (
+            batch is not None or context.item_type == "custom_tool_call_output"
+        ):
+            if batch is not None:
+                selected = [
+                    (ordinal, call, result)
+                    for ordinal, call, result in self._result_slots(batch.calls, results)
+                    if call.tool_name.lower() in _TERMINAL_TOOLS
+                ]
+                total = len(batch.calls)
+            else:
+                command_results = [result for result in results if _command_result(result)]
+                if len(command_results) == 1:
+                    selected = [(0, None, self._combine_fragments(list(results)))]
+                    total = 1
+                else:
+                    selected = [
+                        (ordinal, None, result)
+                        for ordinal, result in enumerate(results)
+                        if _command_result(result)
+                    ]
+                    total = len(results)
+            if selected:
+                return tuple(
+                    self._result_update(
+                        context,
+                        call,
+                        result,
+                        ordinal,
+                        total,
+                        source_id,
+                        observed_at,
+                        batch.turn_id if batch is not None else "",
+                    )
+                    for ordinal, call, result in selected
+                )
+
+        return _extract_direct_terminal_updates(record, source_id, observed_at)
+
+
+def _extract_direct_terminal_updates(
     record: dict[str, object], source_id: str, observed_at: float
 ) -> tuple[TerminalUpdate, ...]:
-    """Extract terminal evidence without changing lifecycle normalization."""
+    """Extract terminal evidence from a single direct protocol call."""
 
     record_type = str(record.get("type") or "")
     payload = record.get("payload")
@@ -536,6 +919,24 @@ def extract_terminal_updates(
             continuation=tool_name in {"write_stdin", "wait"},
             wait_for_completion=tool_name == "wait",
         ),
+    )
+
+
+def extract_terminal_updates(
+    record: dict[str, object],
+    source_id: str,
+    observed_at: float,
+    *,
+    parser: TerminalProtocolParser | None = None,
+    scope: str = "",
+) -> tuple[TerminalUpdate, ...]:
+    """Extract terminal evidence without changing lifecycle normalization."""
+
+    return (parser or TerminalProtocolParser()).parse(
+        record,
+        source_id,
+        observed_at,
+        scope,
     )
 
 

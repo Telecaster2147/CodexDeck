@@ -9,6 +9,7 @@ from unittest.mock import patch
 from codex.rollout import RolloutReader, TerminalMetadataBackfillCursor
 from codex.terminal import (
     RegularFileTailCollector,
+    TerminalProtocolParser,
     TerminalStore,
     TerminalUpdate,
     extract_terminal_updates,
@@ -238,6 +239,294 @@ class TerminalTranscriptTests(unittest.TestCase):
         self.assertEqual(updates[0].process_id, "79038")
         self.assertEqual(updates[0].status, "running")
         self.assertEqual(updates[0].output, "ready\n")
+
+    def test_parallel_mixed_tool_batch_preserves_each_terminal_identity(self) -> None:
+        parser = TerminalProtocolParser()
+        start = {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call-batch",
+                "name": "exec",
+                "input": """
+const fixture = "tools.exec_command({cmd: 'not a real call'})";
+// tools.exec_command({cmd: "also not real"});
+const results = await Promise.all([
+  tools.exec_command({cmd: "ruff check src", workdir: "/workspace-a"}),
+  tools.view_image({path: "/workspace-a/screenshot.png"}),
+  tools.exec_command({
+    cmd: "python -m unittest discover -s tests -v",
+    workdir: "/workspace-a"
+  })
+]);
+""",
+            },
+        }
+        output = {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call-batch",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nWall time 1.0 seconds\nOutput:\n",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(
+                            {
+                                "wall_time_seconds": 0.2,
+                                "exit_code": 0,
+                                "output": "All checks passed!\n",
+                            }
+                        ),
+                    },
+                    {
+                        "type": "input_text",
+                        "text": json.dumps({"image_url": "data:image/png;base64,fixture"}),
+                    },
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(
+                            {
+                                "wall_time_seconds": 1.0,
+                                "session_id": 73002,
+                                "output": "test_core ... ok\n",
+                            }
+                        ),
+                    },
+                ],
+            },
+        }
+
+        initial = extract_terminal_updates(start, "start", 1.0, parser=parser)
+        results = extract_terminal_updates(output, "output", 2.0, parser=parser)
+
+        self.assertEqual(
+            [(item.call_id, item.command) for item in initial],
+            [
+                ("call-batch:tool:0", "ruff check src"),
+                (
+                    "call-batch:tool:2",
+                    "python -m unittest discover -s tests -v",
+                ),
+            ],
+        )
+        self.assertEqual([item.call_id for item in results], [item.call_id for item in initial])
+        self.assertEqual(results[1].process_id, "73002")
+
+        store = TerminalStore()
+        store.apply("session", (*initial, *results))
+        summaries = {item.command: item for item in store.summaries("session")}
+        self.assertEqual(summaries["ruff check src"].status, "completed")
+        test_command = "python -m unittest discover -s tests -v"
+        self.assertEqual(summaries[test_command].process_id, "73002")
+        self.assertEqual(summaries[test_command].status, "running")
+
+        child = ChildProcessActivity(
+            ProcessIdentity(42, 7),
+            command=f"/bin/bash -c {test_command}",
+            state="S",
+        )
+        store.reconcile_children("session", (child,), 3.0)
+        self.assertEqual(
+            [item.command for item in store.current_summaries("session")],
+            [test_command],
+        )
+        store.reconcile_children("session", (), 4.0)
+        store.reconcile_children("session", (), 5.0)
+        self.assertEqual(store.current_summaries("session"), [])
+
+    def test_rollout_reader_pairs_parallel_batch_across_incremental_reads(self) -> None:
+        start = {
+            "timestamp": "2026-07-17T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call-batch",
+                "name": "exec",
+                "input": (
+                    "const values = await Promise.all(["
+                    'tools.exec_command({cmd:"ruff check src"}),'
+                    'tools.exec_command({cmd:"python -m unittest discover -s tests -v"})'
+                    "]);"
+                ),
+            },
+        }
+        output = {
+            "timestamp": "2026-07-17T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call-batch",
+                "output": [
+                    {"type": "input_text", "text": "Script completed\nOutput:\n"},
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(
+                            {"wall_time_seconds": 0.1, "exit_code": 0, "output": "ok\n"}
+                        ),
+                    },
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(
+                            {
+                                "wall_time_seconds": 1.0,
+                                "session_id": 73002,
+                                "output": "test_core ... ok\n",
+                            }
+                        ),
+                    },
+                ],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(json.dumps(start) + "\n")
+            reader = RolloutReader()
+            initial = reader.read_with_activity(path)
+            with path.open("a") as handle:
+                handle.write(json.dumps(output) + "\n")
+            completed = reader.read_with_activity(path)
+
+        self.assertEqual(len(initial.terminal_updates), 2)
+        self.assertEqual(len(completed.terminal_updates), 2)
+        self.assertEqual(
+            completed.terminal_updates[1].command,
+            "python -m unittest discover -s tests -v",
+        )
+        self.assertEqual(completed.terminal_updates[1].process_id, "73002")
+
+    def test_parser_scopes_identical_call_ids_to_their_rollout_stream(self) -> None:
+        parser = TerminalProtocolParser()
+
+        def invocation(command: str) -> dict[str, object]:
+            return {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "shared-call",
+                    "name": "exec",
+                    "input": f'await tools.exec_command({{"cmd":{json.dumps(command)}}});',
+                },
+            }
+
+        def result(process_id: int) -> dict[str, object]:
+            return {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "shared-call",
+                    "output": [
+                        {"type": "input_text", "text": "Script completed\nOutput:\n"},
+                        {
+                            "type": "input_text",
+                            "text": json.dumps(
+                                {
+                                    "wall_time_seconds": 1.0,
+                                    "session_id": process_id,
+                                    "output": "ready\n",
+                                }
+                            ),
+                        },
+                    ],
+                },
+            }
+
+        parser.parse(invocation("worker-a"), "a-start", 1.0, "rollout-a")
+        parser.parse(invocation("worker-b"), "b-start", 1.0, "rollout-b")
+        result_b = parser.parse(result(202), "b-output", 2.0, "rollout-b")
+        result_a = parser.parse(result(101), "a-output", 2.0, "rollout-a")
+
+        self.assertEqual((result_a[0].command, result_a[0].process_id), ("worker-a", "101"))
+        self.assertEqual((result_b[0].command, result_b[0].process_id), ("worker-b", "202"))
+
+    def test_parser_bounds_pending_batches_and_keeps_newest(self) -> None:
+        parser = TerminalProtocolParser(max_pending_batches=2)
+        for index in range(3):
+            parser.parse(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "call_id": f"call-{index}",
+                        "name": "exec",
+                        "input": f'await tools.exec_command({{"cmd":"worker-{index}"}});',
+                    },
+                },
+                f"source-{index}",
+                float(index),
+                "rollout",
+            )
+
+        self.assertEqual(
+            [call_id for _scope, call_id in parser.pending_batches],
+            ["call-1", "call-2"],
+        )
+
+    def test_wrapper_output_fragments_keep_explicit_session_with_single_call(self) -> None:
+        parser = TerminalProtocolParser()
+        start = {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call-fragments",
+                "name": "exec",
+                "input": (
+                    "const r = await tools.exec_command({"
+                    'cmd:"python -m unittest discover -s tests -v"});'
+                    "text(r.output);"
+                    "if (r.session_id) text(`SESSION_ID=${r.session_id}`);"
+                ),
+            },
+        }
+        output = {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call-fragments",
+                "output": [
+                    {"type": "input_text", "text": "Script completed\nOutput:\n"},
+                    {"type": "input_text", "text": "test_core ... ok\n"},
+                    {"type": "input_text", "text": "SESSION_ID=73001"},
+                ],
+            },
+        }
+
+        parser.parse(start, "start", 1.0, "rollout")
+        updates = parser.parse(output, "output", 2.0, "rollout")
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].process_id, "73001")
+        self.assertEqual(updates[0].status, "running")
+        self.assertEqual(updates[0].command, "python -m unittest discover -s tests -v")
+        self.assertIn("test_core ... ok", updates[0].output)
+        self.assertNotIn("SESSION_ID", updates[0].output)
+
+    def test_stateless_wrapper_fragments_keep_outer_call_and_transcript(self) -> None:
+        updates = extract_terminal_updates(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-fragments",
+                    "output": [
+                        {"type": "input_text", "text": "Script completed\nOutput:\n"},
+                        {"type": "input_text", "text": "test_core ... ok\n"},
+                        {"type": "input_text", "text": "SESSION_ID=73001"},
+                    ],
+                },
+            },
+            "output",
+            2.0,
+        )
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].call_id, "call-fragments")
+        self.assertEqual(updates[0].process_id, "73001")
+        self.assertIn("test_core ... ok", updates[0].output)
 
     def test_plain_json_command_output_is_not_a_background_result(self) -> None:
         updates = extract_terminal_updates(
