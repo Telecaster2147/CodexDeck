@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "lifecycle-terminal-current-shape",
+      "file": "replay_lifecycle_terminal.jsonl",
+      "shape_family": "event_msg-response_item",
+      "observed_date": "2026-07-22",
+      "chunk_sizes": [17, 31, 5, 97, 211],
+      "expected": {
+        "lifecycle": "COMPLETED",
+        "terminal_count": 1,
+        "unknown_total": 0
+      }
+    },
+    {
+      "name": "unknown-phase-conservative",
+      "file": "replay_unknown_phase.jsonl",
+      "shape_family": "future-event-msg",
+      "observed_date": "2026-07-22",
+      "chunk_sizes": [9, 41],
+      "expected": {
+        "lifecycle": "STARTING",
+        "terminal_count": 0,
+        "unknown_total": 1
+      }
+    }
+  ]
+}

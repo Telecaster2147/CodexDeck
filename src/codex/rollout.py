@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from config import MAX_SESSION_TAIL
-from models import NormalizedEvent
+from models import NormalizedEvent, RolloutIdentity
 from utils import message_text
 from .events import is_compact_command, normalize_rollout_record, parse_timestamp
 from .terminal import (
@@ -54,6 +54,7 @@ class RolloutCursor:
     device: int
     inode: int
     offset: int
+    generation: int = 0
     partial: bytes = b""
     anchor: bytes = b""
     saw_turn_boundary: bool = False
@@ -82,6 +83,7 @@ class TerminalMetadataBackfillCursor:
     next_end: int
     floor: int
     process_ids: set[str]
+    generation: int = 0
     call_ids: set[str] = field(default_factory=set)
     process_call_ids: dict[str, set[str]] = field(default_factory=dict)
     resolved_process_ids: set[str] = field(default_factory=set)
@@ -146,6 +148,7 @@ class RolloutReader:
     def __init__(self) -> None:
         self.cursors: dict[str, RolloutCursor] = {}
         self.unknown_types: dict[str, Counter[str]] = {}
+        self.shape_types: dict[str, Counter[str]] = {}
         self.bootstrap_truncated: set[str] = set()
         self.terminal_metadata_attempted: dict[str, set[str]] = {}
         self.terminal_metadata_backfills: dict[str, TerminalMetadataBackfillCursor] = {}
@@ -173,8 +176,10 @@ class RolloutReader:
         )
         truncated = cursor is not None and stat.st_size < cursor.offset
         if cursor is None or replaced or truncated:
+            generation = cursor.generation + 1 if cursor is not None else 0
             if replaced or truncated:
                 self.unknown_types.pop(key, None)
+                self.shape_types.pop(key, None)
                 self.terminal_metadata_attempted.pop(key, None)
                 self.terminal_metadata_backfills.pop(key, None)
             start = max(0, stat.st_size - MAX_SESSION_TAIL)
@@ -186,6 +191,7 @@ class RolloutReader:
                 stat.st_dev,
                 stat.st_ino,
                 start,
+                generation=generation,
                 stat_size=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
             )
@@ -201,6 +207,7 @@ class RolloutReader:
                         # Detect copy-truncate even when the writer has already
                         # grown the new file beyond the previous byte offset.
                         self.unknown_types.pop(key, None)
+                        self.shape_types.pop(key, None)
                         self.terminal_metadata_attempted.pop(key, None)
                         self.terminal_metadata_backfills.pop(key, None)
                         start = max(0, stat.st_size - MAX_SESSION_TAIL)
@@ -212,6 +219,7 @@ class RolloutReader:
                             stat.st_dev,
                             stat.st_ino,
                             start,
+                            generation=cursor.generation + 1,
                             stat_size=stat.st_size,
                             mtime_ns=stat.st_mtime_ns,
                         )
@@ -262,6 +270,7 @@ class RolloutReader:
                 read_start,
                 (),
                 inode=stat.st_ino,
+                generation=cursor.generation,
                 allow=allow_terminal_metadata_backfill,
             )
             return RolloutReadResult(
@@ -306,10 +315,17 @@ class RolloutReader:
                         source_id,
                         parse_timestamp(record.get("timestamp")) or observed_at,
                         parser=self.terminal_parser,
-                        scope=f"{key}:{stat.st_ino}",
+                        scope=RolloutIdentity(
+                            path,
+                            stat.st_dev,
+                            stat.st_ino,
+                            cursor.generation,
+                        ),
                     )
                 )
                 record_type, item_type, item = _record_shape(record)
+                family = f"{record_type}:{item_type or '_'}"
+                self.shape_types.setdefault(key, Counter())[family] += 1
                 item_value = item.get("item")
                 item_value = item_value if isinstance(item_value, dict) else {}
                 compact_item_type = str(item_value.get("type") or "").lower()
@@ -533,6 +549,7 @@ class RolloutReader:
             read_start,
             tuple(terminal_updates),
             inode=stat.st_ino,
+            generation=cursor.generation,
             allow=allow_terminal_metadata_backfill,
         )
         terminal_updates = [*backfill, *terminal_updates]
@@ -578,6 +595,7 @@ class RolloutReader:
         current_updates: tuple[TerminalUpdate, ...],
         *,
         inode: int,
+        generation: int,
         allow: bool,
     ) -> tuple[TerminalUpdate, ...]:
         key = str(path)
@@ -606,6 +624,7 @@ class RolloutReader:
                 next_end=end_offset,
                 floor=max(0, end_offset - MAX_TERMINAL_METADATA_BACKFILL),
                 process_ids=process_ids,
+                generation=generation,
                 call_ids=call_ids,
                 process_call_ids=process_call_ids,
             )
@@ -666,7 +685,17 @@ class RolloutReader:
                 continue
             source_id = f"rollout:{stat.st_ino}:{line_offset}:metadata"
             observed_at = parse_timestamp(record.get("timestamp")) or stat.st_mtime
-            for update in extract_terminal_updates(record, source_id, observed_at):
+            for update in extract_terminal_updates(
+                record,
+                source_id,
+                observed_at,
+                scope=RolloutIdentity(
+                    path,
+                    stat.st_dev,
+                    stat.st_ino,
+                    state.generation,
+                ),
+            ):
                 matched_processes = (
                     {update.process_id}
                     if update.process_id in state.process_ids
@@ -714,6 +743,12 @@ class RolloutReader:
             total.update(self.unknown_types.get(path, {}))
         return dict(sorted(total.items()))
 
+    def shape_counts(self, paths: set[str]) -> dict[str, int]:
+        total: Counter[str] = Counter()
+        for path in paths:
+            total.update(self.shape_types.get(path, {}))
+        return dict(sorted(total.items()))
+
     def has_truncated_context(self, paths: set[str]) -> bool:
         return bool(paths & self.bootstrap_truncated)
 
@@ -726,6 +761,11 @@ class RolloutReader:
         self.unknown_types = {
             path: counts
             for path, counts in self.unknown_types.items()
+            if path in active_paths
+        }
+        self.shape_types = {
+            path: counts
+            for path, counts in self.shape_types.items()
             if path in active_paths
         }
         self.bootstrap_truncated.intersection_update(active_paths)

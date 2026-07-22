@@ -628,6 +628,397 @@ def _failure(timestamp: float, payload: dict[str, Any], turn_id: str, source: st
     return FailureInfo(category, message, details, turn_id, timestamp, source)
 
 
+def normalize_attention_record(
+    timestamp: float,
+    item_type: str,
+    payload: dict[str, Any],
+    source_id: str,
+    turn_id: str,
+) -> list[NormalizedEvent] | None:
+    attention_types = {
+        "exec_approval_request": "APPROVAL",
+        "apply_patch_approval_request": "APPROVAL",
+        "request_permissions": "PERMISSIONS",
+        "request_user_input": "USER_INPUT",
+        "elicitation_request": "MCP_ELICITATION",
+        "auth_elicitation_request": "AUTH_ELICITATION",
+    }
+    if item_type in attention_types:
+        state = attention_types[item_type]
+        request = payload.get("request")
+        if item_type == "elicitation_request" and isinstance(request, dict):
+            if str(request.get("mode") or "").lower() in {"url", "auth"}:
+                state = "AUTH_ELICITATION"
+        return [_attention_event(timestamp, payload, source_id, turn_id, state)]
+    if item_type not in {
+        "exec_approval",
+        "patch_approval",
+        "resolve_elicitation",
+        "user_input_answer",
+        "request_permissions_response",
+    }:
+        return None
+    return [
+        _event(
+            timestamp,
+            "ACTION_RESOLVED",
+            source="rollout",
+            source_id=source_id,
+            turn_id=turn_id,
+            metadata={
+                "request_id": str(payload.get("approval_id") or payload.get("id") or ""),
+                "call_id": str(payload.get("call_id") or ""),
+            },
+        )
+    ]
+
+
+def normalize_collaboration_record(
+    timestamp: float,
+    item_type: str,
+    payload: dict[str, Any],
+    source_id: str,
+    turn_id: str,
+) -> list[NormalizedEvent] | None:
+    actions = {
+        "collab_agent_spawn_begin": "AGENT_SPAWN_STARTED",
+        "collab_agent_spawn_end": "AGENT_SPAWNED",
+        "collab_agent_interaction_begin": "AGENT_INTERACTION_STARTED",
+        "collab_agent_interaction_end": "AGENT_INTERACTION_COMPLETED",
+        "collab_waiting_begin": "AGENT_WAIT_STARTED",
+        "collab_waiting_end": "AGENT_WAIT_COMPLETED",
+        "collab_agent_resume_begin": "AGENT_RESUME_STARTED",
+        "collab_agent_resume_end": "AGENT_RESUMED",
+        "collab_agent_close_begin": "AGENT_CLOSE_STARTED",
+        "collab_agent_close_end": "AGENT_CLOSED",
+        "subagent_status": "AGENT_STATUS",
+        "subagent_activity": "AGENT_STATUS",
+    }
+    if item_type == "sub_agent_activity":
+        return [_subagent_activity(timestamp, payload, source_id, turn_id)]
+    if item_type not in actions:
+        return None
+    metadata = _collab_metadata(payload)
+    return [
+        _event(
+            timestamp,
+            actions[item_type],
+            metadata.get("nickname") or metadata.get("status") or item_type,
+            source="rollout",
+            source_id=source_id,
+            turn_id=turn_id,
+            metadata=metadata,
+        )
+    ]
+
+
+def normalize_compaction_record(
+    timestamp: float,
+    record_type: str,
+    item_type: str,
+    payload: dict[str, Any],
+    source_id: str,
+    turn_id: str,
+    *,
+    inferred_manual_compact: bool = False,
+    inferred_auto_compact: bool = False,
+    context_tokens: int | None = None,
+    context_window: int | None = None,
+    compact_started_at: float | None = None,
+    compact_started_source_id: str = "",
+    compact_started_turn_id: str = "",
+) -> list[NormalizedEvent] | None:
+    compact_request = (
+        record_type == "event_msg" and item_type == "user_message"
+    ) or (
+        record_type == "response_item"
+        and item_type == "message"
+        and payload.get("role") == "user"
+    )
+    if compact_request and is_compact_command(payload):
+        metadata: dict[str, Any] = {"trigger": "manual", "explicit_command": True}
+        if context_tokens is not None:
+            metadata["context_tokens"] = context_tokens
+        if context_window is not None:
+            metadata["context_window"] = context_window
+        if context_tokens is not None and context_window:
+            metadata["context_ratio"] = context_tokens / context_window
+        return [
+            _event(
+                timestamp,
+                "COMPACT_REQUESTED",
+                "用户已发送 /compact",
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                metadata=metadata,
+            )
+        ]
+    if record_type == "response_item" and item_type in {"compaction", "context_compaction"}:
+        return []
+    if record_type == "event_msg" and item_type in {"item_started", "item_completed"}:
+        item = payload.get("item")
+        item = item if isinstance(item, dict) else {}
+        compact_item_type = str(item.get("type") or "").lower()
+        if "compact" in compact_item_type:
+            return [
+                _event(
+                    timestamp,
+                    "COMPACTING" if item_type == "item_started" else "COMPACT_COMPLETED",
+                    "上下文压缩已开始" if item_type == "item_started" else "上下文压缩已完成",
+                    source="rollout",
+                    source_id=source_id,
+                    turn_id=turn_id,
+                    metadata={
+                        "trigger": str(item.get("trigger") or "unknown"),
+                        "item_type": compact_item_type,
+                    },
+                )
+            ]
+    is_completed = (
+        record_type == "event_msg" and item_type == "context_compacted"
+    ) or record_type in {"compacted", "context_compacted"}
+    if not is_completed:
+        return None
+    return _compaction_events(
+        timestamp,
+        payload,
+        source_id=source_id,
+        turn_id=turn_id,
+        inferred_manual_compact=inferred_manual_compact,
+        inferred_auto_compact=inferred_auto_compact,
+        context_tokens=context_tokens,
+        context_window=context_window,
+        compact_started_at=compact_started_at,
+        compact_started_source_id=compact_started_source_id,
+        compact_started_turn_id=compact_started_turn_id,
+    )
+
+
+def normalize_tool_record(
+    timestamp: float,
+    item_type: str,
+    payload: dict[str, Any],
+    source_id: str,
+    turn_id: str,
+) -> list[NormalizedEvent] | None:
+    if item_type in {"item_started", "item_completed"}:
+        item = payload.get("item")
+        item = item if isinstance(item, dict) else {}
+        item_kind = str(item.get("type") or "").lower()
+        if "compact" in item_kind:
+            return None
+        metadata = _tool_metadata(payload, str(item.get("type") or "item"))
+        metadata["item_id"] = str(payload.get("item_id") or item.get("id") or "")
+        if item_kind == "command_execution":
+            return [
+                _event(
+                    timestamp,
+                    "TOOL_RUNNING" if item_type == "item_started" else "TOOL_COMPLETED",
+                    metadata["display_name"],
+                    source="rollout",
+                    source_id=source_id,
+                    turn_id=turn_id,
+                    metadata=metadata,
+                    complete=item_type == "item_completed",
+                )
+            ]
+        return [
+            _event(
+                timestamp,
+                "ITEM_STARTED" if item_type == "item_started" else "ITEM_COMPLETED",
+                metadata["display_name"],
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                metadata=metadata,
+            )
+        ]
+    begin_types = {
+        "exec_command_begin",
+        "mcp_tool_call_begin",
+        "dynamic_tool_call_begin",
+    }
+    end_types = {
+        "exec_command_end",
+        "mcp_tool_call_end",
+        "dynamic_tool_call_end",
+    }
+    if item_type in begin_types | end_types:
+        metadata = _tool_metadata(payload, item_type)
+        return [
+            _event(
+                timestamp,
+                "TOOL_RUNNING" if item_type in begin_types else "TOOL_COMPLETED",
+                metadata["display_name"],
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                metadata=metadata,
+            )
+        ]
+    if item_type != "patch_apply_end":
+        return None
+    changes = payload.get("changes")
+    changes = changes if isinstance(changes, dict) else {}
+    files = [redact_sensitive(str(path)) for path in changes]
+    change_types = {
+        redact_sensitive(str(path)): str(change.get("type") or "update")
+        for path, change in changes.items()
+        if isinstance(change, dict)
+    }
+    success = bool(payload.get("success"))
+    metadata = _tool_metadata(payload, item_type)
+    metadata.update(
+        {
+            "files": files,
+            "change_types": change_types,
+            "success": success,
+            "output": _bounded_metadata_text(payload.get("stdout") or payload.get("stderr")),
+        }
+    )
+    detail = f"{len(files)} 个文件"
+    if files:
+        detail += "：" + "，".join(files[:3])
+        if len(files) > 3:
+            detail += f" 等 {len(files)} 个"
+    return [
+        _event(
+            timestamp,
+            "FILE_CHANGE_APPLIED" if success else "FILE_CHANGE_FAILED",
+            detail,
+            source="rollout",
+            source_id=source_id,
+            turn_id=turn_id,
+            metadata=metadata,
+        )
+    ]
+
+
+def normalize_response_item(
+    timestamp: float,
+    item_type: str,
+    payload: dict[str, Any],
+    source_id: str,
+    turn_id: str,
+) -> list[NormalizedEvent]:
+    if item_type == "agent_message":
+        return [
+            _event(
+                timestamp,
+                "MODEL_PROGRESS",
+                message_text(payload),
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+            )
+        ]
+    if item_type == "reasoning":
+        summary = _structured_text(payload.get("summary"))
+        content = _structured_text(payload.get("content"))
+        detail = summary or content
+        return [
+            _event(
+                timestamp,
+                "REASONING_SUMMARY" if detail else "MODEL_PROGRESS",
+                detail,
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                metadata={
+                    "summary_available": bool(summary),
+                    "raw_available": bool(content),
+                    "encrypted": bool(payload.get("encrypted_content")),
+                },
+            )
+        ]
+    if item_type in {"web_search_call", "image_generation_call"}:
+        tool_name = "web_search" if item_type == "web_search_call" else "image_generation"
+        status = str(payload.get("status") or "completed").lower()
+        running = status in {"in_progress", "pending", "running"}
+        metadata = _tool_metadata(
+            {**payload, "name": tool_name, "input": payload.get("action")},
+            item_type,
+        )
+        return [
+            _event(
+                timestamp,
+                "TOOL_RUNNING" if running else "TOOL_COMPLETED",
+                metadata["display_name"],
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                metadata=metadata,
+                complete=not running,
+            )
+        ]
+    if item_type == "message" and payload.get("role") == "assistant":
+        return [
+            _event(
+                timestamp,
+                "MODEL_PROGRESS",
+                message_text(payload),
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+            )
+        ]
+    if item_type in {"custom_tool_call", "function_call", "local_shell_call"}:
+        metadata = _tool_metadata(payload, item_type)
+        return [
+            _event(
+                timestamp,
+                "TOOL_RUNNING",
+                metadata["display_name"],
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                derived=True,
+                complete=False,
+                metadata=metadata,
+            )
+        ]
+    if item_type in {
+        "custom_tool_call_output",
+        "function_call_output",
+        "local_shell_call_output",
+    }:
+        metadata = _tool_metadata(payload, item_type)
+        return [
+            _event(
+                timestamp,
+                "TOOL_COMPLETED",
+                source="rollout",
+                source_id=source_id,
+                turn_id=turn_id,
+                derived=True,
+                complete=False,
+                metadata=metadata,
+            )
+        ]
+    if item_type == "message":
+        return []
+    return [_unparsed_event(timestamp, "response_item", item_type, payload, source_id, turn_id)]
+
+
+def normalize_event_message(
+    timestamp: float,
+    item_type: str,
+    payload: dict[str, Any],
+    source_id: str,
+    turn_id: str,
+) -> list[NormalizedEvent] | None:
+    for handler in (
+        normalize_attention_record,
+        normalize_tool_record,
+        normalize_collaboration_record,
+    ):
+        events = handler(timestamp, item_type, payload, source_id, turn_id)
+        if events is not None:
+            return events
+    return None
+
+
 def normalize_rollout_record(
     record: dict[str, Any],
     source_id: str,
@@ -664,61 +1055,30 @@ def normalize_rollout_record(
             )
         ]
 
+    compaction = normalize_compaction_record(
+        timestamp,
+        record_type,
+        item_type,
+        payload,
+        source_id,
+        turn_id,
+        inferred_manual_compact=inferred_manual_compact,
+        inferred_auto_compact=inferred_auto_compact,
+        context_tokens=context_tokens,
+        context_window=context_window,
+        compact_started_at=compact_started_at,
+        compact_started_source_id=compact_started_source_id,
+        compact_started_turn_id=compact_started_turn_id,
+    )
+    if compaction is not None:
+        return compaction
+
     if record_type == "event_msg":
-        attention_types = {
-            "exec_approval_request": "APPROVAL",
-            "apply_patch_approval_request": "APPROVAL",
-            "request_permissions": "PERMISSIONS",
-            "request_user_input": "USER_INPUT",
-            "elicitation_request": "MCP_ELICITATION",
-            "auth_elicitation_request": "AUTH_ELICITATION",
-        }
-        if item_type in attention_types:
-            state = attention_types[item_type]
-            request = payload.get("request")
-            if item_type == "elicitation_request" and isinstance(request, dict):
-                if str(request.get("mode") or "").lower() in {"url", "auth"}:
-                    state = "AUTH_ELICITATION"
-            return [_attention_event(timestamp, payload, source_id, turn_id, state)]
-        if item_type in {
-            "exec_approval",
-            "patch_approval",
-            "resolve_elicitation",
-            "user_input_answer",
-            "request_permissions_response",
-        }:
-            return [
-                _event(
-                    timestamp,
-                    "ACTION_RESOLVED",
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata={
-                        "request_id": str(payload.get("approval_id") or payload.get("id") or ""),
-                        "call_id": str(payload.get("call_id") or ""),
-                    },
-                )
-            ]
-        if item_type == "user_message" and is_compact_command(payload):
-            metadata: dict[str, Any] = {"trigger": "manual", "explicit_command": True}
-            if context_tokens is not None:
-                metadata["context_tokens"] = context_tokens
-            if context_window is not None:
-                metadata["context_window"] = context_window
-            if context_tokens is not None and context_window:
-                metadata["context_ratio"] = context_tokens / context_window
-            return [
-                _event(
-                    timestamp,
-                    "COMPACT_REQUESTED",
-                    "用户已发送 /compact",
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
+        handled = normalize_event_message(
+            timestamp, item_type, payload, source_id, turn_id
+        )
+        if handled is not None:
+            return handled
         if item_type == "thread_settings_applied":
             settings = payload.get("thread_settings")
             settings = settings if isinstance(settings, dict) else {}
@@ -842,20 +1202,6 @@ def normalize_rollout_record(
                     turn_id=turn_id,
                 )
             ]
-        if item_type == "context_compacted":
-            return _compaction_events(
-                timestamp,
-                payload,
-                source_id=source_id,
-                turn_id=turn_id,
-                inferred_manual_compact=inferred_manual_compact,
-                inferred_auto_compact=inferred_auto_compact,
-                context_tokens=context_tokens,
-                context_window=context_window,
-                compact_started_at=compact_started_at,
-                compact_started_source_id=compact_started_source_id,
-                compact_started_turn_id=compact_started_turn_id,
-            )
         if item_type == "token_count":
             return [
                 _event(
@@ -877,151 +1223,6 @@ def normalize_rollout_record(
                 _event(
                     timestamp,
                     "RATE_LIMIT",
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
-        if item_type in {"item_started", "item_completed"}:
-            item = payload.get("item")
-            item = item if isinstance(item, dict) else {}
-            compact_item_type = str(item.get("type") or "").lower()
-            if "compact" in compact_item_type:
-                return [
-                    _event(
-                        timestamp,
-                        "COMPACTING" if item_type == "item_started" else "COMPACT_COMPLETED",
-                        "上下文压缩已开始" if item_type == "item_started" else "上下文压缩已完成",
-                        source="rollout",
-                        source_id=source_id,
-                        turn_id=turn_id,
-                        metadata={
-                            "trigger": str(item.get("trigger") or "unknown"),
-                            "item_type": compact_item_type,
-                        },
-                    )
-                ]
-            metadata = _tool_metadata(payload, str(item.get("type") or "item"))
-            metadata["item_id"] = str(payload.get("item_id") or item.get("id") or "")
-            if compact_item_type == "command_execution":
-                return [
-                    _event(
-                        timestamp,
-                        "TOOL_RUNNING" if item_type == "item_started" else "TOOL_COMPLETED",
-                        metadata["display_name"],
-                        source="rollout",
-                        source_id=source_id,
-                        turn_id=turn_id,
-                        metadata=metadata,
-                        complete=item_type == "item_completed",
-                    )
-                ]
-            return [
-                _event(
-                    timestamp,
-                    "ITEM_STARTED" if item_type == "item_started" else "ITEM_COMPLETED",
-                    metadata["display_name"],
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
-        if item_type in {
-            "exec_command_begin",
-            "mcp_tool_call_begin",
-            "dynamic_tool_call_begin",
-        }:
-            metadata = _tool_metadata(payload, item_type)
-            return [
-                _event(
-                    timestamp,
-                    "TOOL_RUNNING",
-                    metadata["display_name"],
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
-        if item_type in {
-            "exec_command_end",
-            "mcp_tool_call_end",
-            "dynamic_tool_call_end",
-        }:
-            metadata = _tool_metadata(payload, item_type)
-            return [
-                _event(
-                    timestamp,
-                    "TOOL_COMPLETED",
-                    metadata["display_name"],
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
-        if item_type == "patch_apply_end":
-            changes = payload.get("changes")
-            changes = changes if isinstance(changes, dict) else {}
-            files = [redact_sensitive(str(path)) for path in changes]
-            change_types = {
-                redact_sensitive(str(path)): str(change.get("type") or "update")
-                for path, change in changes.items()
-                if isinstance(change, dict)
-            }
-            success = bool(payload.get("success"))
-            metadata = _tool_metadata(payload, item_type)
-            metadata.update(
-                {
-                    "files": files,
-                    "change_types": change_types,
-                    "success": success,
-                    "output": _bounded_metadata_text(
-                        payload.get("stdout") or payload.get("stderr")
-                    ),
-                }
-            )
-            detail = f"{len(files)} 个文件"
-            if files:
-                detail += "：" + "，".join(files[:3])
-                if len(files) > 3:
-                    detail += f" 等 {len(files)} 个"
-            return [
-                _event(
-                    timestamp,
-                    "FILE_CHANGE_APPLIED" if success else "FILE_CHANGE_FAILED",
-                    detail,
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
-        collab_actions = {
-            "collab_agent_spawn_begin": "AGENT_SPAWN_STARTED",
-            "collab_agent_spawn_end": "AGENT_SPAWNED",
-            "collab_agent_interaction_begin": "AGENT_INTERACTION_STARTED",
-            "collab_agent_interaction_end": "AGENT_INTERACTION_COMPLETED",
-            "collab_waiting_begin": "AGENT_WAIT_STARTED",
-            "collab_waiting_end": "AGENT_WAIT_COMPLETED",
-            "collab_agent_resume_begin": "AGENT_RESUME_STARTED",
-            "collab_agent_resume_end": "AGENT_RESUMED",
-            "collab_agent_close_begin": "AGENT_CLOSE_STARTED",
-            "collab_agent_close_end": "AGENT_CLOSED",
-            "subagent_status": "AGENT_STATUS",
-            "subagent_activity": "AGENT_STATUS",
-        }
-        if item_type == "sub_agent_activity":
-            return [_subagent_activity(timestamp, payload, source_id, turn_id)]
-        if item_type in collab_actions:
-            metadata = _collab_metadata(payload)
-            return [
-                _event(
-                    timestamp,
-                    collab_actions[item_type],
-                    metadata.get("nickname") or metadata.get("status") or item_type,
                     source="rollout",
                     source_id=source_id,
                     turn_id=turn_id,
@@ -1081,145 +1282,12 @@ def normalize_rollout_record(
         ]
 
     if record_type == "response_item":
-        if item_type == "message" and payload.get("role") == "user" and is_compact_command(payload):
-            metadata: dict[str, Any] = {"trigger": "manual", "explicit_command": True}
-            if context_tokens is not None:
-                metadata["context_tokens"] = context_tokens
-            if context_window is not None:
-                metadata["context_window"] = context_window
-            if context_tokens is not None and context_window:
-                metadata["context_ratio"] = context_tokens / context_window
-            return [
-                _event(
-                    timestamp,
-                    "COMPACT_REQUESTED",
-                    "用户已发送 /compact",
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                )
-            ]
-        if item_type == "agent_message":
-            return [
-                _event(
-                    timestamp,
-                    "MODEL_PROGRESS",
-                    message_text(payload),
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                )
-            ]
-        if item_type == "reasoning":
-            summary = _structured_text(payload.get("summary"))
-            content = _structured_text(payload.get("content"))
-            detail = summary or content
-            return [
-                _event(
-                    timestamp,
-                    "REASONING_SUMMARY" if detail else "MODEL_PROGRESS",
-                    detail,
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata={
-                        "summary_available": bool(summary),
-                        "raw_available": bool(content),
-                        "encrypted": bool(payload.get("encrypted_content")),
-                    },
-                )
-            ]
-        if item_type in {"compaction", "context_compaction"}:
-            return []
-        if item_type in {"web_search_call", "image_generation_call"}:
-            tool_name = "web_search" if item_type == "web_search_call" else "image_generation"
-            status = str(payload.get("status") or "completed").lower()
-            running = status in {"in_progress", "pending", "running"}
-            metadata = _tool_metadata(
-                {
-                    **payload,
-                    "name": tool_name,
-                    "input": payload.get("action"),
-                },
-                item_type,
-            )
-            return [
-                _event(
-                    timestamp,
-                    "TOOL_RUNNING" if running else "TOOL_COMPLETED",
-                    metadata["display_name"],
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    metadata=metadata,
-                    complete=not running,
-                )
-            ]
-        if item_type == "message" and payload.get("role") == "assistant":
-            return [
-                _event(
-                    timestamp,
-                    "MODEL_PROGRESS",
-                    message_text(payload),
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                )
-            ]
-        if item_type in {"custom_tool_call", "function_call", "local_shell_call"}:
-            metadata = _tool_metadata(payload, item_type)
-            return [
-                _event(
-                    timestamp,
-                    "TOOL_RUNNING",
-                    metadata["display_name"],
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    derived=True,
-                    complete=False,
-                    metadata=metadata,
-                )
-            ]
-        if item_type in {
-            "custom_tool_call_output",
-            "function_call_output",
-            "local_shell_call_output",
-        }:
-            metadata = _tool_metadata(payload, item_type)
-            return [
-                _event(
-                    timestamp,
-                    "TOOL_COMPLETED",
-                    source="rollout",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    derived=True,
-                    complete=False,
-                    metadata=metadata,
-                )
-            ]
-        if item_type == "message":
-            return []
-        return [
-            _unparsed_event(
-                timestamp, record_type, item_type, payload, source_id, turn_id
-            )
-        ]
-    if record_type in {"compacted", "context_compacted"}:
-        return _compaction_events(
+        return normalize_response_item(
             timestamp,
+            item_type,
             payload,
-            source_id=source_id,
-            turn_id=turn_id,
-            inferred_manual_compact=inferred_manual_compact,
-            inferred_auto_compact=inferred_auto_compact,
-            context_tokens=context_tokens,
-            context_window=context_window,
-            compact_started_at=compact_started_at,
-            compact_started_source_id=compact_started_source_id,
-            compact_started_turn_id=compact_started_turn_id,
+            source_id,
+            turn_id,
         )
     return []
 
@@ -1302,11 +1370,11 @@ def normalize_log(record: LogRecord) -> list[NormalizedEvent]:
             "response.failed": "TURN_FAILED",
             "response.incomplete": "TURN_FAILED",
         }
-        kind = mapping.get(event_type)
-        if kind:
+        mapped_kind = mapping.get(event_type)
+        if mapped_kind:
             failure = None
             detail = event_type
-            if kind == "TURN_FAILED":
+            if mapped_kind == "TURN_FAILED":
                 error = response.get("error")
                 error = error if isinstance(error, dict) else {}
                 message = redact_sensitive(
@@ -1320,7 +1388,7 @@ def normalize_log(record: LogRecord) -> list[NormalizedEvent]:
             return [
                 _event(
                     record.timestamp,
-                    kind,
+                    mapped_kind,
                     detail,
                     source="sse",
                     source_id=source_id,

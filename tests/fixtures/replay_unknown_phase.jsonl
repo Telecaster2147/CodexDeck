@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-22T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"TURN_ID"}}
+{"timestamp":"2026-07-22T00:00:01Z","type":"event_msg","payload":{"type":"future_phase_transition","status":"completed"}}

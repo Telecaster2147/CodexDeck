@@ -6,7 +6,7 @@ import json
 import re
 import time
 from collections import defaultdict
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +37,9 @@ from models import (
     ObservationPulse,
     ProtocolCapabilities,
     ProcessInfo,
+    SessionIdentity,
     SessionHealth,
+    SocketInfo,
 )
 from network.classifier import assess_process_network
 from network.packet import PacketInspector
@@ -45,6 +47,19 @@ from network.sockets import SocketCollector
 from snapshot_publisher import SnapshotPublisher
 from state_machine import PROGRESS_KINDS, SessionStateMachine
 from utils import CommandError, compact_path, one_line
+
+
+@dataclass(frozen=True)
+class _DiscoveryStage:
+    result: DiscoveryResult
+    by_instance: dict[str, list[ProcessInfo]]
+    active_process_keys: set[str]
+
+
+@dataclass(frozen=True)
+class _SocketStage:
+    by_pid: dict[int, list[SocketInfo]]
+    stale: bool
 
 
 class MonitorEngine:
@@ -87,14 +102,14 @@ class MonitorEngine:
         self.task_cache: dict[str, tuple[int, int, int, str]] = {}
         self.rollout_path_cache: dict[str, tuple[Path | None, str]] = {}
         self.store_cache: dict[str, StateStore] = {}
-        self.live_sessions: dict[str, SessionHealth] = {}
+        self.live_sessions: dict[SessionIdentity, SessionHealth] = {}
         self.terminals = TerminalStore()
         self.terminal_files = RegularFileTailCollector(
             getattr(self.proc, "root", Path("/proc"))
         )
-        self.retired_sessions: dict[str, tuple[SessionHealth, float]] = {}
+        self.retired_sessions: dict[SessionIdentity, tuple[SessionHealth, float]] = {}
         self.instance_templates: dict[str, InstanceSnapshot] = {}
-        self.pinned_session_key = ""
+        self.pinned_session_key: SessionIdentity | None = None
         self.last_discovery: DiscoveryResult | None = None
         self.last_socket_by_pid: dict[int, list] = {}
         self.discovery_stale_since: float | None = None
@@ -129,10 +144,11 @@ class MonitorEngine:
 
         return self._collect_full_sample()
 
-    def _collect_full_sample(self) -> MonitorSnapshot:
-        started = time.monotonic()
-        now_monotonic = started
-        diagnostics: list[str] = []
+    def _collect_discovery_stage(
+        self,
+        now_monotonic: float,
+        diagnostics: list[str],
+    ) -> _DiscoveryStage:
         process_started = time.monotonic()
         try:
             discovery = self.discovery.discover(self.selected_pids, self.selected_homes)
@@ -149,6 +165,21 @@ class MonitorEngine:
             stale_age = now_monotonic - self.discovery_stale_since
             diagnostics.append(f"进程列表已过期 {stale_age:.1f}s：{exc}")
 
+        by_instance: dict[str, list[ProcessInfo]] = defaultdict(list)
+        for process in discovery.processes:
+            by_instance[process.instance_id].append(process)
+        return _DiscoveryStage(
+            result=discovery,
+            by_instance=dict(by_instance),
+            active_process_keys={process.stable_key for process in discovery.processes},
+        )
+
+    def _collect_socket_stage(
+        self,
+        discovery: DiscoveryResult,
+        now_monotonic: float,
+        diagnostics: list[str],
+    ) -> _SocketStage:
         pids = {process.pid for process in discovery.processes}
         socket_started = time.monotonic()
         try:
@@ -167,15 +198,24 @@ class MonitorEngine:
             diagnostics.append(f"TCP 快照已过期 {stale_age:.1f}s：{exc}")
 
         self._annotate_packet_metadata(socket_by_pid, diagnostics)
+        return _SocketStage(by_pid=socket_by_pid, stale=sockets_stale)
 
-        by_instance: dict[str, list[ProcessInfo]] = defaultdict(list)
-        for process in discovery.processes:
-            by_instance[process.instance_id].append(process)
+    def _collect_full_sample(self) -> MonitorSnapshot:
+        started = time.monotonic()
+        now_monotonic = started
+        diagnostics: list[str] = []
+        discovery_stage = self._collect_discovery_stage(now_monotonic, diagnostics)
+        discovery = discovery_stage.result
+        socket_stage = self._collect_socket_stage(discovery, now_monotonic, diagnostics)
+        socket_by_pid = socket_stage.by_pid
+        sockets_stale = socket_stage.stale
+
+        by_instance = discovery_stage.by_instance
+        active_process_keys = discovery_stage.active_process_keys
 
         instance_snapshots: list[InstanceSnapshot] = []
-        active_session_keys: set[str] = set()
+        active_session_keys: set[SessionIdentity] = set()
         active_rollouts: set[str] = set()
-        active_process_keys = {process.stable_key for process in discovery.processes}
         active_session_log_paths: set[str] = set()
         hook_started = time.monotonic()
         hook_records = self.compact_evidence.read_hooks()
@@ -202,6 +242,7 @@ class MonitorEngine:
 
         for instance_id, processes in by_instance.items():
             resolved = discovery.instances[instance_id]
+            instance_identity = resolved.identity
             instance_diagnostics: list[str] = []
             instance_rollouts: set[str] = set()
             codex_config = self.codex_configs.read(resolved.paths.codex_home)
@@ -268,9 +309,11 @@ class MonitorEngine:
                 title = names.get(session_id, "") or (record.title if record else "")
                 fallback_task = (record.preview or record.first_user_message) if record else ""
                 task = self._latest_task(rollout_path) if rollout_path else ""
-                previous = self.live_sessions.get(f"{instance_id}:{session_id}")
+                session_identity = SessionIdentity(instance_identity, session_id)
+                previous = self.live_sessions.get(session_identity)
                 process = replace(
                     process,
+                    instance_identity=instance_identity,
                     cwd=(record.cwd if record and record.cwd else process.cwd),
                     session_id=session_id,
                     session_title=self._bounded(one_line(title), 120),
@@ -406,7 +449,7 @@ class MonitorEngine:
                     )
 
                 incoming = list(events_by_session.get(session_id, []))
-                session_key = f"{instance_id}:{session_id}"
+                session_key = SessionIdentity(instance_identity, session_id)
                 rollout_activities: list[RolloutActivity] = []
                 seen_rollouts: set[str] = set()
                 observed_at = time.time()
@@ -455,6 +498,7 @@ class MonitorEngine:
                             if process_tree_sampled_at
                             else None
                         ),
+                        workspace=process.cwd,
                     )
                 else:
                     self.terminals.mark_process_unavailable(session_key)
@@ -616,7 +660,10 @@ class MonitorEngine:
                         network,
                         observation=observation,
                     )
-                session.terminal_sessions = self.terminals.current_summaries(session_key)
+                session = replace(
+                    session,
+                    terminal_sessions=self.terminals.current_summaries(session_key),
+                )
                 sessions.append(session)
                 for candidate in candidates:
                     self.previous_sockets[candidate.stable_key] = socket_by_pid.get(
@@ -635,6 +682,7 @@ class MonitorEngine:
                     instance_id=instance_id,
                     paths=resolved.paths,
                     display_codex_home=compact_path(resolved.paths.codex_home),
+                    identity=instance_identity,
                     display_sqlite_home=compact_path(resolved.paths.sqlite_home),
                     discovery_method=resolved.method,
                     capabilities=store.capabilities,
@@ -642,6 +690,9 @@ class MonitorEngine:
                     collector_health=collector_health,
                     diagnostics=instance_diagnostics,
                     unknown_event_types=self.rollouts.unknown_counts(instance_rollouts),
+                    protocol_shape_families=self.rollouts.shape_counts(
+                        instance_rollouts
+                    ),
                     rollout_context_truncated=(
                         self.rollouts.has_truncated_context(instance_rollouts)
                     ),
@@ -690,7 +741,10 @@ class MonitorEngine:
                 )
             )
 
-        unresolved_hooks = self._apply_hook_records(instance_snapshots, hook_records)
+        instance_snapshots, unresolved_hooks = self._apply_hook_records(
+            instance_snapshots,
+            hook_records,
+        )
         if unresolved_hooks:
             diagnostics.append(
                 f"{unresolved_hooks} 条 compact hook 事件缺少唯一可关联 session"
@@ -719,7 +773,7 @@ class MonitorEngine:
         *,
         by_instance: set[str],
         active_process_keys: set[str],
-        active_session_keys: set[str],
+        active_session_keys: set[SessionIdentity],
         active_rollouts: set[str],
         active_session_log_paths: set[str],
     ) -> None:
@@ -803,7 +857,7 @@ class MonitorEngine:
                 rollout_activity = RolloutActivity(process.rollout_path, time.time())
                 rollout_events: tuple[NormalizedEvent, ...] = ()
                 terminal_changed = False
-                key = f"{session.instance_id}:{session.session_id}"
+                key = session.session_identity
                 if process.rollout_path:
                     rollout_paths.add(process.rollout_path)
                     rollout_result = self.rollouts.read_with_activity(
@@ -883,29 +937,11 @@ class MonitorEngine:
                             observation=observation,
                         )
                     self.live_sessions[key] = session
-                else:
-                    session.observation = replace(
-                        session.observation,
-                        sampled_at=rollout_activity.observed_at,
-                        rollout_probe_at=(
-                            rollout_activity.observed_at
-                            if rollout_activity.available
-                            else session.observation.rollout_probe_at
-                        ),
-                        last_probe_at=max(
-                            filter(
-                                lambda value: value is not None,
-                                (
-                                    session.observation.last_probe_at,
-                                    rollout_activity.observed_at
-                                    if rollout_activity.available
-                                    else None,
-                                ),
-                            ),
-                            default=None,
-                        ),
+                if incoming or rollout_activity.changed or terminal_changed:
+                    session = replace(
+                        session,
+                        terminal_sessions=self.terminals.current_summaries(key),
                     )
-                session.terminal_sessions = self.terminals.current_summaries(key)
                 refreshed_sessions.append(session)
                 refreshed_processes[process.stable_key] = session.process
 
@@ -920,6 +956,7 @@ class MonitorEngine:
                         refreshed_sessions
                     ),
                     unknown_event_types=self.rollouts.unknown_counts(rollout_paths),
+                    protocol_shape_families=self.rollouts.shape_counts(rollout_paths),
                     rollout_context_truncated=(
                         self.rollouts.has_truncated_context(rollout_paths)
                     ),
@@ -971,8 +1008,8 @@ class MonitorEngine:
         self,
         sessions: list[SessionHealth],
         records: list[tuple[str, NormalizedEvent]],
-    ) -> tuple[dict[str, list[NormalizedEvent]], int]:
-        routed: dict[str, list[NormalizedEvent]] = defaultdict(list)
+    ) -> tuple[dict[SessionIdentity, list[NormalizedEvent]], int]:
+        routed: dict[SessionIdentity, list[NormalizedEvent]] = defaultdict(list)
         active = [session for session in sessions if not session.process_exited]
         unresolved = 0
         for session_id, event in records:
@@ -985,7 +1022,7 @@ class MonitorEngine:
                     if any(
                         retained.turn_id == event.turn_id
                         for retained in self.machine.retained_events(
-                            f"{session.instance_id}:{session.session_id}"
+                            session.session_identity
                         )
                     )
                 ]
@@ -995,23 +1032,24 @@ class MonitorEngine:
                 unresolved += 1
                 continue
             session = matches[0]
-            routed[f"{session.instance_id}:{session.session_id}"].append(event)
+            routed[session.session_identity].append(event)
         return routed, unresolved
 
     def _apply_hook_records(
         self,
         snapshots: list[InstanceSnapshot],
         records: list[tuple[str, NormalizedEvent]],
-    ) -> int:
+    ) -> tuple[list[InstanceSnapshot], int]:
         sessions = [session for snapshot in snapshots for session in snapshot.sessions]
         routed, unresolved = self._route_hook_records(sessions, records)
         if not routed:
-            return unresolved
+            return snapshots, unresolved
+        updated_snapshots: list[InstanceSnapshot] = []
         for snapshot in snapshots:
             refreshed: list[SessionHealth] = []
             refreshed_processes: dict[str, ProcessInfo] = {}
             for session in snapshot.sessions:
-                key = f"{session.instance_id}:{session.session_id}"
+                key = session.session_identity
                 incoming = routed.get(key, [])
                 if incoming:
                     incoming = self._with_compact_config(
@@ -1036,17 +1074,25 @@ class MonitorEngine:
                         session.network,
                         observation=observation,
                     )
-                    session.terminal_sessions = self.terminals.current_summaries(key)
+                    session = replace(
+                        session,
+                        terminal_sessions=self.terminals.current_summaries(key),
+                    )
                     self.live_sessions[key] = session
                 refreshed.append(session)
                 refreshed_processes[session.process.stable_key] = session.process
-            snapshot.sessions = refreshed
-            snapshot.processes = [
-                refreshed_processes.get(process.stable_key, process)
-                for process in snapshot.processes
-            ]
-            snapshot.protocol_capabilities = self._merge_protocol_capabilities(refreshed)
-        return unresolved
+            updated_snapshots.append(
+                replace(
+                    snapshot,
+                    sessions=refreshed,
+                    processes=[
+                        refreshed_processes.get(process.stable_key, process)
+                        for process in snapshot.processes
+                    ],
+                    protocol_capabilities=self._merge_protocol_capabilities(refreshed),
+                )
+            )
+        return updated_snapshots, unresolved
 
     def _read_session_logs_once(
         self,
@@ -1062,7 +1108,7 @@ class MonitorEngine:
             paths[key] = path
             sessions_by_path[key].append(session)
 
-        routed: dict[str, list[NormalizedEvent]] = defaultdict(list)
+        routed: dict[SessionIdentity, list[NormalizedEvent]] = defaultdict(list)
         results: dict[str, SessionLogReadResult] = {}
         for path_key, candidates in sessions_by_path.items():
             default_session_id = candidates[0].session_id if len(candidates) == 1 else ""
@@ -1078,7 +1124,7 @@ class MonitorEngine:
                 if len(matches) != 1:
                     continue
                 session = matches[0]
-                routed[f"{session.instance_id}:{session.session_id}"].append(event)
+                routed[session.session_identity].append(event)
         return routed, results
 
     @staticmethod
@@ -1312,12 +1358,12 @@ class MonitorEngine:
     def _retain_exited_sessions(
         self,
         snapshots: list[InstanceSnapshot],
-        active_keys: set[str],
+        active_keys: set[SessionIdentity],
     ) -> None:
         """Keep recently exited sessions visible without treating them as unhealthy."""
 
         now = time.time()
-        current: dict[str, SessionHealth] = {}
+        current: dict[SessionIdentity, SessionHealth] = {}
         snapshot_by_instance = {snapshot.instance_id: snapshot for snapshot in snapshots}
         for snapshot in snapshots:
             self.instance_templates[snapshot.instance_id] = replace(
@@ -1326,7 +1372,7 @@ class MonitorEngine:
                 sessions=[],
             )
             for session in snapshot.sessions:
-                key = f"{session.instance_id}:{session.session_id}"
+                key = session.session_identity
                 current[key] = session
                 self.retired_sessions.pop(key, None)
 
@@ -1381,7 +1427,10 @@ class MonitorEngine:
                 observation=session.observation,
             )
             self.terminals.mark_stale(key)
-            retained.terminal_sessions = self.terminals.current_summaries(key)
+            retained = replace(
+                retained,
+                terminal_sessions=self.terminals.current_summaries(key),
+            )
             self.retired_sessions[key] = (retained, now)
 
         expiry = now - self.machine.lookback_seconds
@@ -1452,9 +1501,7 @@ class MonitorEngine:
     def pin_session(self, session: SessionHealth | None) -> None:
         """Retain the selected session timeline while the TUI references it."""
 
-        self.pinned_session_key = (
-            f"{session.instance_id}:{session.session_id}" if session else ""
-        )
+        self.pinned_session_key = session.session_identity if session else None
 
     @staticmethod
     def _bounded(value: str, limit: int) -> str:

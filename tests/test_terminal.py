@@ -15,10 +15,128 @@ from codex.terminal import (
     extract_terminal_updates,
     sanitize_terminal_text,
 )
-from models import ChildProcessActivity, ProcessIdentity, TerminalCapability
+from models import (
+    ChildProcessActivity,
+    InstanceIdentity,
+    ProcessIdentity,
+    RolloutIdentity,
+    SessionIdentity,
+    TerminalCapability,
+)
 
 
 class TerminalTranscriptTests(unittest.TestCase):
+    def test_store_scopes_reused_call_and_process_ids_by_rollout(self) -> None:
+        session = SessionIdentity(
+            InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A")),
+            "SESSION_ID",
+        )
+        first_scope = RolloutIdentity(Path("/workspace-a/first.jsonl"), 1, 10)
+        second_scope = RolloutIdentity(Path("/workspace-a/second.jsonl"), 1, 11)
+        store = TerminalStore()
+
+        for ordinal, scope in enumerate((first_scope, second_scope), start=1):
+            store.apply(
+                session,
+                (
+                    TerminalUpdate(
+                        "SAME_SOURCE_ID",
+                        float(ordinal),
+                        call_id="CALL_ID",
+                        process_id="PROCESS_ID",
+                        command="make watch",
+                        status="running",
+                        terminal_candidate=True,
+                        scope=scope,
+                    ),
+                ),
+            )
+
+        summaries = store.summaries(session)
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual({item.command for item in summaries}, {"make watch"})
+        self.assertEqual(len({item.terminal_id for item in summaries}), 2)
+        self.assertTrue(all(item.identity is not None for item in summaries))
+        self.assertEqual(len({item.identity for item in summaries}), 2)
+
+    def test_copy_truncate_starts_new_terminal_parser_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            invocation = {
+                "timestamp": 1,
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "CALL_ID",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "old-command --watch"}),
+                },
+            }
+            path.write_text(json.dumps(invocation) + "\n" + (" " * 256))
+            reader = RolloutReader()
+            first = reader.read_with_activity(path)
+            self.assertEqual(first.terminal_updates[0].command, "old-command --watch")
+
+            completion = {
+                "timestamp": 2,
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "CALL_ID",
+                    "output": (
+                        "Script running with cell ID PROCESS_ID\n"
+                        "Wall time 1 seconds\nOutput:\nnew output\n"
+                    ),
+                },
+            }
+            path.write_text(json.dumps(completion) + "\n")
+            second = reader.read_with_activity(path)
+
+        self.assertTrue(second.activity.truncated or second.activity.copy_truncated)
+        self.assertEqual(second.terminal_updates[0].command, "")
+        self.assertNotEqual(
+            first.terminal_updates[0].scope,
+            second.terminal_updates[0].scope,
+        )
+
+    def test_newer_rollout_scope_takes_over_same_os_child(self) -> None:
+        session = SessionIdentity(
+            InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A")),
+            "SESSION_ID",
+        )
+        first_scope = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10, 0)
+        second_scope = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10, 1)
+        store = TerminalStore()
+        for observed_at, scope in ((1.0, first_scope), (2.0, second_scope)):
+            store.apply(
+                session,
+                (
+                    TerminalUpdate(
+                        "SAME_SOURCE_ID",
+                        observed_at,
+                        call_id="CALL_ID",
+                        process_id="PROCESS_ID",
+                        command="make watch",
+                        status="running",
+                        terminal_candidate=True,
+                        scope=scope,
+                    ),
+                ),
+            )
+        child = ChildProcessActivity(
+            ProcessIdentity(42, 100),
+            command="make watch",
+            state="S",
+        )
+
+        store.reconcile_children(session, (child,), 3.0)
+
+        summaries = store.summaries(session)
+        self.assertEqual(len(summaries), 2)
+        self.assertFalse(summaries[0].process_active)
+        self.assertTrue(summaries[1].process_active)
+        self.assertEqual(store.current_summaries(session), [summaries[1]])
+
     def test_background_exec_and_polls_form_one_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rollout.jsonl"
@@ -1099,6 +1217,79 @@ const results = await Promise.all([
         self.assertFalse(progress_summary.process_active)
         self.assertEqual(in_progress_store.current_summaries("session"), [])
 
+    def test_process_reconciliation_publishes_unbackfilled_background_job_roots(
+        self,
+    ) -> None:
+        store = TerminalStore()
+        children = (
+            ChildProcessActivity(
+                ProcessIdentity(100, 10),
+                parent_pid=1,
+                command="bwrap --new-session -- python",
+                state="S",
+                elapsed_seconds=60.0,
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(101, 11),
+                parent_pid=100,
+                command="bash -c .venv/bin/python -m unittest tests.test_tui -q",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(102, 12),
+                parent_pid=101,
+                command=".venv/bin/python -m unittest tests.test_tui -q",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(200, 20),
+                parent_pid=1,
+                command="codex-linux-sandbox -- sleep 600",
+                state="S",
+                elapsed_seconds=60.0,
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(201, 21),
+                parent_pid=200,
+                command="sleep 600",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(300, 30),
+                parent_pid=1,
+                command="codex-code-mode-host",
+                state="S",
+            ),
+        )
+
+        self.assertTrue(
+            store.reconcile_children(
+                "session",
+                children,
+                30.0,
+                workspace="/workspace",
+            )
+        )
+        current = store.current_summaries("session")
+        self.assertEqual(len(current), 2)
+        self.assertEqual(
+            {item.process_id for item in current},
+            {"os:100:10", "os:200:20"},
+        )
+        self.assertEqual(
+            {item.command for item in current},
+            {
+                ".venv/bin/python -m unittest tests.test_tui -q",
+                "sleep 600",
+            },
+        )
+        self.assertTrue(all(item.capability == TerminalCapability.METADATA_ONLY for item in current))
+        self.assertTrue(all(item.source == "process" for item in current))
+        self.assertTrue(all(item.cwd == "/workspace" for item in current))
+
+        self.assertTrue(store.reconcile_children("session", (children[-1],), 31.0))
+        self.assertEqual(store.current_summaries("session"), [])
+
     def test_process_reconciliation_matches_shell_wrapped_command(self) -> None:
         store = TerminalStore()
         store.apply(
@@ -1125,6 +1316,108 @@ const results = await Promise.all([
         terminal = store.current_summaries("session")[0]
         self.assertEqual(terminal.process_id, "cell-1")
         self.assertTrue(terminal.process_active)
+
+    def test_process_reconciliation_matches_expanded_shell_c_script(self) -> None:
+        command = (
+            "sh -c 'printf \"codexdeck-live-probe-start\\n\"; sleep 90; "
+            "printf \"codexdeck-live-probe-end\\n\"'"
+        )
+        child_command = (
+            "/sandbox -- /bin/bash -c sh -c printf \"codexdeck-live-probe-start\\n\"; "
+            "sleep 90; printf \"codexdeck-live-probe-end\\n\""
+        )
+
+        self.assertTrue(TerminalStore._command_matches_child(command, child_command))
+        self.assertFalse(
+            TerminalStore._command_matches_child(
+                "sh -c 'printf other-probe; sleep 30'",
+                child_command,
+            )
+        )
+
+    def test_process_reconciliation_does_not_match_shared_runtime_tokens(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "old-suite",
+                    1.0,
+                    process_id="cell-old",
+                    command="python -m unittest discover -s tests -v",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+            ),
+        )
+        child = ChildProcessActivity(
+            ProcessIdentity(42, 7),
+            command="python -m unittest tests.test_tui -q",
+            state="S",
+        )
+
+        store.reconcile_children("session", (child,), 2.0)
+
+        self.assertEqual(store.current_summaries("session"), [])
+
+    def test_file_tail_descendant_merges_into_rollout_terminal(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "rollout",
+                    1.0,
+                    call_id="call-watch",
+                    process_id="cell-watch",
+                    command="for module in tests; do run-test $module; done",
+                    status="running",
+                    capability=TerminalCapability.POLL_TRANSCRIPT,
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "file",
+                    2.0,
+                    process_id="os:102:12",
+                    command="run-test tests.test_tui",
+                    status="running",
+                    output="progress\n",
+                    capability=TerminalCapability.FILE_TAIL,
+                    terminal_candidate=True,
+                    source="file-tail",
+                ),
+            ),
+        )
+        children = (
+            ChildProcessActivity(
+                ProcessIdentity(100, 10),
+                command=(
+                    "codex-linux-sandbox -- /bin/bash -c "
+                    "for module in tests; do run-test $module; done"
+                ),
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(101, 11),
+                parent_pid=100,
+                command="/bin/bash -c run-test tests.test_tui",
+                state="S",
+            ),
+            ChildProcessActivity(
+                ProcessIdentity(102, 12),
+                parent_pid=101,
+                command="run-test tests.test_tui",
+                state="S",
+            ),
+        )
+
+        self.assertTrue(store.reconcile_children("session", children, 3.0))
+
+        terminals = store.current_summaries("session")
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0].process_id, "cell-watch")
+        self.assertEqual(terminals[0].capability, TerminalCapability.FILE_TAIL)
+        self.assertEqual(terminals[0].chunks[0].text, "progress\n")
 
     def test_os_child_reopens_completed_nested_exec_without_protocol_process_id(self) -> None:
         store = TerminalStore()
@@ -1474,6 +1767,69 @@ const results = await Promise.all([
         self.assertLessEqual(sum(item.retained_bytes for item in summaries), 10)
         self.assertGreater(sum(item.dropped_bytes for item in summaries), 0)
 
+    def test_session_retention_prefers_confirmed_evidence_over_metadata_ghosts(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "completed-transcript",
+                    1.0,
+                    call_id="completed-transcript",
+                    command="make completed",
+                    status="completed",
+                    output="done\n",
+                    capability=TerminalCapability.FINAL_TRANSCRIPT,
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "protocol-process",
+                    2.0,
+                    call_id="protocol-process",
+                    process_id="PROCESS_ID",
+                    command="make watch",
+                    status="running",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate(
+                    "active-file-tail",
+                    3.0,
+                    process_id="os:42:7",
+                    command="tail worker.log",
+                    status="running",
+                    output="ready\n",
+                    capability=TerminalCapability.FILE_TAIL,
+                    terminal_candidate=True,
+                    source="file-tail",
+                ),
+            ),
+        )
+
+        for ordinal in range(16):
+            store.apply(
+                "session",
+                (
+                    TerminalUpdate(
+                        f"metadata-{ordinal}",
+                        100.0 + ordinal,
+                        call_id=f"metadata-{ordinal}",
+                        command=f"metadata command {ordinal}",
+                        status="running",
+                        terminal_candidate=True,
+                    ),
+                ),
+            )
+
+        summaries = store.summaries("session")
+        terminal_ids = {item.terminal_id for item in summaries}
+        self.assertEqual(len(summaries), 16)
+        self.assertIn("completed-transcript", terminal_ids)
+        self.assertIn("PROCESS_ID", terminal_ids)
+        self.assertIn("os:42:7", terminal_ids)
+        self.assertNotIn("metadata-0", terminal_ids)
+        self.assertNotIn("metadata-1", terminal_ids)
+        self.assertNotIn("metadata-2", terminal_ids)
+
     def test_terminal_control_sequences_are_not_replayed(self) -> None:
         text = sanitize_terminal_text(
             "start\x1b[2J\x1b]52;c;SECRET\x07\x1b[31mred\x1b[0m\rnext"
@@ -1513,6 +1869,39 @@ const results = await Promise.all([
         self.assertEqual(len(closed), 1)
         self.assertEqual(closed[0].process_id, "os:42:7")
         self.assertEqual(closed[0].status, "completed")
+
+    def test_regular_file_tail_deduplicates_shared_file_and_skips_observer_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace-a"
+            workspace.mkdir()
+            log = workspace / "shared.log"
+            log.write_text("ready\n")
+            for pid in (42, 43, 44, 50):
+                fd_dir = root / "proc" / str(pid) / "fd"
+                fd_dir.mkdir(parents=True)
+                (fd_dir / "1").symlink_to(log)
+            children = (
+                ChildProcessActivity(ProcessIdentity(42, 7), command="worker", state="S"),
+                ChildProcessActivity(
+                    ProcessIdentity(43, 8), parent_pid=42, command="worker-child", state="S"
+                ),
+                ChildProcessActivity(
+                    ProcessIdentity(44, 9), parent_pid=43, command="collector", state="S"
+                ),
+                ChildProcessActivity(
+                    ProcessIdentity(50, 10), command="independent-worker", state="S"
+                ),
+            )
+            collector = RegularFileTailCollector(root / "proc")
+
+            with patch("codex.terminal.os.getpid", return_value=44):
+                updates = collector.read("session", str(workspace), children, 1.0)
+
+        active = [update for update in updates if update.status == "running"]
+        outputs = [update for update in updates if update.output]
+        self.assertEqual({update.process_id for update in active}, {"os:50:10"})
+        self.assertEqual(len(outputs), 1)
 
     def test_regular_file_tail_preserves_utf8_split_across_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
