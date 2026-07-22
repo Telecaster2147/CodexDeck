@@ -21,8 +21,17 @@ classifiers = [
   "Topic :: System :: Monitoring",
 ]
 dependencies = [
-    "textual>=8.2.8,<9",
-    "tomli>=2.0.1; python_version < '3.11'",
+    "linkify-it-py==2.1.0",
+    "markdown-it-py[linkify]==4.2.0",
+    "mdit-py-plugins==0.6.1",
+    "mdurl==0.1.2",
+    "platformdirs==4.10.0",
+    "pygments==2.20.0",
+    "rich==15.0.0",
+    "textual==8.2.8",
+    "tomli==2.4.1; python_version < '3.11'",
+    "typing-extensions==4.16.0",
+    "uc-micro-py==2.0.0",
 ]
 
 [project.scripts]
