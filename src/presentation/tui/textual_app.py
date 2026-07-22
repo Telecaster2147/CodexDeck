@@ -590,12 +590,18 @@ class CodexDeckApp(App[MonitorSnapshot]):
             return
         await self._rebuild_navigation()
         if self.selected_session is not None:
-            self.query_one(SessionInspector).refresh_session_header(self.selected_session)
+            try:
+                self.query_one(SessionInspector).refresh_session_header(self.selected_session)
+            except NoMatches:
+                return
 
     def on_resize(self, event: events.Resize) -> None:
         self._render_startup()
         if self.is_mounted and self.selected_session and self._resize_timer is None:
-            log = self.query_one("#activity-panel", RichLog)
+            try:
+                log = self.query_one("#activity-panel", RichLog)
+            except NoMatches:
+                return
             self._resize_was_at_end = log.is_vertical_scroll_end
             self._resize_scroll_y = log.scroll_y
         self.compact = event.size.width < 96
@@ -614,7 +620,11 @@ class CodexDeckApp(App[MonitorSnapshot]):
 
     def _reflow_activity_after_resize(self) -> None:
         self._resize_timer = None
-        if self.query_one("#detail-tabs", Tabs).active == "terminal-tab":
+        try:
+            active_tab = self.query_one("#detail-tabs", Tabs).active
+        except NoMatches:
+            return
+        if active_tab == "terminal-tab":
             self._terminal_reflow_attempts = 0
             self._reflow_terminal_after_layout()
             return
@@ -622,7 +632,10 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self._reflow_activity_after_layout()
 
     def _reflow_activity_after_layout(self) -> None:
-        log = self.query_one("#activity-panel", RichLog)
+        try:
+            log = self.query_one("#activity-panel", RichLog)
+        except NoMatches:
+            return
         if log.size.width < 24:
             if self._resize_reflow_attempts < 3:
                 self._resize_reflow_attempts += 1
@@ -665,7 +678,10 @@ class CodexDeckApp(App[MonitorSnapshot]):
         )
 
     def _reflow_terminal_after_layout(self) -> None:
-        panel = self.query_one(TerminalPanel)
+        try:
+            panel = self.query_one(TerminalPanel)
+        except NoMatches:
+            return
         if panel.reflow(follow=self.follow):
             return
         if self._terminal_reflow_attempts < 3:
