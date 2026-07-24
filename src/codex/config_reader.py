@@ -60,8 +60,6 @@ class CodexConfigReader:
                         "experimental_compact_prompt",
                     )
                 ),
-                source="config.toml"
-                if limit is not None or raw_scope is not None
-                else "",
+                source="config.toml" if limit is not None or raw_scope is not None else "",
             )
         return result
