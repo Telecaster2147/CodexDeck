@@ -10,12 +10,14 @@ from typing import Iterable
 from codex.rollout import RolloutReader
 from codex.terminal import TerminalStore
 from models import (
+    EvidenceCoverage,
     InstanceIdentity,
     NetworkEvidence,
     ProcessIdentity,
     ProcessInfo,
     ProtocolCapabilities,
     SessionIdentity,
+    TerminalAssociationSummary,
     TerminalCapability,
 )
 from state_machine import SessionStateMachine
@@ -44,7 +46,13 @@ class ProtocolReplaySummary:
     lifecycle: str
     recovery: str
     attention: str
+    lifecycle_confidence: str
+    attention_confidence: str
+    completeness: tuple[tuple[str, bool, str], ...]
+    protocol_uncertain: bool
+    protocol_uncertainty_scope: str
     terminal_sessions: tuple[ReplayTerminalSummary, ...]
+    terminal_association: TerminalAssociationSummary
     unknown_events: tuple[tuple[str, int], ...]
     shape_families: tuple[tuple[str, int], ...]
     protocol_capabilities: ProtocolCapabilities
@@ -132,6 +140,26 @@ class ProtocolReplayRunner:
                     default=latest_timestamp,
                 )
                 terminals.apply(identity, result.terminal_updates)
+                activity = result.activity
+                machine.update_coverage(
+                    identity,
+                    EvidenceCoverage(
+                        observed_at=activity.observed_at,
+                        source_epoch=(
+                            f"{activity.device}:{activity.inode}:{activity.generation}"
+                            if activity.inode
+                            else ""
+                        ),
+                        bootstrap_truncated=reader.has_truncated_context({str(path)}),
+                        gap_count=activity.gap_count,
+                        generation_changed=activity.replaced,
+                        copy_truncated=activity.copy_truncated or activity.truncated,
+                        stream_uncertainty_count=activity.stream_uncertainty_count,
+                        backlog_pending=bool(activity.backlog_bytes),
+                        network_probe_complete=True,
+                        silence_probe_complete=True,
+                    ),
+                )
                 machine.ingest(identity, list(result.events))
 
             state = machine.derive(
@@ -158,7 +186,23 @@ class ProtocolReplayRunner:
                 lifecycle=state.lifecycle.value,
                 recovery=state.recovery.value,
                 attention=state.attention.value,
+                lifecycle_confidence=state.lifecycle_confidence.value,
+                attention_confidence=state.attention_confidence.value,
+                completeness=tuple(
+                    (axis.axis, axis.complete, axis.baseline_kind)
+                    for axis in (
+                        state.completeness.lifecycle,
+                        state.completeness.attention,
+                        state.completeness.failure_recovery,
+                        state.completeness.terminal_ownership,
+                        state.completeness.network,
+                        state.completeness.silence,
+                    )
+                ),
+                protocol_uncertain=state.protocol_uncertain,
+                protocol_uncertainty_scope=state.protocol_uncertainty_scope,
                 terminal_sessions=terminal_summaries,
+                terminal_association=terminals.association_summary(identity),
                 unknown_events=tuple(reader.unknown_counts({path_key}).items()),
                 shape_families=tuple(reader.shape_counts({path_key}).items()),
                 protocol_capabilities=state.protocol_capabilities,

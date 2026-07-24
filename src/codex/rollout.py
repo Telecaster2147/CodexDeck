@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -12,6 +13,19 @@ from config import MAX_SESSION_TAIL
 from models import NormalizedEvent, RolloutIdentity
 from utils import message_text
 from .events import is_compact_command, normalize_rollout_record, parse_timestamp
+from .ingress import (
+    MAX_INGRESS_BYTES_PER_TICK,
+    MAX_INGRESS_PARSE_SECONDS,
+    MAX_INGRESS_RECORDS_PER_TICK,
+    MAX_JSONL_RECORD_BYTES,
+)
+from .mutable_stream import (
+    anchor_matches,
+    anchor_sha256,
+    refresh_anchor,
+    stream_metadata,
+    stream_source_id,
+)
 from .terminal import (
     TerminalProtocolParser,
     TerminalStore,
@@ -35,6 +49,43 @@ KNOWN_IGNORED_TYPES = {
 MAX_TERMINAL_METADATA_BACKFILL = 16 * 1024 * 1024
 MAX_TERMINAL_METADATA_BACKFILL_CHUNK = 512 * 1024
 TERMINAL_METADATA_LINE_OVERLAP = 64 * 1024
+MAX_TERMINAL_METADATA_PROCESS_IDS = 64
+MAX_TERMINAL_METADATA_ATTEMPTED_IDS = 256
+MAX_TERMINAL_METADATA_CALL_IDS = 256
+MAX_TERMINAL_METADATA_PENDING_CALLS = 256
+MAX_TERMINAL_METADATA_PENDING_UPDATES_PER_CALL = 8
+MAX_PROTOCOL_FAMILY_COUNTERS = 128
+OTHER_PROTOCOL_FAMILY = "__other__"
+
+
+@dataclass
+class BoundedFamilyCounter:
+    """Fixed-cardinality Misra-Gries candidates with an exact total."""
+
+    max_families: int = MAX_PROTOCOL_FAMILY_COUNTERS
+    counts: Counter[str] = field(default_factory=Counter)
+    total: int = 0
+    dropped_family_count: int = 0
+
+    def add(self, family: str) -> None:
+        self.total += 1
+        if family in self.counts or len(self.counts) < self.max_families:
+            self.counts[family] += 1
+            return
+        self.dropped_family_count += 1
+        for candidate in tuple(self.counts):
+            self.counts[candidate] -= 1
+            if self.counts[candidate] <= 0:
+                del self.counts[candidate]
+
+    def snapshot(self) -> Counter[str]:
+        result = Counter(self.counts)
+        other = self.total - sum(result.values())
+        if other:
+            result[OTHER_PROTOCOL_FAMILY] = other
+        return result
+
+
 _TERMINAL_METADATA_MARKERS = (
     b"exec_command",
     b"write_stdin",
@@ -75,6 +126,16 @@ class RolloutCursor:
     last_growth_at: float | None = None
     last_compact_completion_at: float | None = None
     last_compact_completion_type: str = ""
+    skipping_oversize: bool = False
+    skipped_bytes: int = 0
+    oversize_records: int = 0
+    gap_count: int = 0
+    gap_reason: str = ""
+    gap_hash: str = ""
+    backlog_since: float | None = None
+    stream_uncertain: bool = False
+    stream_uncertainty_count: int = 0
+    stream_uncertainty_reason: str = ""
 
 
 @dataclass
@@ -99,6 +160,7 @@ class RolloutActivity:
     mtime_ns: int = 0
     bytes_read: int = 0
     complete_record_count: int = 0
+    record_count: int = 0
     ignored_record_count: int = 0
     normalized_count: int = 0
     partial_bytes: int = 0
@@ -106,15 +168,32 @@ class RolloutActivity:
     replaced: bool = False
     truncated: bool = False
     copy_truncated: bool = False
+    consumed_bytes: int = 0
+    backlog_bytes: int = 0
+    backlog_records_lower_bound: int = 0
+    backlog_age_seconds: float | None = None
+    budget_exceeded: bool = False
+    oversize_record_count: int = 0
+    skipped_bytes: int = 0
+    gap_count: int = 0
+    gap_reason: str = ""
+    gap_hash: str = ""
+    parse_duration_seconds: float = 0.0
+    metadata_backfill_dropped: int = 0
+    metadata_backfill_reason: str = ""
+    terminal_parser_evictions: int = 0
+    terminal_parser_eviction_reason: str = ""
+    device: int = 0
+    inode: int = 0
+    generation: int = 0
+    anchor_hash: str = ""
+    stream_uncertain: bool = False
+    stream_uncertainty_count: int = 0
+    stream_uncertainty_reason: str = ""
 
     @property
     def changed(self) -> bool:
-        return bool(
-            self.bytes_read
-            or self.replaced
-            or self.truncated
-            or self.copy_truncated
-        )
+        return bool(self.bytes_read or self.replaced or self.truncated or self.copy_truncated)
 
 
 @dataclass(frozen=True)
@@ -147,12 +226,44 @@ def _token_context(payload: dict[str, object]) -> tuple[int | None, int | None]:
 class RolloutReader:
     def __init__(self) -> None:
         self.cursors: dict[str, RolloutCursor] = {}
-        self.unknown_types: dict[str, Counter[str]] = {}
-        self.shape_types: dict[str, Counter[str]] = {}
+        self.unknown_types: dict[str, BoundedFamilyCounter] = {}
+        self.shape_types: dict[str, BoundedFamilyCounter] = {}
         self.bootstrap_truncated: set[str] = set()
         self.terminal_metadata_attempted: dict[str, set[str]] = {}
         self.terminal_metadata_backfills: dict[str, TerminalMetadataBackfillCursor] = {}
+        self.terminal_metadata_saturated: set[str] = set()
+        self.terminal_metadata_dropped: Counter[str] = Counter()
         self.terminal_parser = TerminalProtocolParser()
+
+    @staticmethod
+    def _record_gap(cursor: RolloutCursor, payload: bytes, reason: str) -> None:
+        cursor.skipped_bytes += len(payload)
+        cursor.gap_reason = reason
+        cursor.gap_hash = hashlib.sha256(
+            cursor.gap_hash.encode("ascii") + payload[:MAX_JSONL_RECORD_BYTES]
+        ).hexdigest()
+
+    @staticmethod
+    def _update_backlog(
+        cursor: RolloutCursor,
+        stat_size: int,
+        observed_at: float,
+    ) -> tuple[int, float | None]:
+        backlog_bytes = max(0, stat_size - cursor.offset)
+        if backlog_bytes:
+            cursor.backlog_since = cursor.backlog_since or observed_at
+        else:
+            cursor.backlog_since = None
+        backlog_age = (
+            max(0.0, observed_at - cursor.backlog_since)
+            if cursor.backlog_since is not None
+            else None
+        )
+        return backlog_bytes, backlog_age
+
+    @staticmethod
+    def _refresh_anchor(path: Path, cursor: RolloutCursor) -> None:
+        refresh_anchor(path, cursor)
 
     def read(self, path: Path) -> list[NormalizedEvent]:
         return list(self.read_with_activity(path).events)
@@ -177,11 +288,14 @@ class RolloutReader:
         truncated = cursor is not None and stat.st_size < cursor.offset
         if cursor is None or replaced or truncated:
             generation = cursor.generation + 1 if cursor is not None else 0
+            uncertainty_count = cursor.stream_uncertainty_count if cursor is not None else 0
             if replaced or truncated:
                 self.unknown_types.pop(key, None)
                 self.shape_types.pop(key, None)
                 self.terminal_metadata_attempted.pop(key, None)
                 self.terminal_metadata_backfills.pop(key, None)
+                self.terminal_metadata_saturated.discard(key)
+                self.terminal_metadata_dropped.pop(key, None)
             start = max(0, stat.st_size - MAX_SESSION_TAIL)
             if start:
                 self.bootstrap_truncated.add(key)
@@ -194,54 +308,64 @@ class RolloutReader:
                 generation=generation,
                 stat_size=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
+                stream_uncertain=bool(truncated),
+                stream_uncertainty_count=uncertainty_count + int(truncated),
+                stream_uncertainty_reason="truncated" if truncated else "",
             )
             self.cursors[key] = cursor
         copy_truncated = False
         bytes_read = 0
         try:
             with path.open("rb") as handle:
-                if cursor.offset and cursor.anchor:
-                    anchor_start = max(0, cursor.offset - len(cursor.anchor))
-                    handle.seek(anchor_start)
-                    if handle.read(len(cursor.anchor)) != cursor.anchor:
-                        # Detect copy-truncate even when the writer has already
-                        # grown the new file beyond the previous byte offset.
-                        self.unknown_types.pop(key, None)
-                        self.shape_types.pop(key, None)
-                        self.terminal_metadata_attempted.pop(key, None)
-                        self.terminal_metadata_backfills.pop(key, None)
-                        start = max(0, stat.st_size - MAX_SESSION_TAIL)
-                        if start:
-                            self.bootstrap_truncated.add(key)
-                        else:
-                            self.bootstrap_truncated.discard(key)
-                        cursor = RolloutCursor(
-                            stat.st_dev,
-                            stat.st_ino,
-                            start,
-                            generation=cursor.generation + 1,
-                            stat_size=stat.st_size,
-                            mtime_ns=stat.st_mtime_ns,
-                        )
-                        self.cursors[key] = cursor
-                        copy_truncated = True
+                if not anchor_matches(handle, cursor):
+                    # Detect copy-truncate even when the writer has already
+                    # grown the new file beyond the previous byte offset.
+                    self.unknown_types.pop(key, None)
+                    self.shape_types.pop(key, None)
+                    self.terminal_metadata_attempted.pop(key, None)
+                    self.terminal_metadata_backfills.pop(key, None)
+                    self.terminal_metadata_saturated.discard(key)
+                    self.terminal_metadata_dropped.pop(key, None)
+                    start = max(0, stat.st_size - MAX_SESSION_TAIL)
+                    if start:
+                        self.bootstrap_truncated.add(key)
+                    else:
+                        self.bootstrap_truncated.discard(key)
+                    cursor = RolloutCursor(
+                        stat.st_dev,
+                        stat.st_ino,
+                        start,
+                        generation=cursor.generation + 1,
+                        stat_size=stat.st_size,
+                        mtime_ns=stat.st_mtime_ns,
+                        stream_uncertain=True,
+                        stream_uncertainty_count=(cursor.stream_uncertainty_count + 1),
+                        stream_uncertainty_reason="content_anchor_mismatch",
+                    )
+                    self.cursors[key] = cursor
+                    copy_truncated = True
+                elif (
+                    cursor.offset
+                    and stat.st_size == cursor.stat_size
+                    and stat.st_mtime_ns != cursor.mtime_ns
+                ):
+                    cursor.stream_uncertain = True
+                    cursor.stream_uncertainty_count += 1
+                    cursor.stream_uncertainty_reason = "same_size_mtime_change_anchor_unchanged"
                 handle.seek(cursor.offset)
                 if (
                     cursor.offset
                     and not cursor.partial
                     and cursor.offset == max(0, stat.st_size - MAX_SESSION_TAIL)
                 ):
-                    handle.readline()
-                    cursor.offset = handle.tell()
+                    cursor.skipping_oversize = True
+                    cursor.gap_count += 1
+                    cursor.gap_reason = "bootstrap_started_mid_record"
                 read_start = cursor.offset
+                tick_read_start = read_start
                 previous_partial = cursor.partial
-                fresh = handle.read()
+                fresh = handle.read(MAX_INGRESS_BYTES_PER_TICK)
                 bytes_read = len(fresh)
-                payload = previous_partial + fresh
-                cursor.offset = handle.tell()
-                anchor_start = max(0, cursor.offset - 64)
-                handle.seek(anchor_start)
-                cursor.anchor = handle.read(cursor.offset - anchor_start)
         except OSError:
             return RolloutReadResult(
                 (),
@@ -258,20 +382,82 @@ class RolloutReader:
                     copy_truncated=copy_truncated,
                 ),
             )
-        if bytes_read or len(payload) != len(previous_partial):
+        if bytes_read:
             cursor.last_growth_at = observed_at
         cursor.stat_size = stat.st_size
         cursor.mtime_ns = stat.st_mtime_ns
+        if cursor.skipping_oversize:
+            newline = fresh.find(b"\n")
+            if newline < 0:
+                self._record_gap(cursor, fresh, cursor.gap_reason or "oversize_jsonl_record")
+                cursor.offset = read_start + len(fresh)
+                self._refresh_anchor(path, cursor)
+                backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
+                return RolloutReadResult(
+                    (),
+                    RolloutActivity(
+                        key,
+                        observed_at,
+                        available=True,
+                        stat_size=stat.st_size,
+                        mtime_ns=stat.st_mtime_ns,
+                        bytes_read=bytes_read,
+                        consumed_bytes=max(0, cursor.offset - tick_read_start),
+                        partial_bytes=0,
+                        last_growth_at=cursor.last_growth_at,
+                        replaced=replaced,
+                        truncated=truncated,
+                        copy_truncated=copy_truncated,
+                        backlog_bytes=backlog_bytes,
+                        backlog_records_lower_bound=int(bool(backlog_bytes)),
+                        backlog_age_seconds=backlog_age,
+                        budget_exceeded=bool(backlog_bytes),
+                        oversize_record_count=cursor.oversize_records,
+                        skipped_bytes=cursor.skipped_bytes,
+                        gap_count=cursor.gap_count,
+                        gap_reason=cursor.gap_reason,
+                        gap_hash=cursor.gap_hash,
+                        metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
+                        metadata_backfill_reason=(
+                            "metadata_backfill_limit"
+                            if key in self.terminal_metadata_saturated
+                            else ""
+                        ),
+                        terminal_parser_evictions=(self.terminal_parser.pending_batch_evictions),
+                        terminal_parser_eviction_reason=(
+                            self.terminal_parser.pending_batch_eviction_reason
+                        ),
+                    ),
+                )
+            skipped = fresh[: newline + 1]
+            self._record_gap(cursor, skipped, cursor.gap_reason or "oversize_jsonl_record")
+            cursor.skipping_oversize = False
+            read_start += newline + 1
+            fresh = fresh[newline + 1 :]
+            previous_partial = b""
+
+        payload = previous_partial + fresh
         last_newline = payload.rfind(b"\n")
         if last_newline < 0:
-            cursor.partial = payload
+            if len(payload) > MAX_JSONL_RECORD_BYTES:
+                cursor.partial = b""
+                cursor.skipping_oversize = True
+                cursor.oversize_records += 1
+                cursor.gap_count += 1
+                self._record_gap(cursor, payload, "oversize_jsonl_record")
+            else:
+                cursor.partial = payload
+            cursor.offset = read_start + len(fresh)
+            self._refresh_anchor(path, cursor)
+            backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
             backfill = self._advance_terminal_metadata_backfill(
                 path,
                 read_start,
                 (),
                 inode=stat.st_ino,
                 generation=cursor.generation,
-                allow=allow_terminal_metadata_backfill,
+                allow=allow_terminal_metadata_backfill and not backlog_bytes,
+                max_bytes=max(0, MAX_INGRESS_BYTES_PER_TICK - bytes_read),
             )
             return RolloutReadResult(
                 (),
@@ -282,25 +468,59 @@ class RolloutReader:
                     stat_size=stat.st_size,
                     mtime_ns=stat.st_mtime_ns,
                     bytes_read=bytes_read,
+                    consumed_bytes=max(0, cursor.offset - tick_read_start),
                     partial_bytes=len(cursor.partial),
                     last_growth_at=cursor.last_growth_at,
                     replaced=replaced,
                     truncated=truncated,
                     copy_truncated=copy_truncated,
+                    backlog_bytes=backlog_bytes,
+                    backlog_records_lower_bound=int(bool(backlog_bytes)),
+                    backlog_age_seconds=backlog_age,
+                    budget_exceeded=bool(backlog_bytes),
+                    oversize_record_count=cursor.oversize_records,
+                    skipped_bytes=cursor.skipped_bytes,
+                    gap_count=cursor.gap_count,
+                    gap_reason=cursor.gap_reason,
+                    gap_hash=cursor.gap_hash,
+                    metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
+                    metadata_backfill_reason=(
+                        "metadata_backfill_limit" if key in self.terminal_metadata_saturated else ""
+                    ),
+                    terminal_parser_evictions=(self.terminal_parser.pending_batch_evictions),
+                    terminal_parser_eviction_reason=(
+                        self.terminal_parser.pending_batch_eviction_reason
+                    ),
                 ),
                 backfill,
             )
         complete = payload[: last_newline + 1]
-        cursor.partial = payload[last_newline + 1 :]
+        trailing_partial = payload[last_newline + 1 :]
         events: list[NormalizedEvent] = []
         terminal_updates: list[TerminalUpdate] = []
         complete_record_count = 0
         ignored_record_count = 0
         base_offset = read_start - len(previous_partial)
         position = base_offset
+        parse_started = time.monotonic()
+        budget_exceeded = False
+        record_count = 0
         for raw_line in complete.splitlines(keepends=True):
+            if (
+                record_count >= MAX_INGRESS_RECORDS_PER_TICK
+                or time.monotonic() - parse_started >= MAX_INGRESS_PARSE_SECONDS
+            ):
+                budget_exceeded = True
+                break
             line_offset = position
             position += len(raw_line)
+            record_count += 1
+            if len(raw_line) > MAX_JSONL_RECORD_BYTES:
+                cursor.oversize_records += 1
+                cursor.gap_count += 1
+                self._record_gap(cursor, raw_line, "oversize_jsonl_record")
+                ignored_record_count += 1
+                continue
             try:
                 record = json.loads(raw_line)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -308,7 +528,13 @@ class RolloutReader:
                 continue
             if isinstance(record, dict):
                 complete_record_count += 1
-                source_id = f"rollout:{stat.st_ino}:{line_offset}"
+                source_id = stream_source_id(
+                    "rollout",
+                    stat.st_dev,
+                    stat.st_ino,
+                    cursor.generation,
+                    line_offset,
+                )
                 terminal_updates.extend(
                     extract_terminal_updates(
                         record,
@@ -325,7 +551,7 @@ class RolloutReader:
                 )
                 record_type, item_type, item = _record_shape(record)
                 family = f"{record_type}:{item_type or '_'}"
-                self.shape_types.setdefault(key, Counter())[family] += 1
+                self.shape_types.setdefault(key, BoundedFamilyCounter()).add(family)
                 item_value = item.get("item")
                 item_value = item_value if isinstance(item_value, dict) else {}
                 compact_item_type = str(item_value.get("type") or "").lower()
@@ -368,9 +594,7 @@ class RolloutReader:
                     else None
                 )
                 completion_type = (
-                    f"{record_type}:{item_type}:{compact_item_type}"
-                    if compact_completed
-                    else ""
+                    f"{record_type}:{item_type}:{compact_item_type}" if compact_completed else ""
                 )
                 duplicate_completion = bool(
                     compact_completed
@@ -417,8 +641,7 @@ class RolloutReader:
                     )
                 )
                 compact_open = bool(
-                    cursor.manual_compact_in_flight
-                    or cursor.pending_empty_task_at is not None
+                    cursor.manual_compact_in_flight or cursor.pending_empty_task_at is not None
                 )
                 terminal_compact_events = []
                 if compact_open:
@@ -458,7 +681,25 @@ class RolloutReader:
                                 )
                             )
                 normalized.extend(terminal_compact_events)
-                normalized = [replace(event, observed_at=observed_at) for event in normalized]
+                normalized = [
+                    replace(
+                        event,
+                        observed_at=observed_at,
+                        metadata={
+                            **event.metadata,
+                            **stream_metadata(
+                                path,
+                                stat.st_dev,
+                                stat.st_ino,
+                                cursor.generation,
+                                line_offset,
+                                uncertain=cursor.stream_uncertain,
+                                uncertainty_reason=cursor.stream_uncertainty_reason,
+                            ),
+                        },
+                    )
+                    for event in normalized
+                ]
                 events.extend(normalized)
 
                 if record_type == "event_msg" and item_type == "token_count":
@@ -471,24 +712,16 @@ class RolloutReader:
                 if explicit_compact:
                     cursor.manual_compact_in_flight = True
                     cursor.saw_user_input = True
-                elif (
-                    (record_type == "event_msg" and item_type == "user_message")
-                    or (
-                        record_type == "response_item"
-                        and item_type == "message"
-                        and item.get("role") == "user"
-                    )
+                elif (record_type == "event_msg" and item_type == "user_message") or (
+                    record_type == "response_item"
+                    and item_type == "message"
+                    and item.get("role") == "user"
                 ):
                     cursor.saw_user_input = True
                 if task_started:
-                    if (
-                        cursor.saw_turn_boundary
-                        and not cursor.saw_user_input
-                    ):
+                    if cursor.saw_turn_boundary and not cursor.saw_user_input:
                         cursor.pending_empty_task_at = parse_timestamp(record.get("timestamp"))
-                        cursor.pending_empty_task_source_id = (
-                            f"{source_id}:manual-compact"
-                        )
+                        cursor.pending_empty_task_source_id = f"{source_id}:manual-compact"
                         cursor.pending_empty_task_turn_id = str(item.get("turn_id") or "")
                         cursor.pending_context_tokens = cursor.context_tokens
                         cursor.pending_context_window = cursor.context_window
@@ -529,28 +762,52 @@ class RolloutReader:
                 unparsed = [event for event in normalized if event.kind == "UNPARSED_PAYLOAD"]
                 if unparsed:
                     event_type = str(unparsed[-1].unparsed.source_type)
-                    self.unknown_types.setdefault(key, Counter())[event_type] += 1
-                elif not normalized and not duplicate_completion and record.get("type") in {
-                    "event_msg",
-                    "response_item",
-                }:
+                    self.unknown_types.setdefault(key, BoundedFamilyCounter()).add(event_type)
+                elif (
+                    not normalized
+                    and not duplicate_completion
+                    and record.get("type")
+                    in {
+                        "event_msg",
+                        "response_item",
+                    }
+                ):
                     item = record.get("payload")
                     item_type = str(item.get("type") or "") if isinstance(item, dict) else ""
                     if item_type:
                         event_type = f"{record['type']}:{item_type}"
                         if event_type not in KNOWN_IGNORED_TYPES:
-                            self.unknown_types.setdefault(key, Counter())[event_type] += 1
+                            self.unknown_types.setdefault(key, BoundedFamilyCounter()).add(
+                                event_type
+                            )
                 if not normalized:
                     ignored_record_count += 1
             else:
                 ignored_record_count += 1
+        if budget_exceeded:
+            cursor.offset = position
+            cursor.partial = b""
+        else:
+            cursor.offset = read_start + len(fresh)
+            if len(trailing_partial) > MAX_JSONL_RECORD_BYTES:
+                cursor.partial = b""
+                cursor.skipping_oversize = True
+                cursor.oversize_records += 1
+                cursor.gap_count += 1
+                self._record_gap(cursor, trailing_partial, "oversize_jsonl_record")
+            else:
+                cursor.partial = trailing_partial
+        self._refresh_anchor(path, cursor)
+        backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
+        budget_exceeded = budget_exceeded or bool(backlog_bytes)
         backfill = self._advance_terminal_metadata_backfill(
             path,
             read_start,
             tuple(terminal_updates),
             inode=stat.st_ino,
             generation=cursor.generation,
-            allow=allow_terminal_metadata_backfill,
+            allow=allow_terminal_metadata_backfill and not budget_exceeded,
+            max_bytes=max(0, MAX_INGRESS_BYTES_PER_TICK - bytes_read),
         )
         terminal_updates = [*backfill, *terminal_updates]
         return RolloutReadResult(
@@ -562,7 +819,9 @@ class RolloutReader:
                 stat_size=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
                 bytes_read=bytes_read,
+                consumed_bytes=max(0, cursor.offset - tick_read_start),
                 complete_record_count=complete_record_count,
+                record_count=record_count,
                 ignored_record_count=ignored_record_count,
                 normalized_count=len(events),
                 partial_bytes=len(cursor.partial),
@@ -570,6 +829,35 @@ class RolloutReader:
                 replaced=replaced,
                 truncated=truncated,
                 copy_truncated=copy_truncated,
+                backlog_bytes=backlog_bytes,
+                backlog_records_lower_bound=(
+                    max(0, complete.count(b"\n") - record_count) + int(bool(trailing_partial))
+                    if backlog_bytes
+                    else 0
+                ),
+                backlog_age_seconds=backlog_age,
+                budget_exceeded=budget_exceeded,
+                oversize_record_count=cursor.oversize_records,
+                skipped_bytes=cursor.skipped_bytes,
+                gap_count=cursor.gap_count,
+                gap_reason=cursor.gap_reason,
+                gap_hash=cursor.gap_hash,
+                parse_duration_seconds=time.monotonic() - parse_started,
+                metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
+                metadata_backfill_reason=(
+                    "metadata_backfill_limit" if key in self.terminal_metadata_saturated else ""
+                ),
+                terminal_parser_evictions=self.terminal_parser.pending_batch_evictions,
+                terminal_parser_eviction_reason=(
+                    self.terminal_parser.pending_batch_eviction_reason
+                ),
+                device=cursor.device,
+                inode=cursor.inode,
+                generation=cursor.generation,
+                anchor_hash=anchor_sha256(cursor.anchor),
+                stream_uncertain=cursor.stream_uncertain,
+                stream_uncertainty_count=cursor.stream_uncertainty_count,
+                stream_uncertainty_reason=cursor.stream_uncertainty_reason,
             ),
             tuple(terminal_updates),
         )
@@ -597,28 +885,43 @@ class RolloutReader:
         inode: int,
         generation: int,
         allow: bool,
+        max_bytes: int,
     ) -> tuple[TerminalUpdate, ...]:
         key = str(path)
         if key not in self.bootstrap_truncated:
             return ()
         state = self.terminal_metadata_backfills.get(key)
         missing_process_ids = (
-            self._missing_terminal_process_ids(current_updates)
-            if current_updates
-            else set()
+            self._missing_terminal_process_ids(current_updates) if current_updates else set()
         )
         attempted = self.terminal_metadata_attempted.setdefault(key, set())
         new_process_ids = missing_process_ids - attempted
         if state is not None:
             new_process_ids -= state.process_ids
+        if key in self.terminal_metadata_saturated:
+            self.terminal_metadata_dropped[key] += len(new_process_ids)
+            new_process_ids = set()
+        if new_process_ids:
+            retained_process_ids = state.process_ids if state is not None else set()
+            remaining = max(0, MAX_TERMINAL_METADATA_PROCESS_IDS - len(retained_process_ids))
+            selected_process_ids = set(sorted(new_process_ids)[:remaining])
+            dropped = len(new_process_ids) - len(selected_process_ids)
+            if dropped:
+                self.terminal_metadata_saturated.add(key)
+                self.terminal_metadata_dropped[key] += dropped
+            new_process_ids = selected_process_ids
         if new_process_ids:
             process_ids = new_process_ids | (state.process_ids if state is not None else set())
             process_call_ids = {process_id: set() for process_id in process_ids}
             call_ids: set[str] = set()
             for update in current_updates:
                 if update.process_id in process_ids and update.call_id:
-                    process_call_ids[update.process_id].add(update.call_id)
-                    call_ids.add(update.call_id)
+                    if len(call_ids) < MAX_TERMINAL_METADATA_CALL_IDS:
+                        process_call_ids[update.process_id].add(update.call_id)
+                        call_ids.add(update.call_id)
+                    else:
+                        self.terminal_metadata_saturated.add(key)
+                        self.terminal_metadata_dropped[key] += 1
             state = TerminalMetadataBackfillCursor(
                 inode=inode,
                 next_end=end_offset,
@@ -629,24 +932,31 @@ class RolloutReader:
                 process_call_ids=process_call_ids,
             )
             self.terminal_metadata_backfills[key] = state
-        if state is None or not allow:
+        if state is None or not allow or max_bytes <= 0:
             return ()
-        updates, finished = self._terminal_metadata_backfill_step(path, state)
+        updates, finished = self._terminal_metadata_backfill_step(path, state, max_bytes)
         if finished:
-            attempted.update(state.process_ids)
+            remaining = max(0, MAX_TERMINAL_METADATA_ATTEMPTED_IDS - len(attempted))
+            completed = set(sorted(state.process_ids)[:remaining])
+            attempted.update(completed)
+            dropped = len(state.process_ids) - len(completed)
+            if dropped:
+                self.terminal_metadata_saturated.add(key)
+                self.terminal_metadata_dropped[key] += dropped
             self.terminal_metadata_backfills.pop(key, None)
         return updates
 
-    @staticmethod
     def _terminal_metadata_backfill_step(
+        self,
         path: Path,
         state: TerminalMetadataBackfillCursor,
+        max_bytes: int,
     ) -> tuple[tuple[TerminalUpdate, ...], bool]:
         if state.next_end <= state.floor:
             return (), True
         raw_start = max(
             state.floor,
-            state.next_end - MAX_TERMINAL_METADATA_BACKFILL_CHUNK,
+            state.next_end - min(MAX_TERMINAL_METADATA_BACKFILL_CHUNK, max_bytes),
         )
         scan_start = max(state.floor, raw_start - TERMINAL_METADATA_LINE_OVERLAP)
         try:
@@ -683,7 +993,13 @@ class RolloutReader:
                 continue
             if not isinstance(record, dict):
                 continue
-            source_id = f"rollout:{stat.st_ino}:{line_offset}:metadata"
+            source_id = stream_source_id(
+                "rollout-metadata",
+                stat.st_dev,
+                stat.st_ino,
+                state.generation,
+                line_offset,
+            )
             observed_at = parse_timestamp(record.get("timestamp")) or stat.st_mtime
             for update in extract_terminal_updates(
                 record,
@@ -697,14 +1013,16 @@ class RolloutReader:
                 ),
             ):
                 matched_processes = (
-                    {update.process_id}
-                    if update.process_id in state.process_ids
-                    else set()
+                    {update.process_id} if update.process_id in state.process_ids else set()
                 )
                 if matched_processes and update.call_id:
-                    state.call_ids.add(update.call_id)
-                    for process_id in matched_processes:
-                        state.process_call_ids[process_id].add(update.call_id)
+                    if len(state.call_ids) < MAX_TERMINAL_METADATA_CALL_IDS:
+                        state.call_ids.add(update.call_id)
+                        for process_id in matched_processes:
+                            state.process_call_ids[process_id].add(update.call_id)
+                    else:
+                        self.terminal_metadata_saturated.add(str(path))
+                        self.terminal_metadata_dropped[str(path)] += 1
                 linked_processes = {
                     process_id
                     for process_id, call_ids in state.process_call_ids.items()
@@ -719,54 +1037,76 @@ class RolloutReader:
                         "error",
                         "errored",
                     }:
-                        state.pending_updates.setdefault(update.call_id, []).append(
-                            replace(update, output="", cumulative=False)
-                        )
+                        if (
+                            update.call_id in state.pending_updates
+                            or len(state.pending_updates) < MAX_TERMINAL_METADATA_PENDING_CALLS
+                        ):
+                            pending = state.pending_updates.setdefault(update.call_id, [])
+                            if len(pending) < MAX_TERMINAL_METADATA_PENDING_UPDATES_PER_CALL:
+                                pending.append(replace(update, output="", cumulative=False))
+                            else:
+                                self.terminal_metadata_saturated.add(str(path))
+                                self.terminal_metadata_dropped[str(path)] += 1
+                        else:
+                            self.terminal_metadata_saturated.add(str(path))
+                            self.terminal_metadata_dropped[str(path)] += 1
                     continue
                 if update.call_id:
                     relevant.extend(state.pending_updates.pop(update.call_id, ()))
                 if update.command:
-                    state.resolved_process_ids.update(
-                        matched_processes | linked_processes
-                    )
+                    state.resolved_process_ids.update(matched_processes | linked_processes)
                 relevant.append(replace(update, output="", cumulative=False))
         state.next_end = raw_start
         finished = bool(
-            state.resolved_process_ids >= state.process_ids
-            or state.next_end <= state.floor
+            state.resolved_process_ids >= state.process_ids or state.next_end <= state.floor
         )
         return tuple(sorted(relevant, key=lambda update: update.observed_at)), finished
 
     def unknown_counts(self, paths: set[str]) -> dict[str, int]:
         total: Counter[str] = Counter()
         for path in paths:
-            total.update(self.unknown_types.get(path, {}))
+            counter = self.unknown_types.get(path)
+            if counter is not None:
+                total.update(counter.snapshot())
         return dict(sorted(total.items()))
 
     def shape_counts(self, paths: set[str]) -> dict[str, int]:
         total: Counter[str] = Counter()
         for path in paths:
-            total.update(self.shape_types.get(path, {}))
+            counter = self.shape_types.get(path)
+            if counter is not None:
+                total.update(counter.snapshot())
         return dict(sorted(total.items()))
+
+    def family_counter_summary(self, paths: set[str]) -> dict[str, int]:
+        unknown = [counter for path, counter in self.unknown_types.items() if path in paths]
+        shapes = [counter for path, counter in self.shape_types.items() if path in paths]
+        return {
+            "max_families_per_path": MAX_PROTOCOL_FAMILY_COUNTERS,
+            "unknown_total": sum(counter.total for counter in unknown),
+            "unknown_other": sum(
+                counter.total - sum(counter.counts.values()) for counter in unknown
+            ),
+            "unknown_dropped_family_count": sum(
+                counter.dropped_family_count for counter in unknown
+            ),
+            "shape_total": sum(counter.total for counter in shapes),
+            "shape_other": sum(counter.total - sum(counter.counts.values()) for counter in shapes),
+            "shape_dropped_family_count": sum(counter.dropped_family_count for counter in shapes),
+        }
 
     def has_truncated_context(self, paths: set[str]) -> bool:
         return bool(paths & self.bootstrap_truncated)
 
     def prune(self, active_paths: set[str]) -> None:
         self.cursors = {
-            path: cursor
-            for path, cursor in self.cursors.items()
-            if path in active_paths
+            path: cursor for path, cursor in self.cursors.items() if path in active_paths
         }
         self.unknown_types = {
-            path: counts
-            for path, counts in self.unknown_types.items()
-            if path in active_paths
+            path: counts for path, counts in self.unknown_types.items() if path in active_paths
         }
         self.shape_types = {
-            path: counts
-            for path, counts in self.shape_types.items()
-            if path in active_paths
+            path: counts for path, counts in self.shape_types.items() if path in active_paths
         }
         self.bootstrap_truncated.intersection_update(active_paths)
         self.terminal_metadata_attempted = {
@@ -779,6 +1119,14 @@ class RolloutReader:
             for path, cursor in self.terminal_metadata_backfills.items()
             if path in active_paths
         }
+        self.terminal_metadata_saturated.intersection_update(active_paths)
+        self.terminal_metadata_dropped = Counter(
+            {
+                path: count
+                for path, count in self.terminal_metadata_dropped.items()
+                if path in active_paths
+            }
+        )
 
 
 def rollout_identity(path: Path) -> tuple[str, bool]:

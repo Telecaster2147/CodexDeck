@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-24T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"working","turn_id":"TURN_ID"}}
+{"timestamp":"2026-07-24T00:00:01Z","type":"event_msg","payload":{"type":"future_phase_transition","status":"waiting"}}

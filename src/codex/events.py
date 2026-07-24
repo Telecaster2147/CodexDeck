@@ -171,6 +171,7 @@ def _unparsed_event(
         cleaned[:limit],
         len(cleaned) > limit,
     )
+    semantic_scope = _unknown_semantic_scope(record_type, item_type, payload)
     return _event(
         timestamp,
         "UNPARSED_PAYLOAD",
@@ -183,9 +184,53 @@ def _unparsed_event(
         metadata={
             "diagnostic_payload": retained,
             "diagnostic_payload_dropped_chars": dropped_chars,
+            "diagnostic_redaction": "best_effort_known_formats",
+            "semantic_scope": semantic_scope,
         },
         unparsed=unparsed,
     )
+
+
+def _unknown_semantic_scope(
+    record_type: str,
+    item_type: str,
+    payload: dict[str, Any],
+) -> str:
+    """Classify unknown records without retaining arbitrary payload content."""
+
+    name = item_type.casefold().replace("-", "_").replace(".", "_")
+    if any(
+        token in name for token in ("approval", "permission", "elicitation", "user_input", "auth")
+    ):
+        return "attention"
+    if any(token in name for token in ("exec", "shell", "command", "tool", "patch", "terminal")):
+        return "terminal"
+    if any(
+        token in name
+        for token in (
+            "phase",
+            "turn",
+            "task",
+            "response",
+            "model",
+            "compact",
+            "stream",
+            "started",
+            "completed",
+            "failed",
+            "aborted",
+        )
+    ):
+        return "lifecycle"
+    if record_type == "response_item" and any(
+        key in payload for key in ("call_id", "process_id", "command", "tool_name")
+    ):
+        return "terminal"
+    if any(key in payload for key in ("approval_id", "permissions", "elicitation")):
+        return "attention"
+    if "phase" in payload:
+        return "lifecycle"
+    return "auxiliary"
 
 
 def _structured_text(value: object) -> str:
@@ -360,20 +405,11 @@ def _tool_metadata(payload: dict[str, Any], item_type: str) -> dict[str, Any]:
     files = _patch_files(input_value)
     output, background = _background_tool_output(output_value)
     metadata = {**_timing(payload), **background}
-    call_id = (
-        payload.get("call_id")
-        or payload.get("id")
-        or item.get("id")
-        or item.get("call_id")
-    )
+    call_id = payload.get("call_id") or payload.get("id") or item.get("id") or item.get("call_id")
     nested_tools = _nested_tool_names(input_value)
     server = _bounded_metadata_text(payload.get("server") or item.get("server"), 160)
     explicit_name = str(
-        payload.get("name")
-        or item.get("name")
-        or payload.get("tool")
-        or item.get("tool")
-        or ""
+        payload.get("name") or item.get("name") or payload.get("tool") or item.get("tool") or ""
     ).strip()
     fallback_name = not explicit_name
     tool_names: list[str] = []
@@ -462,8 +498,10 @@ def _collab_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         receivers.append(receiver)
     error = payload.get("error")
     if isinstance(error, dict):
-        error = error.get("message") or error.get("detail") or json.dumps(
-            error, ensure_ascii=False, separators=(",", ":")
+        error = (
+            error.get("message")
+            or error.get("detail")
+            or json.dumps(error, ensure_ascii=False, separators=(",", ":"))
         )
     return {
         "sender_thread_id": str(payload.get("sender_thread_id") or ""),
@@ -507,13 +545,7 @@ def _compaction_events(
     compact_started_turn_id: str,
 ) -> list[NormalizedEvent]:
     metadata: dict[str, Any] = {"window_number": payload.get("window_number")}
-    trigger = (
-        "manual"
-        if inferred_manual_compact
-        else "auto"
-        if inferred_auto_compact
-        else ""
-    )
+    trigger = "manual" if inferred_manual_compact else "auto" if inferred_auto_compact else ""
     if trigger:
         metadata["trigger"] = trigger
     if context_tokens is not None:
@@ -537,8 +569,7 @@ def _compaction_events(
                 source_id=(
                     f"{compact_started_source_id}:auto-compact"
                     if compact_started_source_id and inferred_auto_compact
-                    else compact_started_source_id
-                    or f"{source_id}:{start_trigger}-compact"
+                    else compact_started_source_id or f"{source_id}:{start_trigger}-compact"
                 ),
                 turn_id=compact_started_turn_id or turn_id,
                 confidence=Confidence.MEDIUM if inferred_auto_compact else Confidence.HIGH,
@@ -728,12 +759,8 @@ def normalize_compaction_record(
     compact_started_source_id: str = "",
     compact_started_turn_id: str = "",
 ) -> list[NormalizedEvent] | None:
-    compact_request = (
-        record_type == "event_msg" and item_type == "user_message"
-    ) or (
-        record_type == "response_item"
-        and item_type == "message"
-        and payload.get("role") == "user"
+    compact_request = (record_type == "event_msg" and item_type == "user_message") or (
+        record_type == "response_item" and item_type == "message" and payload.get("role") == "user"
     )
     if compact_request and is_compact_command(payload):
         metadata: dict[str, Any] = {"trigger": "manual", "explicit_command": True}
@@ -1074,9 +1101,7 @@ def normalize_rollout_record(
         return compaction
 
     if record_type == "event_msg":
-        handled = normalize_event_message(
-            timestamp, item_type, payload, source_id, turn_id
-        )
+        handled = normalize_event_message(timestamp, item_type, payload, source_id, turn_id)
         if handled is not None:
             return handled
         if item_type == "thread_settings_applied":
@@ -1215,9 +1240,7 @@ def normalize_rollout_record(
             ]
         if item_type in {"rate_limit", "rate_limit_snapshot"}:
             metadata = {
-                "rate_limits": payload.get("rate_limits")
-                or payload.get("snapshot")
-                or payload
+                "rate_limits": payload.get("rate_limits") or payload.get("snapshot") or payload
             }
             return [
                 _event(
@@ -1275,11 +1298,7 @@ def normalize_rollout_record(
             "web_search_end",
         }:
             return []
-        return [
-            _unparsed_event(
-                timestamp, record_type, item_type, payload, source_id, turn_id
-            )
-        ]
+        return [_unparsed_event(timestamp, record_type, item_type, payload, source_id, turn_id)]
 
     if record_type == "response_item":
         return normalize_response_item(
@@ -1381,9 +1400,7 @@ def normalize_log(record: LogRecord) -> list[NormalizedEvent]:
                     str(error.get("message") or response.get("status_details") or event_type)
                 )
                 category = str(error.get("code") or event_type.replace(".", "_"))
-                failure = FailureInfo(
-                    category, message, "", turn_id, record.timestamp, "sse"
-                )
+                failure = FailureInfo(category, message, "", turn_id, record.timestamp, "sse")
                 detail = message
             return [
                 _event(

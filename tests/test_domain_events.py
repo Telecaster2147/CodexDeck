@@ -194,9 +194,7 @@ class ProtocolAggregationTests(unittest.TestCase):
         state = machine.derive("key", process(), NetworkEvidence(), 14.0)
 
         completed = next(item for item in state.tool_executions if item.call_id == "legacy-1")
-        running = next(
-            item for item in state.tool_executions if item.call_id == "legacy-running"
-        )
+        running = next(item for item in state.tool_executions if item.call_id == "legacy-running")
         self.assertEqual(completed.duration_seconds, 2.0)
         self.assertTrue(completed.provenance.derived)
         self.assertTrue(completed.provenance.complete)
@@ -380,8 +378,7 @@ class ProtocolAggregationTests(unittest.TestCase):
         capabilities = state.protocol_capabilities
         self.assertTrue(
             all(
-                value.mode == CapabilityMode.UNAVAILABLE
-                for value in capabilities.__dict__.values()
+                value.mode == CapabilityMode.UNAVAILABLE for value in capabilities.__dict__.values()
             )
         )
 

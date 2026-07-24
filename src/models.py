@@ -76,6 +76,61 @@ class Confidence(StringEnum):
     LOW = "low"
 
 
+@dataclass(frozen=True)
+class AxisCompleteness:
+    axis: str
+    complete: bool = True
+    confidence: Confidence = Confidence.HIGH
+    reason: str = "连续证据可用"
+    baseline_kind: str = "continuous"
+    baseline_at: float | None = None
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionCompleteness:
+    lifecycle: AxisCompleteness = field(default_factory=lambda: AxisCompleteness("lifecycle"))
+    attention: AxisCompleteness = field(default_factory=lambda: AxisCompleteness("attention"))
+    failure_recovery: AxisCompleteness = field(
+        default_factory=lambda: AxisCompleteness("failure_recovery")
+    )
+    terminal_ownership: AxisCompleteness = field(
+        default_factory=lambda: AxisCompleteness("terminal_ownership")
+    )
+    network: AxisCompleteness = field(default_factory=lambda: AxisCompleteness("network"))
+    silence: AxisCompleteness = field(default_factory=lambda: AxisCompleteness("silence"))
+
+    @property
+    def incomplete_axes(self) -> tuple[str, ...]:
+        return tuple(
+            item.axis
+            for item in (
+                self.lifecycle,
+                self.attention,
+                self.failure_recovery,
+                self.terminal_ownership,
+                self.network,
+                self.silence,
+            )
+            if not item.complete
+        )
+
+
+@dataclass(frozen=True)
+class EvidenceCoverage:
+    observed_at: float
+    source_epoch: str = ""
+    bootstrap_truncated: bool = False
+    gap_count: int = 0
+    generation_changed: bool = False
+    copy_truncated: bool = False
+    stream_uncertainty_count: int = 0
+    backlog_pending: bool = False
+    terminal_probe_complete: bool | None = None
+    network_probe_complete: bool | None = None
+    silence_probe_complete: bool | None = None
+
+
 class CapabilityMode(StringEnum):
     DIRECT = "direct"
     DERIVED = "derived"
@@ -134,6 +189,25 @@ class ProtocolCapabilities:
 
 
 @dataclass(frozen=True)
+class CommandExecutionSummary:
+    command_name: str = ""
+    complete: bool = False
+    reason: str = ""
+    exit_code: int | None = None
+    duration_seconds: float = 0.0
+    stdout_bytes_read: int = 0
+    stdout_bytes_retained: int = 0
+    stdout_bytes_filtered: int = 0
+    stderr_bytes_read: int = 0
+    stderr_bytes_retained: int = 0
+    stdout_lines_read: int = 0
+    stderr_lines_read: int = 0
+    records_retained: int = 0
+    records_filtered: int = 0
+    records_dropped: int = 0
+
+
+@dataclass(frozen=True)
 class CollectorHealth:
     name: str
     duration_seconds: float = 0.0
@@ -142,6 +216,88 @@ class CollectorHealth:
     consecutive_failures: int = 0
     error: str = ""
     budget_exceeded: bool = False
+    command: CommandExecutionSummary | None = None
+
+
+@dataclass(frozen=True)
+class ObserverHealth:
+    sample_kind: str = "full"
+    scheduled_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    duration_seconds: float = 0.0
+    scheduling_lag_seconds: float = 0.0
+    event_loop_lag_seconds: float = 0.0
+    snapshot_age_seconds: float = 0.0
+    worker_in_flight_age_seconds: float = 0.0
+    last_success_at: float | None = None
+    skipped_ticks: int = 0
+    coalesced_ticks: int = 0
+    consecutive_overdue: int = 0
+    degraded: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class DiagnosticParameter:
+    name: str
+    value: str | int | float | bool | None
+
+
+@dataclass(frozen=True)
+class Diagnostic:
+    code: str
+    severity: str
+    domain: str
+    source: str
+    observed_at: float | None
+    privacy_class: str
+    parameters: tuple[DiagnosticParameter, ...]
+    message_key: str
+    recovery_state: str = "active"
+
+
+class AdapterStatus(StringEnum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNSUPPORTED = "unsupported"
+    FAILED = "failed"
+    INCOMPLETE = "incomplete"
+
+
+@dataclass(frozen=True)
+class AdapterResult:
+    status: AdapterStatus
+    source: str
+    observed_at: float
+    error_code: str = ""
+    partial_count: int = 0
+    complete: bool = False
+    value: Any = field(default=None, metadata={"public": False})
+
+
+@dataclass(frozen=True)
+class EvidenceObservation:
+    source: str
+    observed_from: float | None = None
+    observed_to: float | None = None
+    sample_generation: int = 0
+    valid_through: float | None = None
+    stale_age_seconds: float | None = None
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class SnapshotTemporalCut:
+    kind: str = "composite_interval"
+    sample_generation: int = 0
+    observed_from: float | None = None
+    observed_to: float | None = None
+    max_source_skew_seconds: float = 0.0
+    actual_source_skew_seconds: float = 0.0
+    coherent: bool = True
+    reason: str = ""
+    sources: tuple[EvidenceObservation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -187,6 +343,27 @@ class HistoryWindowStats:
 
 
 @dataclass(frozen=True)
+class HistoryPersistenceStatus:
+    enabled: bool = False
+    queue_depth: int = 0
+    queue_capacity: int = 0
+    enqueued_samples: int = 0
+    persisted_samples: int = 0
+    dropped_samples: int = 0
+    coalesced_samples: int = 0
+    last_persisted_sample_at: str = ""
+    last_success_at: float | None = None
+    stats_generated_at: float | None = None
+    stats_age_seconds: float | None = None
+    writer_lag_seconds: float | None = None
+    consecutive_failures: int = 0
+    error: str = ""
+    maintenance_error: str = ""
+    shutdown_timed_out: bool = False
+    shared_path_policy: str = "unsupported_for_low_latency_writes"
+
+
+@dataclass(frozen=True)
 class EventTelemetrySummary:
     total_events: int = 0
     observed_events: int = 0
@@ -197,6 +374,15 @@ class EventTelemetrySummary:
     rendered_events: int = 0
     render_p50_seconds: float | None = None
     render_p95_seconds: float | None = None
+    dedupe_filter_bits_set: int = 0
+    dedupe_filter_capacity_bits: int = 0
+    dedupe_filter_fill_ratio: float = 0.0
+    dedupe_filter_matches: int = 0
+    dedupe_filter_degraded_drops: int = 0
+    dedupe_filter_degraded: bool = False
+    stale_stream_generation_dropped: int = 0
+    stream_identity_limit_dropped: int = 0
+    stream_generation_advances: int = 0
 
 
 @dataclass(frozen=True)
@@ -207,6 +393,31 @@ class CompactSourceStatus:
     last_probe_at: float | None = None
     last_event_at: float | None = None
     error: str = ""
+    bytes_read: int = 0
+    consumed_bytes: int = 0
+    record_count: int = 0
+    backlog_bytes: int = 0
+    backlog_records_lower_bound: int = 0
+    backlog_age_seconds: float | None = None
+    budget_exceeded: bool = False
+    oversize_record_count: int = 0
+    skipped_bytes: int = 0
+    gap_count: int = 0
+    gap_reason: str = ""
+    gap_hash: str = ""
+    parse_duration_seconds: float = 0.0
+    device: int = 0
+    inode: int = 0
+    generation: int = 0
+    anchor_hash: str = ""
+    stream_uncertain: bool = False
+    stream_uncertainty_count: int = 0
+    stream_uncertainty_reason: str = ""
+    parse_validity: Confidence = Confidence.HIGH
+    source_authenticity: Confidence = Confidence.HIGH
+    identity_binding: Confidence = Confidence.HIGH
+    semantic_confidence: Confidence = Confidence.HIGH
+    binding_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -242,12 +453,51 @@ class InstanceIdentity:
     def storage_key(self) -> str:
         if self.storage_id:
             return self.storage_id
+        return self.canonical_storage_key
+
+    @property
+    def canonical_storage_key(self) -> str:
+        payload = f"{self.codex_home}\0{self.sqlite_home}".encode()
+        return hashlib.blake2s(payload, digest_size=16).hexdigest()
+
+    @property
+    def legacy_storage_key(self) -> str:
         payload = f"{self.codex_home}\0{self.sqlite_home}".encode()
         return hashlib.blake2s(payload, digest_size=8).hexdigest()
 
     @property
+    def canonical_key(self) -> tuple[str, str]:
+        return (str(self.codex_home), str(self.sqlite_home))
+
+    @property
     def display_key(self) -> str:
         return self.storage_key[:8]
+
+
+class InstanceIdentityRegistry:
+    """Resolve surrogate IDs without using them as factual identity."""
+
+    def __init__(self) -> None:
+        self._canonical_by_storage: dict[str, tuple[str, str]] = {}
+
+    def register(self, identity: InstanceIdentity) -> tuple[str, bool]:
+        requested = identity.storage_key
+        canonical = identity.canonical_key
+        existing = self._canonical_by_storage.get(requested)
+        if existing is None or existing == canonical:
+            self._canonical_by_storage[requested] = canonical
+            return requested, False
+        resolved = identity.canonical_storage_key
+        suffix = 0
+        while (
+            resolved in self._canonical_by_storage
+            and self._canonical_by_storage[resolved] != canonical
+        ):
+            suffix += 1
+            payload = f"{canonical[0]}\0{canonical[1]}\0{suffix}".encode()
+            resolved = hashlib.blake2s(payload, digest_size=16).hexdigest()
+        self._canonical_by_storage[resolved] = canonical
+        return resolved, True
 
 
 @dataclass(frozen=True)
@@ -437,6 +687,8 @@ class ProcessInfo:
     process_group_id: int | None = None
     foreground_process_group_id: int | None = None
     terminal: str = ""
+    discovery_confidence: Confidence = Confidence.HIGH
+    discovery_evidence: tuple[str, ...] = ()
     instance_identity: InstanceIdentity | None = field(
         default=None,
         metadata={"public": False},
@@ -575,6 +827,17 @@ class NormalizedEvent:
     rendered_at: float | None = None
     unparsed: UnparsedPayload | None = None
     source_timestamp: float | None = None
+    adjudicated_at: float | None = None
+    clock_domain: str = "source_wall_clock"
+    clock_trust: Confidence = Confidence.HIGH
+    clock_uncertain: bool = False
+    clock_reason: str = ""
+    clock_sequence: int = 0
+    parse_validity: Confidence = Confidence.HIGH
+    source_authenticity: Confidence = Confidence.HIGH
+    identity_binding: Confidence = Confidence.HIGH
+    semantic_confidence: Confidence = Confidence.HIGH
+    binding_evidence: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.source_timestamp is None:
@@ -588,7 +851,27 @@ class NormalizedEvent:
     def freshness_seconds(self) -> float | None:
         if self.observed_at is None:
             return None
-        return max(0.0, self.observed_at - self.timestamp)
+        source_timestamp = self.source_timestamp or self.timestamp
+        return max(0.0, self.observed_at - min(source_timestamp, self.observed_at))
+
+    @property
+    def presentation_timestamp(self) -> float:
+        return self.source_timestamp or self.timestamp
+
+    @property
+    def decision_timestamp(self) -> float:
+        return self.adjudicated_at if self.adjudicated_at is not None else self.timestamp
+
+
+@dataclass(frozen=True)
+class ClockAssessment:
+    source: str
+    clock_domain: str
+    source_timestamp: float
+    observed_at: float | None
+    adjudicated_at: float
+    reason: str
+
 
 @dataclass(frozen=True)
 class AttentionRequest:
@@ -742,11 +1025,37 @@ class TerminalSessionSummary:
     stale: bool = False
     process_active: bool = False
     source: str = "rollout"
+    association_status: str = "unresolved"
+    correlation_source: str = ""
+    association_reason: str = "missing_correlation_identity"
     chunks: tuple[TerminalChunk, ...] = ()
     identity: TerminalIdentity | None = field(
         default=None,
         metadata={"public": False},
     )
+
+
+@dataclass(frozen=True)
+class TerminalAssociationSummary:
+    eligible_operations: int = 0
+    associated_operations: int = 0
+    confirmed: int = 0
+    ambiguous: int = 0
+    conflicting: int = 0
+    unresolved: int = 0
+    dropped: int = 0
+    reasons: tuple[tuple[str, int], ...] = ()
+    labeled_correct: int = 0
+    labeled_incorrect: int = 0
+    association_coverage: float | None = None
+    unresolved_rate: float | None = None
+    precision: float | None = None
+    private_state_entries: int = 0
+    private_state_estimated_bytes: int = 0
+    private_state_evictions: int = 0
+    private_state_dropped: int = 0
+    private_state_recoveries: int = 0
+    private_state_reasons: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -786,6 +1095,11 @@ class CompactionEvidence:
     confidence: Confidence = Confidence.HIGH
     direct: bool = True
     detail: str = ""
+    parse_validity: Confidence = Confidence.HIGH
+    source_authenticity: Confidence = Confidence.HIGH
+    identity_binding: Confidence = Confidence.HIGH
+    semantic_confidence: Confidence = Confidence.HIGH
+    binding_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -863,9 +1177,23 @@ class SessionHealth:
     session_id: str
     process: ProcessInfo
     lifecycle: LifecycleState = LifecycleState.IDLE
+    lifecycle_confidence: Confidence = Confidence.MEDIUM
+    lifecycle_provenance: Provenance = field(
+        default_factory=lambda: Provenance("state-machine", Confidence.MEDIUM, derived=True)
+    )
     recovery: RecoveryState = RecoveryState.NONE
     attention: AttentionState = AttentionState.NONE
+    attention_confidence: Confidence = Confidence.MEDIUM
+    attention_provenance: Provenance = field(
+        default_factory=lambda: Provenance("state-machine", Confidence.MEDIUM, derived=True)
+    )
     attention_request: AttentionRequest | None = None
+    protocol_uncertain: bool = False
+    protocol_uncertainty_scope: str = ""
+    protocol_uncertainty_reason: str = ""
+    clock_uncertain: bool = False
+    clock_assessments: tuple[ClockAssessment, ...] = ()
+    completeness: SessionCompleteness = field(default_factory=SessionCompleteness)
     current_operation: CurrentOperationSummary = field(default_factory=CurrentOperationSummary)
     diagnosis: list[DiagnosisFinding] = field(default_factory=list)
     event_telemetry: EventTelemetrySummary = field(default_factory=EventTelemetrySummary)
@@ -890,6 +1218,9 @@ class SessionHealth:
     compactions: list[CompactionSummary] = field(default_factory=list)
     tool_executions: list[ToolExecutionSummary] = field(default_factory=list)
     terminal_sessions: list[TerminalSessionSummary] = field(default_factory=list)
+    terminal_association: TerminalAssociationSummary = field(
+        default_factory=TerminalAssociationSummary
+    )
     agents: list[AgentNode] = field(default_factory=list)
     protocol_capabilities: ProtocolCapabilities = field(default_factory=ProtocolCapabilities)
     process_exited: bool = False
@@ -922,9 +1253,11 @@ class InstanceSnapshot:
     capabilities: SourceCapabilities = field(default_factory=SourceCapabilities)
     protocol_capabilities: ProtocolCapabilities = field(default_factory=ProtocolCapabilities)
     collector_health: list[CollectorHealth] = field(default_factory=list)
-    diagnostics: list[str] = field(default_factory=list)
+    adapter_results: tuple[AdapterResult, ...] = ()
+    diagnostics: list[Diagnostic | str] = field(default_factory=list)
     unknown_event_types: dict[str, int] = field(default_factory=dict)
     protocol_shape_families: dict[str, int] = field(default_factory=dict)
+    protocol_family_counters: dict[str, int] = field(default_factory=dict)
     rollout_context_truncated: bool = False
     rollout_activity: list[dict[str, Any]] = field(default_factory=list)
     process_data_stale_age_seconds: float | None = None
@@ -948,16 +1281,44 @@ class InstanceSnapshot:
         return self.identity or InstanceIdentity.from_storage_key(self.instance_id)
 
 
+@dataclass(frozen=True)
+class DiscoveryCandidateDiagnostic:
+    pid: int
+    command: str
+    role: str
+    outcome: str
+    reason: str
+    confidence: Confidence = Confidence.LOW
+
+
+@dataclass(frozen=True)
+class DiscoverySummary:
+    candidates: int = 0
+    confirmed: int = 0
+    rejected: int = 0
+    unresolved: int = 0
+    diagnostics: tuple[DiscoveryCandidateDiagnostic, ...] = ()
+    labeled_true_positive: int = 0
+    labeled_false_positive: int = 0
+    labeled_false_negative: int = 0
+    precision: float | None = None
+    recall: float | None = None
+
+
 @dataclass
 class MonitorSnapshot:
     generated_at: str
     interval_seconds: float
     instances: list[InstanceSnapshot] = field(default_factory=list)
     collection_duration_seconds: float = 0.0
-    diagnostics: list[str] = field(default_factory=list)
+    diagnostics: list[Diagnostic | str] = field(default_factory=list)
     process_data_stale_age_seconds: float | None = None
     socket_data_stale_age_seconds: float | None = None
     collector_health: list[CollectorHealth] = field(default_factory=list)
+    observer: ObserverHealth = field(default_factory=ObserverHealth)
+    temporal: SnapshotTemporalCut = field(default_factory=SnapshotTemporalCut)
+    discovery: DiscoverySummary = field(default_factory=lambda: DiscoverySummary())
+    history: HistoryPersistenceStatus = field(default_factory=HistoryPersistenceStatus)
 
     @property
     def sessions(self) -> list[SessionHealth]:
@@ -978,8 +1339,7 @@ class MonitorSnapshot:
                 or bool(item.attention_request)
                 or bool(item.alert)
                 or item.network.state == NetworkState.STALLED
-                or item.silence.state
-                in {SilenceState.STALL_SUSPECT, SilenceState.OBSERVER_BLIND}
+                or item.silence.state in {SilenceState.STALL_SUSPECT, SilenceState.OBSERVER_BLIND}
                 for item in sessions
             ),
             "stall_suspects": sum(

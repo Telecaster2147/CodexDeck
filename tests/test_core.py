@@ -22,7 +22,9 @@ from models import (  # noqa: E402
     AlertStatus,
     AttentionState,
     Confidence,
+    EvidenceCoverage,
     InstanceIdentity,
+    InstanceIdentityRegistry,
     LifecycleState,
     NetworkEvidence,
     NetworkState,
@@ -38,7 +40,8 @@ from models import (  # noqa: E402
 )
 from network.classifier import assess_process_network  # noqa: E402
 from network.sockets import parse_ss_output  # noqa: E402
-from state_machine import SessionStateMachine  # noqa: E402
+from state_machine import BoundedDedupeFilter, SessionStateMachine  # noqa: E402
+from utils import redact_sensitive, redact_structured  # noqa: E402
 
 
 def process(session_id: str = "session-1") -> ProcessInfo:
@@ -93,6 +96,69 @@ class IdentityValueTests(unittest.TestCase):
         self.assertNotEqual(
             SocketFlowIdentity("127.0.0.1:1", "192.0.2.1:443", 42, 3),
             SocketFlowIdentity("127.0.0.1:1", "192.0.2.1:443", 42, 4),
+        )
+
+    def test_forced_surrogate_collision_keeps_canonical_instances_separate(self) -> None:
+        registry = InstanceIdentityRegistry()
+        first = InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A"), "COLLISION")
+        second = InstanceIdentity(Path("/CODEX_HOME_B"), Path("/SQLITE_HOME_B"), "COLLISION")
+
+        first_key, first_collision = registry.register(first)
+        second_key, second_collision = registry.register(second)
+
+        self.assertEqual(first_key, "COLLISION")
+        self.assertFalse(first_collision)
+        self.assertTrue(second_collision)
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(len(second_key), 32)
+        self.assertNotEqual(first.canonical_key, second.canonical_key)
+
+
+class PrivacyRedactionTests(unittest.TestCase):
+    def test_best_effort_redaction_covers_known_credential_formats(self) -> None:
+        source = "\n".join(
+            (
+                "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+                "Cookie: session=COOKIE_SECRET; theme=dark",
+                "aws=AKIAABCDEFGHIJKLMNOP",
+                "AWS_SECRET_ACCESS_KEY=aws-secret-value",
+                "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123",
+                "db=postgresql://user:DB_PASSWORD@db.example.invalid/app",
+                "url=https://alice:BASIC_PASSWORD@example.invalid/path",
+                "-----BEGIN PRIVATE KEY-----\nPEM_SECRET\n-----END PRIVATE KEY-----",
+            )
+        )
+
+        redacted = redact_sensitive(source)
+
+        for secret in (
+            "dXNlcjpwYXNzd29yZA==",
+            "COOKIE_SECRET",
+            "AKIAABCDEFGHIJKLMNOP",
+            "aws-secret-value",
+            "eyJhbGciOiJIUzI1NiJ9",
+            "DB_PASSWORD",
+            "BASIC_PASSWORD",
+            "PEM_SECRET",
+        ):
+            self.assertNotIn(secret, redacted)
+
+    def test_best_effort_redaction_preserves_common_non_secret_identifiers(self) -> None:
+        source = (
+            "sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef "
+            "uuid=123e4567-e89b-12d3-a456-426614174000 "
+            "name=sketch-abcdefghijklmnop"
+        )
+
+        self.assertEqual(redact_sensitive(source), source)
+
+    def test_unknown_custom_credential_format_documents_detection_limit(self) -> None:
+        source = "opaque credential CUSTOMCRED_Z9Y8X7W6V5U4"
+
+        self.assertEqual(redact_sensitive(source), source)
+        self.assertEqual(
+            redact_structured({"cookie": "value", "opaque": source}),
+            {"cookie": "[REDACTED]", "opaque": source},
         )
 
 
@@ -355,6 +421,10 @@ class EventNormalizationTests(unittest.TestCase):
         self.assertNotIn("client-value", payload)
         self.assertNotIn("refresh-value", payload)
         self.assertTrue(events[0].unparsed.truncated)
+        self.assertEqual(
+            events[0].metadata["diagnostic_redaction"],
+            "best_effort_known_formats",
+        )
 
     def test_unparsed_diagnostic_payload_has_a_hard_retention_limit(self) -> None:
         events = normalize_rollout_record(
@@ -369,6 +439,27 @@ class EventNormalizationTests(unittest.TestCase):
         event = events[0]
         self.assertEqual(len(event.metadata["diagnostic_payload"]), 4 * 1024)
         self.assertGreater(event.metadata["diagnostic_payload_dropped_chars"], 0)
+
+    def test_unparsed_records_distinguish_semantic_and_auxiliary_unknowns(self) -> None:
+        phase = normalize_rollout_record(
+            {
+                "timestamp": 10.0,
+                "type": "event_msg",
+                "payload": {"type": "future_phase_transition", "status": "running"},
+            },
+            "phase",
+        )[0]
+        telemetry = normalize_rollout_record(
+            {
+                "timestamp": 11.0,
+                "type": "event_msg",
+                "payload": {"type": "future_usage_telemetry", "count": 3},
+            },
+            "telemetry",
+        )[0]
+
+        self.assertEqual(phase.metadata["semantic_scope"], "lifecycle")
+        self.assertEqual(telemetry.metadata["semantic_scope"], "auxiliary")
 
     def test_nested_exec_and_patch_input_exposes_command_cwd_and_files(self) -> None:
         tool_input = (
@@ -399,9 +490,7 @@ class EventNormalizationTests(unittest.TestCase):
                     "type": "custom_tool_call_output",
                     "call_id": "call-1",
                     "output": (
-                        "Script running with cell ID 199\n"
-                        "Wall time 10.0 seconds\n"
-                        "Output:\n"
+                        "Script running with cell ID 199\nWall time 10.0 seconds\nOutput:\n"
                     ),
                 },
             },
@@ -582,9 +671,7 @@ class EventNormalizationTests(unittest.TestCase):
                     "error": {
                         "message": "retry budget exhausted",
                         "codex_error_info": {
-                            "response_too_many_failed_attempts": {
-                                "http_status_code": 502
-                            }
+                            "response_too_many_failed_attempts": {"http_status_code": 502}
                         },
                     },
                 },
@@ -648,6 +735,189 @@ class EventNormalizationTests(unittest.TestCase):
 
 
 class StateMachineTests(unittest.TestCase):
+    @staticmethod
+    def _unknown(timestamp: float, scope: str, source_id: str) -> NormalizedEvent:
+        return NormalizedEvent(
+            timestamp,
+            "UNPARSED_PAYLOAD",
+            "unknown",
+            source="rollout",
+            confidence=Confidence.LOW,
+            source_id=source_id,
+            complete=False,
+            metadata={"semantic_scope": scope},
+        )
+
+    def test_evidence_gap_recovers_only_axes_with_trusted_baselines(self) -> None:
+        machine = SessionStateMachine(3600)
+        key = "coverage"
+        observed_at = 1.0
+        machine.update_coverage(
+            key,
+            EvidenceCoverage(
+                observed_at,
+                source_epoch="stream:1",
+                bootstrap_truncated=True,
+                terminal_probe_complete=False,
+                network_probe_complete=True,
+                silence_probe_complete=True,
+            ),
+        )
+
+        initial = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertFalse(initial.completeness.lifecycle.complete)
+        self.assertFalse(initial.completeness.attention.complete)
+        self.assertFalse(initial.completeness.failure_recovery.complete)
+        self.assertFalse(initial.completeness.terminal_ownership.complete)
+        self.assertTrue(initial.completeness.network.complete)
+        self.assertFalse(initial.completeness.silence.complete)
+        self.assertEqual(initial.attention, AttentionState.NONE)
+
+        machine.ingest(key, [event(10, "ACTION_RESOLVED", "resolved")])
+        attention = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertTrue(attention.completeness.attention.complete)
+        self.assertFalse(attention.completeness.lifecycle.complete)
+        self.assertFalse(attention.completeness.failure_recovery.complete)
+
+        machine.ingest(key, [event(11, "REQUEST_SENT", "request")])
+        lifecycle = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertTrue(lifecycle.completeness.lifecycle.complete)
+        self.assertFalse(lifecycle.completeness.failure_recovery.complete)
+        self.assertTrue(lifecycle.completeness.silence.complete)
+
+        machine.ingest(key, [event(12, "TURN_STARTED", "turn")])
+        failure = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertTrue(failure.completeness.failure_recovery.complete)
+
+        machine.update_coverage(
+            key,
+            EvidenceCoverage(
+                20.0,
+                source_epoch="stream:2",
+                generation_changed=True,
+                network_probe_complete=True,
+                silence_probe_complete=True,
+            ),
+        )
+        replaced = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertFalse(replaced.completeness.lifecycle.complete)
+        self.assertFalse(replaced.completeness.attention.complete)
+        self.assertFalse(replaced.completeness.failure_recovery.complete)
+        self.assertFalse(replaced.completeness.terminal_ownership.complete)
+        self.assertTrue(replaced.completeness.network.complete)
+
+        machine.update_coverage(
+            key,
+            EvidenceCoverage(
+                21.0,
+                source_epoch="stream:2",
+                terminal_probe_complete=True,
+                network_probe_complete=True,
+                silence_probe_complete=True,
+            ),
+        )
+        terminal = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertTrue(terminal.completeness.terminal_ownership.complete)
+        self.assertFalse(terminal.completeness.lifecycle.complete)
+
+    def test_backlog_is_temporary_but_retention_gap_requires_axis_clear(self) -> None:
+        machine = SessionStateMachine(3600)
+        key = "backlog"
+        machine.update_coverage(
+            key,
+            EvidenceCoverage(time.time(), source_epoch="stream:1", backlog_pending=True),
+        )
+        pending = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertFalse(pending.completeness.lifecycle.complete)
+        self.assertFalse(pending.completeness.attention.complete)
+
+        machine.update_coverage(
+            key,
+            EvidenceCoverage(time.time() + 1, source_epoch="stream:1"),
+        )
+        caught_up = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertTrue(caught_up.completeness.lifecycle.complete)
+        self.assertTrue(caught_up.completeness.attention.complete)
+
+        retained_key = "retention"
+        records = [event(1, "ACTION_REQUIRED", "attention")]
+        records.extend(event(index + 2, "KEEPALIVE", f"keepalive-{index}") for index in range(501))
+        machine.ingest(retained_key, records)
+        retained = machine.derive(
+            retained_key,
+            process(),
+            NetworkEvidence(NetworkState.IDLE),
+            now=600,
+        )
+        self.assertEqual(len(retained.events), 500)
+        self.assertEqual(retained.attention, AttentionState.NONE)
+        self.assertFalse(retained.completeness.attention.complete)
+        self.assertIn("event_retention_500", retained.completeness.attention.evidence)
+
+        machine.ingest(retained_key, [event(604, "ACTION_RESOLVED", "retained-clear")])
+        cleared = machine.derive(
+            retained_key,
+            process(),
+            NetworkEvidence(NetworkState.IDLE),
+            now=605,
+        )
+        self.assertTrue(cleared.completeness.attention.complete)
+
+    def test_fresh_semantic_unknown_degrades_lifecycle_until_known_progress(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "key",
+            [
+                event(10.0, "MODEL_PROGRESS", "progress"),
+                self._unknown(11.0, "lifecycle", "future-phase"),
+            ],
+        )
+
+        uncertain = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=12.0)
+        self.assertEqual(uncertain.lifecycle, LifecycleState.GENERATING)
+        self.assertTrue(uncertain.protocol_uncertain)
+        self.assertEqual(uncertain.lifecycle_confidence, Confidence.LOW)
+        self.assertEqual(uncertain.phase, "协议状态不确定")
+
+        machine.ingest("key", [event(13.0, "MODEL_PROGRESS", "recovered")])
+        recovered = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=14.0)
+        self.assertFalse(recovered.protocol_uncertain)
+        self.assertEqual(recovered.lifecycle_confidence, Confidence.HIGH)
+        self.assertEqual(recovered.phase, "模型正在生成")
+
+    def test_unknown_attention_candidate_is_visible_in_main_phase(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "key",
+            [
+                event(10.0, "MODEL_PROGRESS", "progress"),
+                self._unknown(11.0, "attention", "future-approval"),
+            ],
+        )
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=12.0)
+
+        self.assertEqual(state.attention, AttentionState.NONE)
+        self.assertEqual(state.attention_confidence, Confidence.LOW)
+        self.assertEqual(state.phase, "协议不确定（可能等待交互）")
+        self.assertEqual(state.diagnosis[0].conclusion, state.phase)
+
+    def test_auxiliary_or_older_unknown_does_not_degrade_newer_progress(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "key",
+            [
+                self._unknown(9.0, "lifecycle", "old-phase"),
+                event(10.0, "MODEL_PROGRESS", "progress"),
+                self._unknown(11.0, "auxiliary", "telemetry"),
+            ],
+        )
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=12.0)
+
+        self.assertFalse(state.protocol_uncertain)
+        self.assertEqual(state.lifecycle_confidence, Confidence.HIGH)
+
     def test_action_required_is_independent_from_lifecycle(self) -> None:
         machine = SessionStateMachine(900)
         machine.ingest(
@@ -672,9 +942,7 @@ class StateMachineTests(unittest.TestCase):
             ],
         )
 
-        state = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0
-        )
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0)
 
         self.assertEqual(state.lifecycle, LifecycleState.GENERATING)
         self.assertEqual(state.attention, AttentionState.APPROVAL)
@@ -697,12 +965,240 @@ class StateMachineTests(unittest.TestCase):
             ],
         )
 
-        state = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0
-        )
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0)
 
         self.assertEqual(state.attention, AttentionState.NONE)
         self.assertIsNone(state.attention_request)
+
+    def test_future_action_uses_observation_order_and_trusted_resolution_clears_it(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    1_300.0,
+                    "ACTION_REQUIRED",
+                    "等待用户操作",
+                    source="rollout",
+                    source_id="future-action",
+                    observed_at=1_000.0,
+                    metadata={"attention_state": "APPROVAL"},
+                )
+            ],
+        )
+        uncertain = machine.derive(
+            "key", process(), NetworkEvidence(NetworkState.IDLE), now=1_000.0
+        )
+        action = machine.retained_events("key")[0]
+
+        self.assertEqual(uncertain.attention, AttentionState.APPROVAL)
+        self.assertTrue(uncertain.clock_uncertain)
+        self.assertEqual(action.source_timestamp, 1_300.0)
+        self.assertEqual(action.decision_timestamp, 1_000.0)
+        self.assertEqual(action.presentation_timestamp, 1_300.0)
+
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    1_001.0,
+                    "ACTION_RESOLVED",
+                    "已处理",
+                    source="rollout",
+                    source_id="resolution",
+                    observed_at=1_001.0,
+                )
+            ],
+        )
+        resolved = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=1_002.0)
+
+        self.assertIsNone(resolved.attention_request)
+        self.assertFalse(resolved.clock_uncertain)
+
+    def test_cross_source_future_skew_cannot_override_later_progress(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    1_100.0,
+                    "ACTION_REQUIRED",
+                    "等待用户操作",
+                    source="compact_hook",
+                    source_id="hook-action",
+                    observed_at=1_000.0,
+                    metadata={"attention_state": "USER_INPUT"},
+                )
+            ],
+        )
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    1_000.5,
+                    "MODEL_PROGRESS",
+                    "继续生成",
+                    source="rollout",
+                    source_id="rollout-progress",
+                    observed_at=1_001.0,
+                )
+            ],
+        )
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=1_002.0)
+
+        self.assertIsNone(state.attention_request)
+        self.assertTrue(state.clock_uncertain)
+        self.assertEqual(state.clock_assessments[0].source, "compact_hook")
+
+    def test_terminal_completion_and_process_exit_clear_future_attention(self) -> None:
+        for clear_kind in ("TURN_COMPLETED", "PROCESS_EXITED"):
+            with self.subTest(clear_kind=clear_kind):
+                machine = SessionStateMachine(900)
+                machine.ingest(
+                    "key",
+                    [
+                        NormalizedEvent(
+                            1_300.0,
+                            "ACTION_REQUIRED",
+                            "等待用户操作",
+                            source="rollout",
+                            source_id=f"action-{clear_kind}",
+                            observed_at=1_000.0,
+                            metadata={"attention_state": "APPROVAL"},
+                        )
+                    ],
+                )
+                machine.ingest(
+                    "key",
+                    [
+                        NormalizedEvent(
+                            1_001.0,
+                            clear_kind,
+                            "单调终止证据",
+                            source="process" if clear_kind == "PROCESS_EXITED" else "rollout",
+                            source_id=f"clear-{clear_kind}",
+                            observed_at=1_001.0,
+                        )
+                    ],
+                )
+
+                state = machine.derive(
+                    "key", process(), NetworkEvidence(NetworkState.IDLE), now=1_002.0
+                )
+
+                self.assertIsNone(state.attention_request)
+
+    def test_clock_rollback_does_not_revive_failure_and_clear_resets_epoch(self) -> None:
+        machine = SessionStateMachine(900)
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    200.0,
+                    "ACTION_REQUIRED",
+                    "等待用户操作",
+                    source="rollout",
+                    source_id="action",
+                    observed_at=200.0,
+                    metadata={"attention_state": "APPROVAL"},
+                )
+            ],
+        )
+        for clock_event in (
+            NormalizedEvent(
+                150.0,
+                "ACTION_RESOLVED",
+                "已处理",
+                source="rollout",
+                source_id="rollback-resolution",
+                observed_at=150.0,
+            ),
+            NormalizedEvent(
+                151.0,
+                "TURN_STARTED",
+                "新时钟纪元 turn",
+                source="rollout",
+                source_id="post-rollback-turn",
+                observed_at=201.0,
+            ),
+            NormalizedEvent(
+                152.0,
+                "MODEL_PROGRESS",
+                "新时钟纪元进展",
+                source="rollout",
+                source_id="post-rollback-progress",
+                observed_at=202.0,
+            ),
+            NormalizedEvent(
+                100.0,
+                "TURN_FAILED",
+                "延迟旧失败",
+                source="rollout",
+                source_id="old-failure",
+                observed_at=203.0,
+            ),
+        ):
+            machine.ingest("key", [clock_event])
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=204.0)
+
+        self.assertIsNone(state.attention_request)
+        self.assertEqual(state.lifecycle, LifecycleState.GENERATING)
+        self.assertTrue(state.clock_uncertain)
+
+    def test_zero_timestamp_clear_and_sleep_resume_use_monotonic_adjudication(self) -> None:
+        machine = SessionStateMachine(20_000)
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    10.0,
+                    "ACTION_REQUIRED",
+                    "等待用户操作",
+                    source="rollout",
+                    source_id="action",
+                    observed_at=10.0,
+                    metadata={"attention_state": "USER_INPUT"},
+                )
+            ],
+        )
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    0.0,
+                    "ACTION_RESOLVED",
+                    "已处理",
+                    source="rollout",
+                    source_id="zero-resolution",
+                    observed_at=11.0,
+                )
+            ],
+        )
+        cleared = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=12.0)
+        self.assertIsNone(cleared.attention_request)
+        self.assertTrue(cleared.clock_uncertain)
+
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    10_000.0,
+                    "MODEL_PROGRESS",
+                    "休眠恢复后继续",
+                    source="rollout",
+                    source_id="resume-progress",
+                    observed_at=10_000.0,
+                ),
+            ],
+        )
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=10_001.0)
+
+        self.assertIsNone(state.attention_request)
+        self.assertEqual(state.lifecycle, LifecycleState.GENERATING)
+        self.assertFalse(state.clock_uncertain)
 
     def test_each_attention_state_clears_on_terminal_or_explicit_resolution(self) -> None:
         for index, attention in enumerate(
@@ -763,9 +1259,7 @@ class StateMachineTests(unittest.TestCase):
             ],
         )
 
-        state = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.ACTIVE), now=12.0
-        )
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.ACTIVE), now=12.0)
 
         self.assertEqual(state.current_operation.category, "attention")
         self.assertEqual(state.current_operation.detail, "Approve command")
@@ -798,9 +1292,7 @@ class StateMachineTests(unittest.TestCase):
             ],
         )
 
-        state = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0
-        )
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0)
 
         self.assertEqual(state.attention, AttentionState.NONE)
 
@@ -1001,9 +1493,7 @@ class StateMachineTests(unittest.TestCase):
             ],
         )
 
-        compacting = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.ACTIVE), now
-        )
+        compacting = machine.derive("key", process(), NetworkEvidence(NetworkState.ACTIVE), now)
 
         self.assertEqual(compacting.lifecycle, LifecycleState.COMPACTING)
         self.assertEqual(compacting.phase, "正在压缩上下文")
@@ -1016,9 +1506,7 @@ class StateMachineTests(unittest.TestCase):
                 event(now - 2, "MODEL_PROGRESS", "normal-progress"),
             ],
         )
-        resumed = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.ACTIVE), now
-        )
+        resumed = machine.derive("key", process(), NetworkEvidence(NetworkState.ACTIVE), now)
 
         self.assertEqual(resumed.lifecycle, LifecycleState.GENERATING)
         self.assertEqual(resumed.phase, "模型正在生成")
@@ -1066,8 +1554,7 @@ class StateMachineTests(unittest.TestCase):
             metadata={"trigger": "manual"},
         )
         noise = [
-            event(now - 800 + index, "MODEL_PROGRESS", f"noise-{index}")
-            for index in range(501)
+            event(now - 800 + index, "MODEL_PROGRESS", f"noise-{index}") for index in range(501)
         ]
 
         machine.ingest("key", [compact_start, compact_done, *noise])
@@ -1091,6 +1578,130 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(len(machine.events["key"]), 500)
         self.assertEqual(machine.events["key"][0].source_id, "50")
 
+    def test_bounded_dedupe_filter_never_forgets_inserted_identity(self) -> None:
+        dedupe = BoundedDedupeFilter(bit_count=64)
+        dedupe.add("old-source")
+        for index in range(10_000):
+            dedupe.add(f"source-{index}")
+
+        self.assertIn("old-source", dedupe)
+        self.assertLessEqual(len(dedupe), 64)
+        self.assertTrue(dedupe.degraded)
+
+    def test_state_private_dedupe_and_clock_domains_stay_bounded_under_churn(self) -> None:
+        machine = SessionStateMachine(900, dedupe_filter_bits=64)
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    float(index + 1),
+                    "MODEL_PROGRESS",
+                    "progress",
+                    source=f"arbitrary-source-{index}",
+                    source_id=f"source-{index}",
+                    observed_at=float(index + 1),
+                )
+                for index in range(2_000)
+            ],
+        )
+        machine.ingest(
+            "key",
+            [
+                NormalizedEvent(
+                    1.0,
+                    "MODEL_PROGRESS",
+                    "replayed",
+                    source="arbitrary-source-0",
+                    source_id="source-0",
+                    observed_at=3_000.0,
+                )
+            ],
+        )
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=3_000.0)
+        self.assertLessEqual(len(machine.seen["key"]), 64)
+        self.assertEqual(set(machine.clock_state["key"]), {"external_wall_clock"})
+        self.assertLessEqual(
+            sum(event.source_id == "source-0" for event in machine.events["key"]), 1
+        )
+        self.assertTrue(state.event_telemetry.dedupe_filter_degraded)
+        self.assertGreater(state.event_telemetry.dedupe_filter_matches, 0)
+        self.assertTrue(
+            any(finding.conclusion == "事件去重记忆接近饱和" for finding in state.diagnosis)
+        )
+
+    def test_stale_mutable_stream_generation_cannot_reopen_completed_compact(self) -> None:
+        machine = SessionStateMachine(900)
+        path_hash = "a" * 64
+
+        def stream_event(
+            generation: int,
+            kind: str,
+            timestamp: float,
+            source_id: str,
+        ) -> NormalizedEvent:
+            return NormalizedEvent(
+                timestamp,
+                kind,
+                kind,
+                source="compact_hook",
+                source_id=source_id,
+                observed_at=timestamp + 0.1,
+                metadata={
+                    "stream_path_sha256": path_hash,
+                    "stream_generation": generation,
+                },
+            )
+
+        machine.ingest(
+            "key",
+            [
+                stream_event(1, "COMPACTING", 10.0, "generation-1-start"),
+                stream_event(1, "COMPACT_COMPLETED", 11.0, "generation-1-complete"),
+            ],
+        )
+        machine.ingest(
+            "key",
+            [stream_event(0, "COMPACTING", 12.0, "delayed-generation-0")],
+        )
+        machine.ingest(
+            "key",
+            [stream_event(2, "COMPACTING", 11.0, "generation-2-same-time")],
+        )
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=13.0)
+        self.assertNotIn("delayed-generation-0", {item.source_id for item in machine.events["key"]})
+        self.assertIn("generation-2-same-time", {item.source_id for item in machine.events["key"]})
+        self.assertEqual(state.compactions[-1].status, "completed")
+        self.assertEqual(state.event_telemetry.stale_stream_generation_dropped, 1)
+        self.assertEqual(state.event_telemetry.stream_generation_advances, 1)
+        self.assertTrue(
+            any(finding.conclusion == "可变证据流 generation 已降级" for finding in state.diagnosis)
+        )
+
+    def test_mutable_stream_identity_guard_has_fixed_cardinality(self) -> None:
+        machine = SessionStateMachine(900)
+        events = [
+            NormalizedEvent(
+                float(index + 1),
+                "MODEL_PROGRESS",
+                "progress",
+                source="rollout",
+                source_id=f"stream-{index}",
+                observed_at=float(index + 1),
+                metadata={
+                    "stream_path_sha256": f"{index:064x}",
+                    "stream_generation": 0,
+                },
+            )
+            for index in range(40)
+        ]
+        machine.ingest("key", events)
+
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=50.0)
+        self.assertEqual(len(machine.stream_generations["key"]), 32)
+        self.assertEqual(state.event_telemetry.stream_identity_limit_dropped, 8)
+
     def test_event_telemetry_reports_observation_latency_and_unknown_rate(self) -> None:
         machine = SessionStateMachine(900)
         machine.ingest(
@@ -1113,9 +1724,7 @@ class StateMachineTests(unittest.TestCase):
             ],
         )
 
-        state = machine.derive(
-            "key", process(), NetworkEvidence(NetworkState.IDLE), now=12.0
-        )
+        state = machine.derive("key", process(), NetworkEvidence(NetworkState.IDLE), now=12.0)
 
         self.assertEqual(state.event_telemetry.total_events, 2)
         self.assertEqual(state.event_telemetry.unparsed_events, 1)
@@ -1139,8 +1748,8 @@ class NetworkTests(unittest.TestCase):
     def test_ss_multiline_metrics_are_merged(self) -> None:
         text = (
             'ESTAB 0 0 127.0.0.1:5000 203.0.113.1:443 users:(("codex",pid=42,fd=7))\n'
-            ' cubic bytes_sent:12 bytes_acked:10\n'
-            ' bytes_received:20 lastsnd:50 lastrcv:40 retrans:1/2 rtt:4.5\n'
+            " cubic bytes_sent:12 bytes_acked:10\n"
+            " bytes_received:20 lastsnd:50 lastrcv:40 retrans:1/2 rtt:4.5\n"
         )
         socket = parse_ss_output(text, {42})[42][0]
         self.assertEqual(socket.bytes_sent, 12)

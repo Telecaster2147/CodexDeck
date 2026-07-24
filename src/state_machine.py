@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from collections import defaultdict
 from copy import deepcopy
@@ -22,6 +23,7 @@ from config import (
 )
 from models import (
     AgentNode,
+    AxisCompleteness,
     AttentionRequest,
     AttentionState,
     AlertOccurrence,
@@ -29,11 +31,13 @@ from models import (
     AlertTransition,
     CapabilityMode,
     CapabilityStatus,
+    ClockAssessment,
     Confidence,
     CompactionEvidence,
     CompactionSummary,
     CurrentOperationSummary,
     DiagnosisFinding,
+    EvidenceCoverage,
     EventTelemetrySummary,
     FailureInfo,
     LifecycleState,
@@ -48,6 +52,7 @@ from models import (
     RecoveryState,
     SessionIdentity,
     SessionHealth,
+    SessionCompleteness,
     SilenceAssessment,
     SilenceState,
     TokenUsageSummary,
@@ -109,19 +114,202 @@ NON_SEMANTIC_KINDS = {
     "UNPARSED_PAYLOAD",
 }
 
+CLOCK_CLEAR_KINDS = (ATTENTION_CLEAR_KINDS - {"TURN_FAILED", "FILE_CHANGE_FAILED"}) | {
+    "COMPACT_COMPLETED",
+}
+CLOCK_POLICIES = {
+    "rollout": (5.0, 2.0, "codex_process_wall_clock"),
+    "tui_session_log": (5.0, 2.0, "codex_tui_wall_clock"),
+    "compact_hook": (30.0, 5.0, "hook_producer_wall_clock"),
+    "log": (120.0, 120.0, "sqlite_log_wall_clock"),
+    "sse": (120.0, 120.0, "sqlite_sse_wall_clock"),
+    "process": (2.0, 1.0, "observer_process_wall_clock"),
+    "detector": (2.0, 1.0, "observer_wall_clock"),
+}
+DEDUPE_FILTER_BITS = 1 << 18
+DEDUPE_FILTER_HASHES = 4
+DEDUPE_FILTER_DEGRADED_RATIO = 0.90
+MAX_MUTABLE_STREAM_IDENTITIES_PER_SESSION = 32
+
+
+class BoundedDedupeFilter:
+    """Fixed-size duplicate memory with no false negatives for inserted keys."""
+
+    def __init__(
+        self,
+        bit_count: int = DEDUPE_FILTER_BITS,
+        hash_count: int = DEDUPE_FILTER_HASHES,
+    ) -> None:
+        if bit_count <= 0 or bit_count & (bit_count - 1):
+            raise ValueError("bit_count must be a positive power of two")
+        self.bit_count = bit_count
+        self.hash_count = hash_count
+        self.bits = 0
+
+    def _positions(self, value: str) -> tuple[int, ...]:
+        digest = hashlib.blake2b(value.encode("utf-8"), digest_size=32).digest()
+        mask = self.bit_count - 1
+        return tuple(
+            int.from_bytes(digest[index * 4 : index * 4 + 4], "little") & mask
+            for index in range(self.hash_count)
+        )
+
+    def __contains__(self, value: str) -> bool:
+        return all(self.bits & (1 << position) for position in self._positions(value))
+
+    def add(self, value: str) -> None:
+        for position in self._positions(value):
+            self.bits |= 1 << position
+
+    def __len__(self) -> int:
+        return self.bits.bit_count()
+
+    @property
+    def fill_ratio(self) -> float:
+        return len(self) / self.bit_count
+
+    @property
+    def degraded(self) -> bool:
+        return self.fill_ratio >= DEDUPE_FILTER_DEGRADED_RATIO
+
 
 class SessionStateMachine:
-    def __init__(self, lookback_seconds: int) -> None:
+    def __init__(
+        self,
+        lookback_seconds: int,
+        *,
+        dedupe_filter_bits: int = DEDUPE_FILTER_BITS,
+    ) -> None:
         self.lookback_seconds = lookback_seconds
+        self.dedupe_filter_bits = dedupe_filter_bits
         self.events: dict[str | SessionIdentity, list[NormalizedEvent]] = defaultdict(list)
-        self.seen: dict[str | SessionIdentity, set[str]] = defaultdict(set)
+        self.seen: dict[str | SessionIdentity, BoundedDedupeFilter] = defaultdict(
+            lambda: BoundedDedupeFilter(self.dedupe_filter_bits)
+        )
+        self.dedupe_matches: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.dedupe_degraded_drops: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.stream_generations: dict[str | SessionIdentity, dict[str, int]] = defaultdict(dict)
+        self.stale_stream_generation_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.stream_identity_limit_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.stream_generation_advances: dict[str | SessionIdentity, int] = defaultdict(int)
         self.pending_recovery: dict[str | SessionIdentity, RecoveryState] = {}
         self.alerts: dict[str | SessionIdentity, list[AlertOccurrence]] = defaultdict(list)
         self.compactions: dict[str | SessionIdentity, list[CompactionSummary]] = defaultdict(list)
+        self.clock_state: dict[
+            str | SessionIdentity,
+            dict[str, tuple[float, float, float]],
+        ] = defaultdict(dict)
+        self.clock_observed_at: dict[str | SessionIdentity, float] = {}
+        self.clock_decision_at: dict[str | SessionIdentity, float] = {}
+        self.coverage_sources: dict[str | SessionIdentity, dict[str, tuple[int, int, bool]]] = (
+            defaultdict(dict)
+        )
+        self.coverage_gap_at: dict[str | SessionIdentity, float] = {}
+        self.coverage_gap_reasons: dict[str | SessionIdentity, tuple[str, ...]] = {}
+        self.coverage_backlog: dict[str | SessionIdentity, bool] = {}
+        self.terminal_probe_complete: dict[str | SessionIdentity, bool] = {}
+        self.terminal_probe_complete_at: dict[str | SessionIdentity, float] = {}
+        self.network_probe_complete: dict[str | SessionIdentity, bool] = {}
+        self.silence_probe_complete: dict[str | SessionIdentity, bool] = {}
+        self.event_retention_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.clock_sequence = 0
 
     @staticmethod
     def _storage_key(key: str | SessionIdentity) -> str:
         return key.storage_key if isinstance(key, SessionIdentity) else key
+
+    def _accept_stream_generation(
+        self,
+        key: str | SessionIdentity,
+        event: NormalizedEvent,
+    ) -> bool:
+        if event.source not in {"rollout", "tui_session_log", "compact_hook"}:
+            return True
+        path_hash = event.metadata.get("stream_path_sha256")
+        generation = event.metadata.get("stream_generation")
+        if not isinstance(path_hash, str) or len(path_hash) != 64:
+            return True
+        if not isinstance(generation, int) or generation < 0:
+            return True
+        stream_key = f"{event.source}:{path_hash}"
+        generations = self.stream_generations[key]
+        previous = generations.get(stream_key)
+        if previous is None:
+            if len(generations) >= MAX_MUTABLE_STREAM_IDENTITIES_PER_SESSION:
+                self.stream_identity_limit_dropped[key] += 1
+                return False
+            generations[stream_key] = generation
+            return True
+        if generation < previous:
+            self.stale_stream_generation_dropped[key] += 1
+            return False
+        if generation > previous:
+            generations[stream_key] = generation
+            self.stream_generation_advances[key] += 1
+        return True
+
+    def update_coverage(
+        self,
+        key: str | SessionIdentity,
+        coverage: EvidenceCoverage,
+    ) -> None:
+        sources = self.coverage_sources[key]
+        previous = sources.get(coverage.source_epoch) if coverage.source_epoch else None
+        reasons: list[str] = []
+        if coverage.bootstrap_truncated and (previous is None or not previous[2]):
+            reasons.append("bootstrap_tail_truncated")
+        if previous is not None:
+            if coverage.gap_count > previous[0]:
+                reasons.append("explicit_ingress_gap")
+            if coverage.stream_uncertainty_count > previous[1]:
+                reasons.append("mutable_stream_uncertain")
+        elif coverage.gap_count:
+            reasons.append("explicit_ingress_gap")
+        elif coverage.stream_uncertainty_count:
+            reasons.append("mutable_stream_uncertain")
+        if coverage.generation_changed:
+            reasons.append("stream_generation_changed")
+        if coverage.copy_truncated:
+            reasons.append("copy_truncated")
+        if reasons:
+            self.coverage_gap_at[key] = max(
+                self.coverage_gap_at.get(key, 0.0),
+                coverage.observed_at - 0.000001,
+            )
+            existing = self.coverage_gap_reasons.get(key, ())
+            self.coverage_gap_reasons[key] = tuple(dict.fromkeys((*existing, *reasons)))[-8:]
+        if coverage.source_epoch:
+            if (
+                coverage.source_epoch not in sources
+                and len(sources) >= MAX_MUTABLE_STREAM_IDENTITIES_PER_SESSION
+            ):
+                oldest = next(iter(sources))
+                sources.pop(oldest, None)
+                self.coverage_gap_at[key] = max(
+                    self.coverage_gap_at.get(key, 0.0),
+                    coverage.observed_at - 0.000001,
+                )
+                self.coverage_gap_reasons[key] = tuple(
+                    dict.fromkeys(
+                        (*self.coverage_gap_reasons.get(key, ()), "coverage_source_limit")
+                    )
+                )[-8:]
+            sources[coverage.source_epoch] = (
+                coverage.gap_count,
+                coverage.stream_uncertainty_count,
+                coverage.bootstrap_truncated,
+            )
+        self.coverage_backlog[key] = coverage.backlog_pending
+        if coverage.terminal_probe_complete is True:
+            self.terminal_probe_complete[key] = True
+            self.terminal_probe_complete_at[key] = coverage.observed_at
+        elif coverage.terminal_probe_complete is False:
+            self.terminal_probe_complete[key] = False
+            self.terminal_probe_complete_at.pop(key, None)
+        if coverage.network_probe_complete is not None:
+            self.network_probe_complete[key] = coverage.network_probe_complete
+        if coverage.silence_probe_complete is not None:
+            self.silence_probe_complete[key] = coverage.silence_probe_complete
 
     @staticmethod
     def _alert_id(key: str | SessionIdentity, kind: str, opened_at: float) -> str:
@@ -144,9 +332,7 @@ class SessionStateMachine:
                 occurrence.status = AlertStatus.ACKNOWLEDGED
                 occurrence.acknowledged_at = timestamp
                 occurrence.updated_at = timestamp
-                occurrence.transitions.append(
-                    AlertTransition(AlertStatus.ACKNOWLEDGED, timestamp)
-                )
+                occurrence.transitions.append(AlertTransition(AlertStatus.ACKNOWLEDGED, timestamp))
             return True
         return False
 
@@ -158,9 +344,97 @@ class SessionStateMachine:
             events = self.events.get(key.storage_key)
         return tuple(events or ())
 
-    def _record_compaction(
-        self, key: str | SessionIdentity, event: NormalizedEvent
-    ) -> None:
+    @staticmethod
+    def _clock_policy(source: str) -> tuple[float, float, str]:
+        for prefix, policy in CLOCK_POLICIES.items():
+            if source.startswith(prefix):
+                return policy
+        return 30.0, 30.0, "external_wall_clock"
+
+    def _adjudicate_clock(
+        self,
+        key: str | SessionIdentity,
+        event: NormalizedEvent,
+    ) -> NormalizedEvent:
+        source_timestamp = event.source_timestamp or event.timestamp
+        self.clock_sequence += 1
+        observed_at = event.observed_at
+        future_tolerance, rollback_tolerance, clock_domain = self._clock_policy(event.source)
+        if observed_at is None:
+            return replace(
+                event,
+                source_timestamp=source_timestamp,
+                adjudicated_at=event.timestamp,
+                clock_domain=clock_domain,
+                clock_trust=Confidence.MEDIUM,
+                clock_sequence=self.clock_sequence,
+            )
+
+        previous_observed = self.clock_observed_at.get(key)
+        logical_observed = observed_at
+        reasons: list[str] = []
+        if previous_observed is not None and observed_at < previous_observed - 1.0:
+            logical_observed = previous_observed + 0.000001
+            reasons.append("observer_wall_clock_rollback")
+        self.clock_observed_at[key] = max(previous_observed or observed_at, logical_observed)
+
+        last_source, _, last_decision = self.clock_state[key].get(
+            clock_domain,
+            (float("-inf"), float("-inf"), float("-inf")),
+        )
+        global_decision = self.clock_decision_at.get(key, float("-inf"))
+        invalid = not math.isfinite(source_timestamp) or source_timestamp <= 0
+        future = not invalid and source_timestamp > observed_at + future_tolerance
+        rollback = (
+            not invalid
+            and math.isfinite(last_source)
+            and source_timestamp < last_source - rollback_tolerance
+        )
+        if invalid:
+            reasons.append("invalid_source_timestamp")
+        if future:
+            reasons.append(f"future_source_timestamp_gt_{future_tolerance:g}s")
+        if rollback:
+            reasons.append(f"source_clock_rollback_gt_{rollback_tolerance:g}s")
+
+        if reasons and event.kind in CLOCK_CLEAR_KINDS:
+            decision = max(logical_observed, global_decision + 0.000001)
+        elif rollback or "observer_wall_clock_rollback" in reasons:
+            decision = (
+                min(source_timestamp, global_decision - 0.000001)
+                if math.isfinite(global_decision)
+                else source_timestamp
+            )
+        elif invalid or future:
+            decision = logical_observed
+        else:
+            decision = min(source_timestamp, logical_observed)
+            if math.isfinite(last_source) and source_timestamp >= last_source:
+                decision = max(decision, last_decision + 0.000001)
+
+        if not invalid and not future and (not rollback or event.kind in CLOCK_CLEAR_KINDS):
+            next_source = source_timestamp
+        else:
+            next_source = last_source
+        self.clock_state[key][clock_domain] = (
+            next_source,
+            logical_observed,
+            max(last_decision, decision),
+        )
+        self.clock_decision_at[key] = max(global_decision, decision)
+        return replace(
+            event,
+            timestamp=decision,
+            source_timestamp=source_timestamp,
+            adjudicated_at=decision,
+            clock_domain=clock_domain,
+            clock_trust=Confidence.LOW if reasons else Confidence.HIGH,
+            clock_uncertain=bool(reasons),
+            clock_reason=",".join(reasons),
+            clock_sequence=self.clock_sequence,
+        )
+
+    def _record_compaction(self, key: str | SessionIdentity, event: NormalizedEvent) -> None:
         metadata = event.metadata
         context_tokens = self._int(metadata.get("context_tokens"))
         context_window = self._int(metadata.get("context_window"))
@@ -178,6 +452,11 @@ class SessionStateMachine:
             "COMPACT_ABORTED": "aborted",
             "TURN_ABORTED": "aborted",
         }[event.kind]
+        if history and edge in {"requested", "candidate", "started", "progress"}:
+            latest_terminal_at = history[-1].terminal_at
+            source_time = event.source_timestamp or event.timestamp
+            if latest_terminal_at is not None and source_time <= latest_terminal_at:
+                return
         evidence = CompactionEvidence(
             edge=edge,
             timestamp=event.timestamp,
@@ -186,6 +465,11 @@ class SessionStateMachine:
             confidence=event.confidence,
             direct=not event.derived,
             detail=event.detail or event.summary,
+            parse_validity=event.parse_validity,
+            source_authenticity=event.source_authenticity,
+            identity_binding=event.identity_binding,
+            semantic_confidence=event.semantic_confidence,
+            binding_evidence=event.binding_evidence,
         )
         current = next(
             (
@@ -196,12 +480,26 @@ class SessionStateMachine:
             ),
             None,
         )
+        if (
+            event.source == "compact_hook"
+            and event.source_authenticity != Confidence.HIGH
+            and current is not None
+            and any(item.source == "rollout" for item in current.evidence)
+        ):
+            history[history.index(current)] = replace(
+                current,
+                evidence=(*current.evidence, evidence),
+                confidence=min(current.confidence, event.confidence),
+            )
+            return
         if current is None and history and edge in {"completed", "failed", "aborted"}:
             latest = history[-1]
             terminal_at = latest.terminal_at
-            if latest.status == edge and terminal_at is not None and abs(
-                terminal_at - event.timestamp
-            ) <= 1.0:
+            if (
+                latest.status == edge
+                and terminal_at is not None
+                and abs(terminal_at - event.timestamp) <= 1.0
+            ):
                 current = latest
         if current is None:
             operation_id = hashlib.sha256(
@@ -244,9 +542,7 @@ class SessionStateMachine:
             updates.update(
                 status="requested",
                 requested_at=min(
-                    value
-                    for value in (current.requested_at, event.timestamp)
-                    if value is not None
+                    value for value in (current.requested_at, event.timestamp) if value is not None
                 ),
             )
         elif edge == "candidate":
@@ -356,11 +652,17 @@ class SessionStateMachine:
 
     def ingest(self, key: str | SessionIdentity, incoming: list[NormalizedEvent]) -> None:
         bucket = self.events[key]
-        for event in sorted(incoming, key=lambda item: (item.timestamp, item.source_id)):
+        for raw_event in sorted(incoming, key=lambda item: (item.timestamp, item.source_id)):
+            if not self._accept_stream_generation(key, raw_event):
+                continue
+            event = self._adjudicate_clock(key, raw_event)
             dedupe_key = event.source_id or (
                 f"{event.source}:{event.timestamp}:{event.kind}:{event.turn_id}:{event.detail}"
             )
             if dedupe_key in self.seen[key]:
+                self.dedupe_matches[key] += 1
+                if self.seen[key].degraded:
+                    self.dedupe_degraded_drops[key] += 1
                 continue
             self.seen[key].add(dedupe_key)
             compact_kinds = {
@@ -409,8 +711,7 @@ class SessionStateMachine:
                         context_tokens_after=context_after,
                     )
             if event.kind in compact_kinds and any(
-                existing.kind == event.kind
-                and abs(existing.timestamp - event.timestamp) <= 1.0
+                existing.kind == event.kind and abs(existing.timestamp - event.timestamp) <= 1.0
                 for existing in reversed(bucket[-8:])
             ):
                 continue
@@ -426,9 +727,7 @@ class SessionStateMachine:
                 if duplicate_index is not None:
                     old = bucket[duplicate_index]
                     old_details = old.failure.additional_details if old.failure else ""
-                    new_details = (
-                        event.failure.additional_details if event.failure else ""
-                    )
+                    new_details = event.failure.additional_details if event.failure else ""
                     old_size = len(old.detail) + len(old_details)
                     new_size = len(event.detail) + len(new_details)
                     if new_size > old_size:
@@ -438,12 +737,9 @@ class SessionStateMachine:
                 self.compactions[key]
                 and self.compactions[key][-1].status == "candidate"
                 and event.kind not in compact_kinds
-                and event.kind
-                not in {"TOKEN_USAGE", "MODEL_CONFIG", "KEEPALIVE", "TURN_STARTED"}
+                and event.kind not in {"TOKEN_USAGE", "MODEL_CONFIG", "KEEPALIVE", "TURN_STARTED"}
             ):
-                self.compactions[key][-1] = replace(
-                    self.compactions[key][-1], status="dismissed"
-                )
+                self.compactions[key][-1] = replace(self.compactions[key][-1], status="dismissed")
             recovery = self.pending_recovery.get(key)
             if (
                 recovery
@@ -475,16 +771,42 @@ class SessionStateMachine:
             bucket.append(event)
         bucket.sort(key=lambda item: (item.timestamp, item.source_id))
         if len(bucket) > MAX_EVENTS_PER_SESSION:
-            removed = bucket[:-MAX_EVENTS_PER_SESSION]
-            self.events[key] = bucket[-MAX_EVENTS_PER_SESSION:]
-            for event in removed:
-                if event.source_id:
-                    self.seen[key].discard(event.source_id)
+            dropped = len(bucket) - MAX_EVENTS_PER_SESSION
+            retained = bucket[-MAX_EVENTS_PER_SESSION:]
+            self.events[key] = retained
+            self.event_retention_dropped[key] += dropped
+            oldest = retained[0]
+            gap_at = (oldest.observed_at or oldest.timestamp) - 0.000001
+            self.coverage_gap_at[key] = max(self.coverage_gap_at.get(key, 0.0), gap_at)
+            reasons = self.coverage_gap_reasons.get(key, ())
+            self.coverage_gap_reasons[key] = tuple(
+                dict.fromkeys((*reasons, "event_retention_500"))
+            )[-8:]
 
     @staticmethod
     def _latest(events: list[NormalizedEvent], *kinds: str) -> NormalizedEvent | None:
         wanted = set(kinds)
         return next((event for event in reversed(events) if event.kind in wanted), None)
+
+    @staticmethod
+    def _clock_assessments(events: list[NormalizedEvent]) -> tuple[ClockAssessment, ...]:
+        latest_by_source: dict[str, NormalizedEvent] = {}
+        for event in events:
+            previous = latest_by_source.get(event.source)
+            if previous is None or event.clock_sequence >= previous.clock_sequence:
+                latest_by_source[event.source] = event
+        return tuple(
+            ClockAssessment(
+                source=event.source,
+                clock_domain=event.clock_domain,
+                source_timestamp=event.source_timestamp or event.timestamp,
+                observed_at=event.observed_at,
+                adjudicated_at=event.decision_timestamp,
+                reason=event.clock_reason,
+            )
+            for event in latest_by_source.values()
+            if event.clock_uncertain
+        )
 
     @staticmethod
     def _tokens(event: NormalizedEvent | None) -> tuple[int | None, int | None]:
@@ -511,7 +833,9 @@ class SessionStateMachine:
 
     @staticmethod
     def _int(value: object) -> int | None:
-        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        return (
+            int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        )
 
     @classmethod
     def _token_summary(
@@ -537,8 +861,7 @@ class SessionStateMachine:
                 last = last if isinstance(last, dict) else {}
                 usage = total if cumulative else last or total
                 metadata = {
-                    "context_window": raw.get("model_context_window")
-                    or raw.get("context_window"),
+                    "context_window": raw.get("model_context_window") or raw.get("context_window"),
                     "context_tokens": total.get("input_tokens"),
                 }
         if not usage and not metadata.get("context_window"):
@@ -589,9 +912,7 @@ class SessionStateMachine:
             secondary=cls._rate_window(raw.get("secondary")),
             credits=float(credit_value) if isinstance(credit_value, (int, float)) else None,
             has_credits=(
-                bool(credits_dict.get("has_credits"))
-                if "has_credits" in credits_dict
-                else None
+                bool(credits_dict.get("has_credits")) if "has_credits" in credits_dict else None
             ),
             reached=bool(reached) if isinstance(reached, bool) else None,
             reason=str(raw.get("reason") or raw.get("limit_reached_reason") or ""),
@@ -607,11 +928,11 @@ class SessionStateMachine:
         if end:
             started_at = start.metadata.get("started_at")
             completed_at = end.metadata.get("completed_at")
-            started_at = float(started_at) if isinstance(started_at, (int, float)) else start.timestamp
+            started_at = (
+                float(started_at) if isinstance(started_at, (int, float)) else start.timestamp
+            )
             completed_at = (
-                float(completed_at)
-                if isinstance(completed_at, (int, float))
-                else end.timestamp
+                float(completed_at) if isinstance(completed_at, (int, float)) else end.timestamp
             )
             return max(0.0, completed_at - started_at), True
         return None, True
@@ -679,7 +1000,9 @@ class SessionStateMachine:
                     started_at=(
                         float(start.metadata["started_at"])
                         if start and isinstance(start.metadata.get("started_at"), (int, float))
-                        else start.timestamp if start else None
+                        else start.timestamp
+                        if start
+                        else None
                     ),
                     completed_at=(
                         float(event.metadata["completed_at"])
@@ -695,8 +1018,7 @@ class SessionStateMachine:
                         or (start.metadata.get("command") if start else "")
                     ),
                     cwd=str(
-                        event.metadata.get("cwd")
-                        or (start.metadata.get("cwd") if start else "")
+                        event.metadata.get("cwd") or (start.metadata.get("cwd") if start else "")
                     ),
                     arguments=str(
                         event.metadata.get("arguments")
@@ -707,9 +1029,7 @@ class SessionStateMachine:
                         dict.fromkeys(
                             [
                                 str(path)
-                                for path in (
-                                    (start.metadata.get("files") if start else []) or []
-                                )
+                                for path in ((start.metadata.get("files") if start else []) or [])
                             ]
                             + [str(path) for path in (event.metadata.get("files") or [])]
                         )
@@ -766,9 +1086,7 @@ class SessionStateMachine:
                         cwd=str(start.metadata.get("cwd") or ""),
                         arguments=str(start.metadata.get("arguments") or ""),
                         output=str(start.metadata.get("output") or ""),
-                        files=tuple(
-                            str(path) for path in (start.metadata.get("files") or [])
-                        ),
+                        files=tuple(str(path) for path in (start.metadata.get("files") or [])),
                         provenance=Provenance(
                             start.source, start.confidence, derived=True, complete=False
                         ),
@@ -854,12 +1172,16 @@ class SessionStateMachine:
                     started_at=(
                         float(start_metadata["started_at"])
                         if isinstance(start_metadata.get("started_at"), (int, float))
-                        else start.timestamp if start else None
+                        else start.timestamp
+                        if start
+                        else None
                     ),
                     completed_at=(
                         float(terminal_metadata["completed_at"])
                         if isinstance(terminal_metadata.get("completed_at"), (int, float))
-                        else terminal.timestamp if terminal else None
+                        else terminal.timestamp
+                        if terminal
+                        else None
                     ),
                     duration_seconds=duration,
                     time_to_first_token_seconds=(
@@ -888,9 +1210,7 @@ class SessionStateMachine:
                     reconnect_count=len(reconnects),
                     fallback_count=len(fallbacks),
                     recovery_duration_seconds=recovery_duration,
-                    compact_count=sum(
-                        item.kind == "COMPACT_COMPLETED" for item in turn_events
-                    ),
+                    compact_count=sum(item.kind == "COMPACT_COMPLETED" for item in turn_events),
                     failure=failure_event.failure if failure_event else None,
                     tools=tuple(turn_tools),
                     provenance=Provenance(
@@ -1231,6 +1551,43 @@ class SessionStateMachine:
                 action,
             )
         ]
+        if state.clock_uncertain:
+            assessment = state.clock_assessments[-1]
+            findings.insert(
+                0,
+                DiagnosisFinding(
+                    "warning",
+                    "事件时钟存在偏差",
+                    (
+                        f"source={assessment.source}; domain={assessment.clock_domain}; "
+                        f"reason={assessment.reason}; "
+                        f"adjudicated_at={assessment.adjudicated_at:.6f}"
+                    ),
+                    (
+                        f"source_timestamp={assessment.source_timestamp:.6f}",
+                        f"observed_at={assessment.observed_at}",
+                    ),
+                    Provenance(
+                        assessment.source,
+                        Confidence.LOW,
+                        derived=True,
+                        complete=False,
+                    ),
+                ),
+            )
+        if state.protocol_uncertain:
+            findings.insert(
+                0,
+                DiagnosisFinding(
+                    "warning",
+                    state.phase,
+                    state.protocol_uncertainty_reason,
+                    (f"UNPARSED_PAYLOAD · {state.protocol_uncertainty_scope}",),
+                    state.lifecycle_provenance,
+                    freshness,
+                    "检查协议兼容性与原始来源形状",
+                ),
+            )
         if state.silence.state != SilenceState.NORMAL:
             findings.append(
                 DiagnosisFinding(
@@ -1270,14 +1627,148 @@ class SessionStateMachine:
                     ),
                 )
             )
+        if state.event_telemetry.dedupe_filter_degraded:
+            findings.insert(
+                0,
+                DiagnosisFinding(
+                    "warning",
+                    "事件去重记忆接近饱和",
+                    (
+                        f"fill={state.event_telemetry.dedupe_filter_fill_ratio:.1%}; "
+                        f"matches={state.event_telemetry.dedupe_filter_matches}; "
+                        "新证据可能因固定容量过滤器命中而被丢弃"
+                    ),
+                    (
+                        f"bits_set={state.event_telemetry.dedupe_filter_bits_set}",
+                        f"capacity={state.event_telemetry.dedupe_filter_capacity_bits}",
+                        "reason=dedupe_filter_saturated_fail_closed",
+                    ),
+                    Provenance("state-machine", Confidence.LOW, derived=True, complete=False),
+                ),
+            )
+        generation_dropped = (
+            state.event_telemetry.stale_stream_generation_dropped
+            + state.event_telemetry.stream_identity_limit_dropped
+        )
+        if generation_dropped:
+            findings.insert(
+                0,
+                DiagnosisFinding(
+                    "warning",
+                    "可变证据流 generation 已降级",
+                    (
+                        f"stale_generation_dropped="
+                        f"{state.event_telemetry.stale_stream_generation_dropped}; "
+                        f"identity_limit_dropped="
+                        f"{state.event_telemetry.stream_identity_limit_dropped}"
+                    ),
+                    (
+                        f"generation_advances={state.event_telemetry.stream_generation_advances}",
+                        "reason=mutable_stream_generation_guard",
+                    ),
+                    Provenance("state-machine", Confidence.LOW, derived=True, complete=False),
+                ),
+            )
+        hook_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.source == "compact_hook"
+                and event.kind
+                in {
+                    "COMPACTING",
+                    "COMPACT_COMPLETED",
+                    "COMPACT_FAILED",
+                    "COMPACT_ABORTED",
+                }
+            ),
+            None,
+        )
+        if hook_event and hook_event.source_authenticity != Confidence.HIGH:
+            rollout_event = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if event.source == "rollout"
+                    and event.kind
+                    in {"COMPACTING", "COMPACT_COMPLETED", "COMPACT_FAILED", "COMPACT_ABORTED"}
+                ),
+                None,
+            )
+            terminal_kinds = {"COMPACT_COMPLETED", "COMPACT_FAILED", "COMPACT_ABORTED"}
+            conflict = bool(
+                rollout_event
+                and (
+                    (rollout_event.kind in terminal_kinds) != (hook_event.kind in terminal_kinds)
+                    or (
+                        rollout_event.kind in terminal_kinds
+                        and hook_event.kind in terminal_kinds
+                        and rollout_event.kind != hook_event.kind
+                    )
+                )
+            )
+            findings.insert(
+                0,
+                DiagnosisFinding(
+                    "warning",
+                    ("Hook 证据与 rollout 冲突" if conflict else "Hook 来源未认证"),
+                    (
+                        f"parse={hook_event.parse_validity.value}; "
+                        f"authenticity={hook_event.source_authenticity.value}; "
+                        f"binding={hook_event.identity_binding.value}; "
+                        f"semantic={hook_event.semantic_confidence.value}"
+                    ),
+                    hook_event.binding_evidence,
+                    Provenance(
+                        "compact_hook",
+                        Confidence.LOW,
+                        derived=True,
+                        complete=False,
+                    ),
+                ),
+            )
+        incomplete = [
+            item
+            for item in (
+                state.completeness.lifecycle,
+                state.completeness.attention,
+                state.completeness.failure_recovery,
+                state.completeness.terminal_ownership,
+                state.completeness.network,
+                state.completeness.silence,
+            )
+            if not item.complete
+        ]
+        if incomplete:
+            findings.insert(
+                0,
+                DiagnosisFinding(
+                    "warning",
+                    "状态轴证据不完整",
+                    "; ".join(f"{item.axis}={item.reason}" for item in incomplete),
+                    tuple(
+                        f"{item.axis}:{evidence}"
+                        for item in incomplete
+                        for evidence in item.evidence
+                    )[:24],
+                    Provenance(
+                        "evidence-completeness",
+                        Confidence.LOW,
+                        derived=True,
+                        complete=False,
+                    ),
+                    action="等待对应轴的可信正证据或清除基线",
+                ),
+            )
         return findings
 
-    @staticmethod
-    def _event_telemetry(events: list[NormalizedEvent]) -> EventTelemetrySummary:
+    def _event_telemetry(
+        self,
+        key: str | SessionIdentity,
+        events: list[NormalizedEvent],
+    ) -> EventTelemetrySummary:
         delays = sorted(
-            event.freshness_seconds
-            for event in events
-            if event.freshness_seconds is not None
+            event.freshness_seconds for event in events if event.freshness_seconds is not None
         )
 
         def percentile(fraction: float) -> float | None:
@@ -1290,6 +1781,7 @@ class SessionStateMachine:
             return delays[lower] * (1.0 - weight) + delays[upper] * weight
 
         unparsed = sum(event.kind == "UNPARSED_PAYLOAD" for event in events)
+        dedupe = self.seen.get(key)
         return EventTelemetrySummary(
             total_events=len(events),
             observed_events=len(delays),
@@ -1297,7 +1789,219 @@ class SessionStateMachine:
             unknown_rate=unparsed / len(events) if events else 0.0,
             observation_p50_seconds=percentile(0.50),
             observation_p95_seconds=percentile(0.95),
+            dedupe_filter_bits_set=len(dedupe) if dedupe is not None else 0,
+            dedupe_filter_capacity_bits=dedupe.bit_count if dedupe is not None else 0,
+            dedupe_filter_fill_ratio=dedupe.fill_ratio if dedupe is not None else 0.0,
+            dedupe_filter_matches=self.dedupe_matches.get(key, 0),
+            dedupe_filter_degraded_drops=self.dedupe_degraded_drops.get(key, 0),
+            dedupe_filter_degraded=dedupe.degraded if dedupe is not None else False,
+            stale_stream_generation_dropped=self.stale_stream_generation_dropped.get(key, 0),
+            stream_identity_limit_dropped=self.stream_identity_limit_dropped.get(key, 0),
+            stream_generation_advances=self.stream_generation_advances.get(key, 0),
         )
+
+    @staticmethod
+    def _event_evidence_time(event: NormalizedEvent) -> float:
+        return event.observed_at or event.adjudicated_at or event.timestamp
+
+    def _axis_after_gap(
+        self,
+        key: str | SessionIdentity,
+        axis: str,
+        events: list[NormalizedEvent],
+        baseline_kinds: set[str],
+    ) -> AxisCompleteness:
+        if self.coverage_backlog.get(key, False):
+            return AxisCompleteness(
+                axis,
+                complete=False,
+                confidence=Confidence.LOW,
+                reason="仍有未处理的证据积压，否定结论暂不成立",
+                baseline_kind="backlog_pending",
+                evidence=("ingress_backlog",),
+            )
+        gap_at = self.coverage_gap_at.get(key)
+        if gap_at is None:
+            return AxisCompleteness(axis)
+        baseline = next(
+            (
+                event
+                for event in reversed(events)
+                if event.kind in baseline_kinds and self._event_evidence_time(event) >= gap_at
+            ),
+            None,
+        )
+        if baseline is not None:
+            return AxisCompleteness(
+                axis,
+                complete=True,
+                confidence=baseline.confidence,
+                reason=f"缺口后观察到 {baseline.kind}，已建立该轴基线",
+                baseline_kind=baseline.kind,
+                baseline_at=self._event_evidence_time(baseline),
+                evidence=(f"{baseline.kind}:{baseline.source}",),
+            )
+        reasons = self.coverage_gap_reasons.get(key, ("evidence_gap",))
+        return AxisCompleteness(
+            axis,
+            complete=False,
+            confidence=Confidence.LOW,
+            reason="历史证据存在缺口，且缺口后没有该轴的可信正证据或清除基线",
+            baseline_kind="missing_after_gap",
+            baseline_at=gap_at,
+            evidence=reasons,
+        )
+
+    def _session_completeness(
+        self,
+        key: str | SessionIdentity,
+        events: list[NormalizedEvent],
+    ) -> SessionCompleteness:
+        lifecycle = self._axis_after_gap(
+            key,
+            "lifecycle",
+            events,
+            set(LIFECYCLE_PHASE_KINDS) | {"PROCESS_RESUMED", "PROCESS_EXITED", "SESSION_CLOSED"},
+        )
+        attention = self._axis_after_gap(
+            key,
+            "attention",
+            events,
+            {"ACTION_REQUIRED"} | set(ATTENTION_CLEAR_KINDS),
+        )
+        failure_recovery = self._axis_after_gap(
+            key,
+            "failure_recovery",
+            events,
+            {
+                "TURN_STARTED",
+                "TURN_FAILED",
+                "COMPACT_FAILED",
+                "RECONNECTING",
+                "TRANSPORT_FALLBACK",
+                "RECOVERED",
+                "PROCESS_RESUMED",
+                "PROCESS_EXITED",
+                "SESSION_CLOSED",
+            }
+            | set(PROGRESS_KINDS),
+        )
+        terminal_probe_at = self.terminal_probe_complete_at.get(key)
+        terminal_probe_complete = self.terminal_probe_complete.get(key)
+        gap_at = self.coverage_gap_at.get(key)
+        terminal_probe_is_baseline = terminal_probe_at is not None and (
+            gap_at is None or terminal_probe_at >= gap_at
+        )
+        if terminal_probe_complete is False:
+            terminal_ownership = AxisCompleteness(
+                "terminal_ownership",
+                complete=False,
+                confidence=Confidence.LOW,
+                reason="进程树或 terminal 关联探针不完整，ownership 缺失不能视为 absent",
+                baseline_kind="terminal_probe_incomplete",
+                evidence=("process_tree", "terminal_association"),
+            )
+        elif terminal_probe_is_baseline and not self.coverage_backlog.get(key, False):
+            terminal_ownership = AxisCompleteness(
+                "terminal_ownership",
+                reason="完整进程树与 terminal 关联探针已覆盖当前活动",
+                baseline_kind="process_tree_probe",
+                baseline_at=terminal_probe_at,
+                evidence=("process_tree", "terminal_association"),
+            )
+        else:
+            terminal_ownership = self._axis_after_gap(
+                key,
+                "terminal_ownership",
+                events,
+                {"TOOL_COMPLETED", *TERMINAL_KINDS, "PROCESS_EXITED", "SESSION_CLOSED"},
+            )
+        network_complete = self.network_probe_complete.get(key, True)
+        network = AxisCompleteness(
+            "network",
+            complete=network_complete,
+            confidence=Confidence.HIGH if network_complete else Confidence.LOW,
+            reason=(
+                "当前 socket 探针完整"
+                if network_complete
+                else "socket 探针陈旧或不完整，closed/healthy 结论暂不成立"
+            ),
+            baseline_kind="socket_probe" if network_complete else "socket_probe_incomplete",
+            evidence=("socket_snapshot",),
+        )
+        silence_probe_complete = self.silence_probe_complete.get(key, True)
+        if not silence_probe_complete:
+            silence = AxisCompleteness(
+                "silence",
+                complete=False,
+                confidence=Confidence.LOW,
+                reason="process/rollout/network 探针不完整，静默分类暂不成立",
+                baseline_kind="observation_probe_incomplete",
+                evidence=("observation_probe",),
+            )
+        elif not lifecycle.complete:
+            silence = AxisCompleteness(
+                "silence",
+                complete=False,
+                confidence=Confidence.LOW,
+                reason="lifecycle 轴尚未建立缺口后的基线，静默分类缺少阶段上下文",
+                baseline_kind="lifecycle_incomplete",
+                evidence=("lifecycle",),
+            )
+        else:
+            silence = AxisCompleteness(
+                "silence",
+                confidence=lifecycle.confidence,
+                reason="当前观察探针与 lifecycle 基线均完整",
+                baseline_kind="observation_probes",
+                baseline_at=lifecycle.baseline_at,
+                evidence=("process", "rollout", "network", "lifecycle"),
+            )
+        return SessionCompleteness(
+            lifecycle=lifecycle,
+            attention=attention,
+            failure_recovery=failure_recovery,
+            terminal_ownership=terminal_ownership,
+            network=network,
+            silence=silence,
+        )
+
+    def _apply_completeness(
+        self,
+        key: str | SessionIdentity,
+        state: SessionHealth,
+        events: list[NormalizedEvent],
+    ) -> None:
+        completeness = self._session_completeness(key, events)
+        if state.observation.collector_stale:
+            completeness = replace(
+                completeness,
+                silence=AxisCompleteness(
+                    "silence",
+                    confidence=Confidence.HIGH,
+                    reason="collector 陈旧已明确建立 observer-blind 结论",
+                    baseline_kind="collector_stale",
+                    baseline_at=state.observation.sampled_at,
+                    evidence=("collector_health",),
+                ),
+            )
+        state.completeness = completeness
+        if not completeness.lifecycle.complete:
+            state.lifecycle_confidence = Confidence.LOW
+            state.lifecycle_provenance = Provenance(
+                "evidence-completeness",
+                Confidence.LOW,
+                derived=True,
+                complete=False,
+            )
+        if not completeness.attention.complete:
+            state.attention_confidence = Confidence.LOW
+            state.attention_provenance = Provenance(
+                "evidence-completeness",
+                Confidence.LOW,
+                derived=True,
+                complete=False,
+            )
 
     def derive(
         self,
@@ -1309,14 +2013,23 @@ class SessionStateMachine:
     ) -> SessionHealth:
         now = time.time() if now is None else now
         all_events = self.events.get(key, [])
+        authoritative_events = [
+            event
+            for event in all_events
+            if not (
+                event.source == "compact_hook"
+                and (
+                    event.source_authenticity != Confidence.HIGH
+                    or event.identity_binding != Confidence.HIGH
+                )
+            )
+        ]
         visible_cutoff = now - self.lookback_seconds
         visible = [event for event in all_events if event.timestamp >= visible_cutoff]
         model_config = self._latest(all_events, "MODEL_CONFIG")
         if model_config:
             model = str(model_config.metadata.get("model") or "")
-            reasoning_effort = str(
-                model_config.metadata.get("reasoning_effort") or ""
-            )
+            reasoning_effort = str(model_config.metadata.get("reasoning_effort") or "")
             if model or reasoning_effort:
                 process = replace(
                     process,
@@ -1331,23 +2044,26 @@ class SessionStateMachine:
             events=visible,
             identity=key if isinstance(key, SessionIdentity) else None,
         )
+        state.clock_assessments = self._clock_assessments(all_events)
+        state.clock_uncertain = bool(state.clock_assessments)
         if not all_events:
             state.observation = self._finalize_observation(
                 state, all_events, observation or ObservationPulse(), now
             )
+            self._apply_completeness(key, state, authoritative_events)
             state.silence = self._silence_assessment(state, now)
             state.current_operation = self._operation_summary(state, all_events)
             state.diagnosis = self._diagnosis_findings(state, all_events, now)
             self._reconcile_alert(key, state, now)
             return state
 
-        latest_failure = self._latest(all_events, "TURN_FAILED", "COMPACT_FAILED")
+        latest_failure = self._latest(authoritative_events, "TURN_FAILED", "COMPACT_FAILED")
         state.latest_failure = latest_failure.failure if latest_failure else None
 
-        process_resume = self._latest(all_events, "PROCESS_RESUMED")
+        process_resume = self._latest(authoritative_events, "PROCESS_RESUMED")
         state_events = [
             event
-            for event in all_events
+            for event in authoritative_events
             if not process_resume or event.timestamp >= process_resume.timestamp
         ]
         task_start = self._latest(state_events, "TURN_STARTED")
@@ -1358,10 +2074,7 @@ class SessionStateMachine:
         else:
             current_turn = bool(
                 latest_active
-                and (
-                    not task_terminal
-                    or latest_active.timestamp > task_terminal.timestamp
-                )
+                and (not task_terminal or latest_active.timestamp > task_terminal.timestamp)
             )
         relevant = [
             event
@@ -1379,10 +2092,7 @@ class SessionStateMachine:
         )
         compacting = bool(
             compact_start
-            and (
-                compact_end is None
-                or compact_start.timestamp > compact_end.timestamp
-            )
+            and (compact_end is None or compact_start.timestamp > compact_end.timestamp)
         )
         failure_event = self._latest(relevant, "TURN_FAILED", "COMPACT_FAILED")
         compact_abort = self._latest(relevant, "COMPACT_ABORTED")
@@ -1391,9 +2101,7 @@ class SessionStateMachine:
         if attention_event and (
             attention_clear is None or attention_event.timestamp > attention_clear.timestamp
         ):
-            attention_name = str(
-                attention_event.metadata.get("attention_state") or "USER_INPUT"
-            )
+            attention_name = str(attention_event.metadata.get("attention_state") or "USER_INPUT")
             try:
                 state.attention = AttentionState(attention_name)
             except ValueError:
@@ -1409,8 +2117,10 @@ class SessionStateMachine:
                 observed_at=attention_event.observed_at,
                 provenance=attention_event.provenance,
             )
-        process_exit = self._latest(all_events, "PROCESS_EXITED", "SESSION_CLOSED")
-        if process_exit and process_exit is all_events[-1]:
+            state.attention_confidence = attention_event.confidence
+            state.attention_provenance = attention_event.provenance
+        process_exit = self._latest(authoritative_events, "PROCESS_EXITED", "SESSION_CLOSED")
+        if process_exit and process_exit is authoritative_events[-1]:
             # Process termination is historical lifecycle evidence, not a turn failure.
             current_turn = False
             state.process_exited = True
@@ -1483,8 +2193,41 @@ class SessionStateMachine:
                 phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value]
             )
             state.phase_since = phase_event.timestamp
+            state.lifecycle_confidence = phase_event.confidence
+            state.lifecycle_provenance = phase_event.provenance
         else:
             state.phase = LIFECYCLE_LABELS[state.lifecycle.value]
+        semantic_evidence = [
+            event
+            for event in relevant
+            if (event.kind != "UNPARSED_PAYLOAD" and event.kind not in NON_SEMANTIC_KINDS)
+            or (
+                event.kind == "UNPARSED_PAYLOAD"
+                and event.metadata.get("semantic_scope") != "auxiliary"
+            )
+        ]
+        latest_semantic = semantic_evidence[-1] if semantic_evidence else None
+        if latest_semantic and latest_semantic.kind == "UNPARSED_PAYLOAD":
+            scope = str(latest_semantic.metadata.get("semantic_scope") or "lifecycle")
+            previous_phase = state.phase
+            source_type = (
+                latest_semantic.unparsed.source_type
+                if latest_semantic.unparsed is not None
+                else "unknown"
+            )
+            state.protocol_uncertain = True
+            state.protocol_uncertainty_scope = scope
+            state.protocol_uncertainty_reason = (
+                f"最新协议记录 {source_type} 可能改变 {scope}；上一结论为 {previous_phase}"
+            )
+            state.lifecycle_confidence = Confidence.LOW
+            state.lifecycle_provenance = latest_semantic.provenance
+            if scope == "attention":
+                state.attention_confidence = Confidence.LOW
+                state.attention_provenance = latest_semantic.provenance
+                state.phase = "协议不确定（可能等待交互）"
+            else:
+                state.phase = "协议状态不确定"
         token_event = self._latest(all_events, "TOKEN_USAGE")
         rate_event = self._latest(all_events, "TOKEN_USAGE", "RATE_LIMIT")
         state.token_used, state.token_limit = self._tokens(token_event)
@@ -1499,10 +2242,11 @@ class SessionStateMachine:
         state.compactions = deepcopy(self.compactions.get(key, []))
         state.agents = self._agent_tree(all_events)
         state.protocol_capabilities = self._capabilities(all_events)
-        state.event_telemetry = self._event_telemetry(all_events)
+        state.event_telemetry = self._event_telemetry(key, all_events)
         state.observation = self._finalize_observation(
             state, all_events, observation or ObservationPulse(), now
         )
+        self._apply_completeness(key, state, authoritative_events)
         state.silence = self._silence_assessment(state, now)
         state.current_operation = self._operation_summary(state, all_events)
         state.diagnosis = self._diagnosis_findings(state, all_events, now)
@@ -1606,18 +2350,20 @@ class SessionStateMachine:
     def _silence_assessment(state: SessionHealth, now: float) -> SilenceAssessment:
         pulse = state.observation
         semantic_at = pulse.last_semantic_at or state.phase_since
-        if state.lifecycle in {
-            LifecycleState.IDLE,
-            LifecycleState.COMPLETED,
-            LifecycleState.FAILED,
-            LifecycleState.ABORTED,
-        } or semantic_at is None:
+        if (
+            state.lifecycle
+            in {
+                LifecycleState.IDLE,
+                LifecycleState.COMPLETED,
+                LifecycleState.FAILED,
+                LifecycleState.ABORTED,
+            }
+            or semantic_at is None
+        ):
             return SilenceAssessment(assessed_at=now)
         silence_age = max(0.0, now - semantic_at)
         evidence_age = (
-            max(0.0, now - pulse.last_evidence_at)
-            if pulse.last_evidence_at is not None
-            else None
+            max(0.0, now - pulse.last_evidence_at) if pulse.last_evidence_at is not None else None
         )
         if pulse.collector_stale:
             return SilenceAssessment(
@@ -1758,7 +2504,11 @@ class SessionStateMachine:
         since = 0.0
         reason = ""
         if turn_start and not request_progress:
-            alert, since, reason = ALERT_PRE_REQUEST, turn_start.timestamp, "turn 已开始但尚未进入模型请求"
+            alert, since, reason = (
+                ALERT_PRE_REQUEST,
+                turn_start.timestamp,
+                "turn 已开始但尚未进入模型请求",
+            )
         elif request and (not response or response.timestamp < request.timestamp):
             alert = ALERT_HTTP_RESPONSE
             since = request.timestamp
@@ -1769,7 +2519,11 @@ class SessionStateMachine:
             and response.timestamp > tool_done.timestamp
             and (not model or model.timestamp < response.timestamp)
         ):
-            alert, since, reason = ALERT_POST_TOOL, response.timestamp, "工具结果返回后没有新的模型进展"
+            alert, since, reason = (
+                ALERT_POST_TOOL,
+                response.timestamp,
+                "工具结果返回后没有新的模型进展",
+            )
         elif response:
             last_semantic = model or response
             if keepalive and keepalive.timestamp > last_semantic.timestamp:
@@ -1786,9 +2540,7 @@ class SessionStateMachine:
             state.alert_reason = reason
             state.alert_age_seconds = age
 
-    def prune(
-        self, active_keys: set[str | SessionIdentity], now: float | None = None
-    ) -> None:
+    def prune(self, active_keys: set[str | SessionIdentity], now: float | None = None) -> None:
         now = time.time() if now is None else now
         expiry = now - self.lookback_seconds
         for key in list(self.events):
@@ -1798,6 +2550,24 @@ class SessionStateMachine:
             if latest < expiry:
                 self.events.pop(key, None)
                 self.seen.pop(key, None)
+                self.dedupe_matches.pop(key, None)
+                self.dedupe_degraded_drops.pop(key, None)
+                self.stream_generations.pop(key, None)
+                self.stale_stream_generation_dropped.pop(key, None)
+                self.stream_identity_limit_dropped.pop(key, None)
+                self.stream_generation_advances.pop(key, None)
                 self.pending_recovery.pop(key, None)
                 self.alerts.pop(key, None)
                 self.compactions.pop(key, None)
+                self.clock_state.pop(key, None)
+                self.clock_observed_at.pop(key, None)
+                self.clock_decision_at.pop(key, None)
+                self.coverage_sources.pop(key, None)
+                self.coverage_gap_at.pop(key, None)
+                self.coverage_gap_reasons.pop(key, None)
+                self.coverage_backlog.pop(key, None)
+                self.terminal_probe_complete.pop(key, None)
+                self.terminal_probe_complete_at.pop(key, None)
+                self.network_probe_complete.pop(key, None)
+                self.silence_probe_complete.pop(key, None)
+                self.event_retention_dropped.pop(key, None)

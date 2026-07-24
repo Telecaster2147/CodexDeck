@@ -10,7 +10,11 @@
       "expected": {
         "lifecycle": "COMPLETED",
         "terminal_count": 1,
-        "unknown_total": 0
+        "unknown_total": 0,
+        "protocol_uncertain": false,
+        "protocol_uncertainty_scope": "",
+        "lifecycle_confidence": "high",
+        "association_coverage": 1.0
       }
     },
     {
@@ -22,7 +26,59 @@
       "expected": {
         "lifecycle": "STARTING",
         "terminal_count": 0,
-        "unknown_total": 1
+        "unknown_total": 1,
+        "protocol_uncertain": true,
+        "protocol_uncertainty_scope": "lifecycle",
+        "lifecycle_confidence": "low",
+        "association_coverage": null
+      }
+    },
+    {
+      "name": "auxiliary-unknown-does-not-degrade",
+      "file": "replay_auxiliary_unknown.jsonl",
+      "shape_family": "future-event-msg",
+      "observed_date": "2026-07-24",
+      "chunk_sizes": [13, 29],
+      "expected": {
+        "lifecycle": "GENERATING",
+        "terminal_count": 0,
+        "unknown_total": 1,
+        "protocol_uncertain": false,
+        "protocol_uncertainty_scope": "",
+        "lifecycle_confidence": "high",
+        "association_coverage": null
+      }
+    },
+    {
+      "name": "known-progress-restores-semantic-confidence",
+      "file": "replay_unknown_then_progress.jsonl",
+      "shape_family": "future-event-msg",
+      "observed_date": "2026-07-24",
+      "chunk_sizes": [11, 37, 19],
+      "expected": {
+        "lifecycle": "GENERATING",
+        "terminal_count": 0,
+        "unknown_total": 1,
+        "protocol_uncertain": false,
+        "protocol_uncertainty_scope": "",
+        "lifecycle_confidence": "high",
+        "association_coverage": null
+      }
+    },
+    {
+      "name": "late-old-semantic-unknown-does-not-degrade",
+      "file": "replay_late_old_unknown.jsonl",
+      "shape_family": "future-event-msg",
+      "observed_date": "2026-07-24",
+      "chunk_sizes": [23, 17],
+      "expected": {
+        "lifecycle": "GENERATING",
+        "terminal_count": 0,
+        "unknown_total": 1,
+        "protocol_uncertain": false,
+        "protocol_uncertainty_scope": "",
+        "lifecycle_confidence": "high",
+        "association_coverage": null
       }
     }
   ]
