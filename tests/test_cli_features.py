@@ -128,10 +128,10 @@ class CliFeatureTests(unittest.TestCase):
         )
         self.assertEqual(hook.command, "hook-event")
         self.assertEqual(hook.hook_events, Path("/tmp/compact-hooks.jsonl"))
+        self.assertEqual(build_parser().parse_args([]).history_days, 7)
+        self.assertTrue(build_parser().parse_args(["--strict-observation"]).strict_observation)
 
-        before = build_parser().parse_args(
-            ["--pid", "42", "export", "--current-incidents"]
-        )
+        before = build_parser().parse_args(["--pid", "42", "export", "--current-incidents"])
         self.assertEqual(before.pid, [42])
         self.assertTrue(before.current_incidents)
 

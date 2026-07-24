@@ -7,8 +7,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from diagnostics import diagnostic_text, observation_degraded, snapshot_diagnostics
 from engine import MonitorEngine
-from history import HistoryStore
+from history import AsyncHistoryWriter
 from models import LifecycleState, MonitorSnapshot, NetworkState, SessionHealth, SilenceState
 from presentation.doctor import doctor_exit_code, render_doctor_json, render_doctor_text
 from presentation.export import (
@@ -38,13 +39,14 @@ class AppOptions:
     export_session: str | None = None
     current_incidents: bool = False
     history_path: Path | None = None
-    history_days: int = 30
+    history_days: int = 7
     history_max_bytes: int = 128 * 1024 * 1024
     packet_inspection: bool = False
     hook_events_path: Path | None = None
+    strict_observation: bool = False
 
 
-def exit_code(snapshot: MonitorSnapshot) -> int:
+def exit_code(snapshot: MonitorSnapshot, *, strict_observation: bool = False) -> int:
     sessions = snapshot.sessions
     if any(session.lifecycle == LifecycleState.FAILED for session in sessions):
         return 3
@@ -53,6 +55,10 @@ def exit_code(snapshot: MonitorSnapshot) -> int:
     if any(session.silence.state == SilenceState.STALL_SUSPECT for session in sessions):
         return 4
     if any(session.network.state == NetworkState.STALLED for session in sessions):
+        return 2
+    if strict_observation and observation_degraded(snapshot):
+        return 5
+    if any(session.completeness.incomplete_axes for session in sessions):
         return 2
     return 0
 
@@ -65,9 +71,7 @@ def _validate_explicit_filters(options: AppOptions, snapshot: MonitorSnapshot) -
         if missing:
             raise RuntimeError(f"未找到指定 Codex PID：{', '.join(map(str, missing))}")
     if options.selected_homes:
-        requested = {
-            path.expanduser().resolve(strict=False) for path in options.selected_homes
-        }
+        requested = {path.expanduser().resolve(strict=False) for path in options.selected_homes}
         found = {instance.paths.codex_home for instance in snapshot.instances}
         missing = sorted(requested - found)
         if missing:
@@ -76,13 +80,17 @@ def _validate_explicit_filters(options: AppOptions, snapshot: MonitorSnapshot) -
 
 
 def _write_json_diagnostics(snapshot: MonitorSnapshot) -> None:
-    for message in snapshot.diagnostics:
-        print(f"诊断：{message}", file=sys.stderr, flush=True)
+    for diagnostic in snapshot_diagnostics(snapshot):
+        print(
+            f"诊断[{diagnostic.code}]：{diagnostic_text(diagnostic)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def run_application(options: AppOptions) -> int:
     history = (
-        HistoryStore(
+        AsyncHistoryWriter(
             options.history_path,
             max_days=options.history_days,
             max_bytes=options.history_max_bytes,
@@ -146,10 +154,7 @@ def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
         return 0
 
     interactive = (
-        not options.once
-        and not options.json
-        and sys.stdin.isatty()
-        and sys.stdout.isatty()
+        not options.once and not options.json and sys.stdin.isatty() and sys.stdout.isatty()
     )
     if interactive:
         run_tui(engine, not options.no_color, options.flat)
@@ -168,7 +173,7 @@ def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
         if options.json:
             _write_json_diagnostics(snapshot)
         print(output, flush=True)
-        return exit_code(snapshot)
+        return exit_code(snapshot, strict_observation=options.strict_observation)
 
     next_sample = time.monotonic() + options.interval
     while True:
@@ -195,9 +200,7 @@ def _run_application(engine: MonitorEngine, options: AppOptions) -> int:
 
 def _select_export_session(snapshot: MonitorSnapshot, selector: str) -> SessionHealth:
     matches = [
-        session
-        for session in snapshot.sessions
-        if selector in {session.session_id, session.key}
+        session for session in snapshot.sessions if selector in {session.session_id, session.key}
     ]
     if not matches:
         raise RuntimeError(f"未找到指定会话：{selector}")

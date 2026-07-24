@@ -17,21 +17,27 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from codex.paths import ProcReader, ResolvedInstance  # noqa: E402
 from codex.processes import DiscoveryResult  # noqa: E402
+from codex.terminal import TerminalUpdate  # noqa: E402
 from engine import MonitorEngine  # noqa: E402
-from history import HistoryStore  # noqa: E402
+from history import AsyncHistoryWriter  # noqa: E402
 from app import exit_code  # noqa: E402
 from models import (  # noqa: E402
+    AdapterResult,
+    AdapterStatus,
     CodexPaths,
     ChildProcessActivity,
     LifecycleState,
+    Confidence,
+    DiscoverySummary,
     NetworkState,
     ProcessIdentity,
     ProcessInfo,
     ProcessTreeActivity,
+    SessionHealth,
     SocketInfo,
 )
 from presentation.projection import primitive_value  # noqa: E402
-from utils import CommandError  # noqa: E402
+from utils import CommandError, CommandExecutionResult  # noqa: E402
 
 
 class FakeDiscovery:
@@ -67,6 +73,22 @@ class SuccessThenFailDiscovery:
         return self.result
 
 
+class SuccessThenOverflowDiscovery(SuccessThenFailDiscovery):
+    def discover(self, selected_pids=None, selected_homes=None) -> DiscoveryResult:
+        self.calls += 1
+        if self.calls > 1:
+            result = CommandExecutionResult(
+                "ps",
+                exit_code=-15,
+                reason="stdout_byte_budget",
+                stdout_bytes_read=8 * 1024 * 1024 + 1,
+                stdout_bytes_retained=1024,
+                records_retained=4,
+            )
+            raise CommandError("stdout_byte_budget", "ps", result)
+        return self.result
+
+
 class FakeSockets:
     def __init__(self, snapshots: list[dict[int, list[SocketInfo]]]) -> None:
         self.snapshots = snapshots
@@ -98,6 +120,26 @@ class SuccessThenFailSockets:
         self.calls += 1
         if self.calls > 1:
             raise CommandError("ss timed out")
+        return self.value
+
+
+class SuccessThenOverflowSockets(SuccessThenFailSockets):
+    def __init__(self, snapshot: dict[int, list[SocketInfo]]) -> None:
+        super().__init__(snapshot)
+        self.last_command_result: CommandExecutionResult | None = None
+
+    def snapshot(self, pids: set[int]) -> dict[int, list[SocketInfo]]:
+        self.calls += 1
+        if self.calls > 1:
+            self.last_command_result = CommandExecutionResult(
+                "ss",
+                exit_code=-15,
+                reason="stdout_byte_budget",
+                stdout_bytes_read=16 * 1024 * 1024 + 1,
+                stdout_bytes_retained=2048,
+                records_retained=2,
+            )
+            raise CommandError("stdout_byte_budget", "ss", self.last_command_result)
         return self.value
 
 
@@ -161,13 +203,22 @@ class SessionLogProc(FakeProc):
 class FakePacketInspector:
     def __init__(self) -> None:
         self.error = ""
-        self.running = True
+        self.running = False
         self.starts = 0
         self.annotations = 0
+        self.allowlist_updates = 0
+        self.invalidations = 0
         self.closed = False
+
+    def update_allowlist(self, socket_by_pid, process_identities) -> None:
+        self.allowlist_updates += 1
+
+    def invalidate_allowlist(self) -> None:
+        self.invalidations += 1
 
     def start(self) -> bool:
         self.starts += 1
+        self.running = True
         return True
 
     def annotate(self, socket_by_pid: dict[int, list[SocketInfo]]) -> None:
@@ -181,6 +232,7 @@ class FakePacketInspector:
 
     def close(self) -> None:
         self.closed = True
+        self.running = False
 
 
 class UnavailablePacketInspector:
@@ -189,6 +241,12 @@ class UnavailablePacketInspector:
 
     def start(self) -> bool:
         return False
+
+    def update_allowlist(self, socket_by_pid, process_identities) -> None:
+        return None
+
+    def invalidate_allowlist(self) -> None:
+        return None
 
     def annotate(self, socket_by_pid: dict[int, list[SocketInfo]]) -> None:
         return None
@@ -309,6 +367,79 @@ def create_instance(
 
 
 class EngineTests(unittest.TestCase):
+    def test_discovery_summary_and_indirect_confidence_reach_snapshot_diagnosis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "workspace-a", 303, "session-discovery", False
+            )
+            process.discovery_method = "process-family"
+            process.discovery_confidence = Confidence.MEDIUM
+            process.discovery_evidence = ("trusted_ancestry",)
+            summary = DiscoverySummary(candidates=2, confirmed=1, rejected=1)
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult(
+                        [process],
+                        {instance.instance_id: instance},
+                        summary,
+                    )
+                ),
+                sockets=FakeSockets([{}, {}]),
+                proc=FakeProc(),
+            )
+
+            engine.baseline()
+            snapshot = engine.sample()
+
+            self.assertEqual(snapshot.discovery, summary)
+            finding = next(
+                item
+                for item in snapshot.sessions[0].diagnosis
+                if item.conclusion == "进程发现依据为间接证据"
+            )
+            self.assertIn("confidence=medium", finding.reason)
+            self.assertEqual(finding.evidence, ("trusted_ancestry",))
+            engine.close()
+
+    def test_terminal_association_incompleteness_is_attached_to_diagnosis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "workspace-a", 304, "session-association", False
+            )
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult([process], {instance.instance_id: instance})
+                ),
+                sockets=FakeSockets([{}]),
+                proc=FakeProc(),
+            )
+            session = SessionHealth(instance.instance_id, "session-association", process)
+            key = session.session_identity
+            engine.terminals.apply(
+                key,
+                (
+                    TerminalUpdate(
+                        "ambiguous",
+                        1.0,
+                        call_id="CALL_ID",
+                        terminal_candidate=True,
+                    ),
+                ),
+            )
+
+            attached = engine._attach_terminal_snapshot(session, key)
+
+            self.assertEqual(attached.terminal_association.ambiguous, 1)
+            self.assertFalse(attached.completeness.terminal_ownership.complete)
+            self.assertEqual(attached.diagnosis[-1].conclusion, "Terminal 关联不完整")
+            engine.close()
+
     def test_discovery_stage_groups_processes_and_reuses_cached_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             instance, process = create_instance(
@@ -330,10 +461,42 @@ class EngineTests(unittest.TestCase):
 
             self.assertIs(current.result, result)
             self.assertIs(stale.result, result)
-            self.assertEqual(current.by_instance, {instance.instance_id: [process]})
+            self.assertEqual(set(current.by_instance), {instance.identity})
+            grouped = current.by_instance[instance.identity]
+            self.assertEqual([item.stable_key for item in grouped], [process.stable_key])
+            self.assertEqual(grouped[0].instance_identity, instance.identity)
             self.assertEqual(current.active_process_keys, {process.stable_key})
+            self.assertFalse(current.stale)
+            self.assertTrue(stale.stale)
             self.assertEqual(engine.discovery_stale_since, 105.0)
             self.assertEqual(diagnostics, ["进程列表已过期 0.0s：ps timed out"])
+            engine.close()
+
+    def test_process_overflow_retains_last_complete_set_and_publishes_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 302, "session-process-overflow", False
+            )
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=SuccessThenOverflowDiscovery(result),
+                sockets=FakeSockets([{}]),
+                proc=FakeProc(),
+            )
+            diagnostics: list[str] = []
+
+            engine._collect_discovery_stage(100.0, diagnostics)
+            stale = engine._collect_discovery_stage(101.0, diagnostics)
+            health = next(item for item in engine.collectors.snapshot() if item.name == "process")
+
+            self.assertEqual(stale.active_process_keys, {process.stable_key})
+            self.assertTrue(stale.stale)
+            self.assertEqual(health.command.reason, "stdout_byte_budget")
+            self.assertEqual(health.command.stdout_bytes_read, 8 * 1024 * 1024 + 1)
+            self.assertIn("stdout_byte_budget", diagnostics[-1])
             engine.close()
 
     def test_socket_stage_reuses_cached_snapshot_and_keeps_packet_annotation(self) -> None:
@@ -372,7 +535,35 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(stale.by_pid[process.pid][0].tls_server_name, "api.openai.com")
             self.assertEqual(engine.socket_stale_since, 105.0)
             self.assertEqual(diagnostics, ["TCP 快照已过期 0.0s：ss timed out"])
-            self.assertEqual(packets.annotations, 2)
+            self.assertEqual(packets.annotations, 1)
+            self.assertEqual(packets.allowlist_updates, 1)
+            self.assertEqual(packets.invalidations, 1)
+            engine.close()
+
+    def test_stale_discovery_invalidates_packet_boundary_even_with_fresh_sockets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one", 303, "session-stale-discovery", False
+            )
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            packets = FakePacketInspector()
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{process.pid: []}]),
+                proc=FakeProc(),
+                packet_inspector=packets,
+            )
+
+            stage = engine._collect_socket_stage(result, 100.0, [], discovery_stale=True)
+
+            self.assertFalse(stage.stale)
+            self.assertEqual(packets.allowlist_updates, 0)
+            self.assertEqual(packets.annotations, 0)
+            self.assertEqual(packets.invalidations, 1)
+            self.assertEqual(packets.starts, 0)
             engine.close()
 
     def test_optional_collectors_are_inert_when_disabled(self) -> None:
@@ -401,9 +592,7 @@ class EngineTests(unittest.TestCase):
     def test_full_sample_tails_child_stdout_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            instance, process = create_instance(
-                root / "one", 38, "session-file-tail", False
-            )
+            instance, process = create_instance(root / "one", 38, "session-file-tail", False)
             log = root / "one" / "server.log"
             log.write_text("ready\n")
             proc_root = root / "proc"
@@ -480,9 +669,7 @@ class EngineTests(unittest.TestCase):
                 ),
                 sockets=FakeSockets([{}, {}, {}, {}]),
                 proc=ProcReader(proc_root),
-                process_activity=SequencedProcessActivity(
-                    [available, unavailable, available]
-                ),
+                process_activity=SequencedProcessActivity([available, unavailable, available]),
             )
             engine.baseline()
 
@@ -506,7 +693,11 @@ class EngineTests(unittest.TestCase):
             root = Path(temp)
             instance, process = create_instance(root / "one", 39, "session-history", False)
             result = DiscoveryResult([process], {instance.instance_id: instance})
-            history = HistoryStore(root / "history.sqlite", max_days=None, max_bytes=None)
+            history = AsyncHistoryWriter(
+                root / "history.sqlite",
+                max_days=None,
+                max_bytes=None,
+            )
             engine = MonitorEngine(
                 0.1,
                 30,
@@ -518,6 +709,9 @@ class EngineTests(unittest.TestCase):
             )
 
             engine.baseline()
+            initial = engine.sample()
+            self.assertEqual(initial.instances[0].history_windows, [])
+            self.assertTrue(history.wait_until_idle())
             snapshot = engine.sample()
 
             self.assertEqual(
@@ -527,25 +721,13 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(
                 all(window.sample_count >= 1 for window in snapshot.instances[0].history_windows)
             )
-            calls = 0
-            original_window_stats = history.window_stats
-
-            def counted_window_stats(**kwargs):
-                nonlocal calls
-                calls += 1
-                return original_window_stats(**kwargs)
-
-            history.window_stats = counted_window_stats  # type: ignore[method-assign]
-            engine.sample()
-            engine.sample()
-            self.assertLessEqual(calls, 1)
+            self.assertTrue(snapshot.history.enabled)
+            self.assertGreaterEqual(snapshot.history.persisted_samples, 1)
             engine.close()
 
     def test_instance_reads_auto_compact_boundary_from_its_codex_home(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 40, "session-config", False
-            )
+            instance, process = create_instance(Path(temp) / "one", 40, "session-config", False)
             (instance.paths.codex_home / "config.toml").write_text(
                 "model_auto_compact_token_limit = 220_000\n",
                 encoding="utf-8",
@@ -603,9 +785,7 @@ class EngineTests(unittest.TestCase):
 
     def test_same_session_opened_by_two_processes_is_merged_with_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, first = create_instance(
-                Path(temp) / "one", 421, "SESSION_DUPLICATE", False
-            )
+            instance, first = create_instance(Path(temp) / "one", 421, "SESSION_DUPLICATE", False)
             first = replace(
                 first,
                 process_group_id=421,
@@ -641,8 +821,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(len(snapshot.instances[0].processes), 2)
             self.assertTrue(
                 any(
-                    "同一会话由 2 个 Codex 进程打开" in message
-                    and "列表已合并" in message
+                    "同一会话由 2 个 Codex 进程打开" in message and "列表已合并" in message
                     for message in snapshot.instances[0].diagnostics
                 )
             )
@@ -650,9 +829,7 @@ class EngineTests(unittest.TestCase):
 
     def test_transient_thread_record_miss_preserves_last_known_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 43, "session-model", False
-            )
+            instance, process = create_instance(Path(temp) / "one", 43, "session-model", False)
             result = DiscoveryResult([process], {instance.instance_id: instance})
             engine = MonitorEngine(
                 0.1,
@@ -666,21 +843,81 @@ class EngineTests(unittest.TestCase):
             first = engine.sample().sessions[0]
             self.assertEqual(first.process.model, "gpt-test")
 
-            engine.store_cache[instance.instance_id].threads = lambda _: {}
+            store = engine.store_cache[instance.identity]
+            original = store.threads_result
+            store.threads_result = lambda _: AdapterResult(
+                status=AdapterStatus.FAILED,
+                source="sqlite.state.threads",
+                observed_at=time.time(),
+                error_code="sqlite_io",
+                complete=False,
+                value={},
+            )
             second = engine.sample().sessions[0]
 
             self.assertEqual(second.process.model, "gpt-test")
             self.assertEqual(second.process.reasoning_effort, "high")
+            store.threads_result = original
+            engine.close()
+
+    def test_failed_log_query_does_not_advance_cursor_and_recovery_reads_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(Path(temp) / "one", 45, "session-log", False)
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=FakeSockets([{}, {}, {}, {}]),
+                proc=FakeProc(),
+            )
+            engine.baseline()
+            engine.sample()
+            identity = instance.identity
+            self.assertEqual(engine.log_cursors[identity], 0)
+            with sqlite3.connect(instance.paths.log_db) as connection:
+                connection.execute(
+                    "INSERT INTO logs VALUES (2,?,?,?,?,?,?,?)",
+                    (
+                        int(time.time()),
+                        0,
+                        "WARN",
+                        "codex_core::responses_retry",
+                        "session-log",
+                        "pid:45:uuid",
+                        "retry",
+                    ),
+                )
+
+            store = engine.store_cache[identity]
+            original = store.logs_since_result
+            store.logs_since_result = lambda *_: AdapterResult(
+                status=AdapterStatus.FAILED,
+                source="sqlite.logs.since",
+                observed_at=time.time(),
+                error_code="sqlite_busy",
+                complete=False,
+                value=[],
+            )
+            failed_snapshot = engine.sample()
+
+            self.assertEqual(engine.log_cursors[identity], 0)
+            self.assertTrue(
+                any(
+                    result.error_code == "sqlite_busy"
+                    for result in failed_snapshot.instances[0].adapter_results
+                )
+            )
+            store.logs_since_result = original
+            engine.sample()
+            self.assertEqual(engine.log_cursors[identity], 2)
             engine.close()
 
     def test_fast_event_refresh_observes_tool_start_without_full_sampling(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 44, "session-fast", False
-            )
-            discovery = FakeDiscovery(
-                DiscoveryResult([process], {instance.instance_id: instance})
-            )
+            instance, process = create_instance(Path(temp) / "one", 44, "session-fast", False)
+            discovery = FakeDiscovery(DiscoveryResult([process], {instance.instance_id: instance}))
             sockets = FakeSockets([{}, {}])
             engine = MonitorEngine(
                 2.0,
@@ -695,6 +932,7 @@ class EngineTests(unittest.TestCase):
             self.assertIs(engine.refresh_events(snapshot), snapshot)
             discovery_calls = discovery.calls
             socket_calls = sockets.calls
+
             def forbidden(*args, **kwargs):
                 self.fail("fast path invoked full collector")
 
@@ -765,9 +1003,7 @@ class EngineTests(unittest.TestCase):
 
     def test_unchanged_fast_refresh_preserves_published_snapshot_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 144, "session-unchanged", False
-            )
+            instance, process = create_instance(Path(temp) / "one", 144, "session-unchanged", False)
             engine = MonitorEngine(
                 2.0,
                 30,
@@ -790,9 +1026,7 @@ class EngineTests(unittest.TestCase):
 
     def test_changed_fast_refresh_does_not_mutate_previous_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 145, "session-changed", False
-            )
+            instance, process = create_instance(Path(temp) / "one", 145, "session-changed", False)
             engine = MonitorEngine(
                 2.0,
                 30,
@@ -856,12 +1090,8 @@ class EngineTests(unittest.TestCase):
 
     def test_fast_refresh_publishes_rollout_growth_without_timeline_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 45, "session-growth", False
-            )
-            discovery = FakeDiscovery(
-                DiscoveryResult([process], {instance.instance_id: instance})
-            )
+            instance, process = create_instance(Path(temp) / "one", 45, "session-growth", False)
+            discovery = FakeDiscovery(DiscoveryResult([process], {instance.instance_id: instance}))
             sockets = FakeSockets([{}, {}])
             engine = MonitorEngine(
                 2.0,
@@ -903,21 +1133,15 @@ class EngineTests(unittest.TestCase):
 
     def test_fast_refresh_appends_background_terminal_poll_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(
-                Path(temp) / "one", 46, "session-terminal", False
-            )
-            discovery = FakeDiscovery(
-                DiscoveryResult([process], {instance.instance_id: instance})
-            )
+            instance, process = create_instance(Path(temp) / "one", 46, "session-terminal", False)
+            discovery = FakeDiscovery(DiscoveryResult([process], {instance.instance_id: instance}))
             sockets = FakeSockets([{}, {}])
             activity = ProcessTreeActivity(
                 available=True,
                 sampled_at=time.time() + 60,
                 child_count=1,
                 children=(
-                    ChildProcessActivity(
-                        ProcessIdentity(7770, 1), command="server", state="S"
-                    ),
+                    ChildProcessActivity(ProcessIdentity(7770, 1), command="server", state="S"),
                 ),
             )
             engine = MonitorEngine(
@@ -950,9 +1174,7 @@ class EngineTests(unittest.TestCase):
                     "type": "function_call",
                     "call_id": "call-start",
                     "name": "exec_command",
-                    "arguments": json.dumps(
-                        {"cmd": "server --watch", "workdir": "/workspace-a"}
-                    ),
+                    "arguments": json.dumps({"cmd": "server --watch", "workdir": "/workspace-a"}),
                 }
             )
             append(
@@ -960,8 +1182,7 @@ class EngineTests(unittest.TestCase):
                     "type": "function_call_output",
                     "call_id": "call-start",
                     "output": (
-                        "Script running with cell ID 777\n"
-                        "Wall time 1 seconds\nOutput:\nready\n"
+                        "Script running with cell ID 777\nWall time 1 seconds\nOutput:\nready\n"
                     ),
                 }
             )
@@ -1014,14 +1235,10 @@ class EngineTests(unittest.TestCase):
     def test_session_log_typed_compact_is_seen_on_fast_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            instance, process = create_instance(
-                root / "one", 46, "session-typed-compact", False
-            )
+            instance, process = create_instance(root / "one", 46, "session-typed-compact", False)
             session_log = root / "tui-session.jsonl"
             session_log.write_text("")
-            discovery = FakeDiscovery(
-                DiscoveryResult([process], {instance.instance_id: instance})
-            )
+            discovery = FakeDiscovery(DiscoveryResult([process], {instance.instance_id: instance}))
             engine = MonitorEngine(
                 2.0,
                 30,
@@ -1103,8 +1320,7 @@ class EngineTests(unittest.TestCase):
             refreshed = engine.refresh_events(snapshot)
 
             statuses = {
-                session.session_id: session.compactions[-1].status
-                for session in refreshed.sessions
+                session.session_id: session.compactions[-1].status for session in refreshed.sessions
             }
             self.assertEqual(statuses, {"session-a": "requested", "session-b": "requested"})
             engine.close()
@@ -1112,11 +1328,10 @@ class EngineTests(unittest.TestCase):
     def test_hook_only_session_refreshes_without_rollout_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            instance, process = create_instance(
-                root / "one", 47, "session-hook-only", False
-            )
+            instance, process = create_instance(root / "one", 47, "session-hook-only", False)
             hook_events = root / "compact-hooks.jsonl"
             hook_events.write_text("")
+            hook_events.chmod(0o600)
             engine = MonitorEngine(
                 2.0,
                 30,
@@ -1132,6 +1347,7 @@ class EngineTests(unittest.TestCase):
             snapshot = engine.sample()
             session = snapshot.sessions[0]
             session.process = replace(session.process, rollout_path="")
+            lifecycle_before_hook = session.lifecycle
             snapshot.instances[0].processes = [session.process]
             engine.live_sessions[session.session_identity] = session
             hook_events.write_text(
@@ -1152,13 +1368,23 @@ class EngineTests(unittest.TestCase):
 
             self.assertIsNot(refreshed, snapshot)
             self.assertEqual(refreshed.sessions[0].compactions[-1].status, "failed")
-            self.assertEqual(
-                refreshed.sessions[0].latest_failure.category,
-                "compact_error",
-            )
+            self.assertIsNone(refreshed.sessions[0].latest_failure)
+            self.assertEqual(refreshed.sessions[0].lifecycle, lifecycle_before_hook)
             self.assertEqual(
                 refreshed.sessions[0].observation.last_evidence_source,
                 "compact_hook",
+            )
+            hook_event = next(
+                event for event in refreshed.sessions[0].events if event.source == "compact_hook"
+            )
+            self.assertEqual(hook_event.confidence.value, "medium")
+            self.assertEqual(hook_event.source_authenticity.value, "low")
+            self.assertEqual(hook_event.identity_binding.value, "medium")
+            self.assertTrue(
+                any(
+                    finding.conclusion == "Hook 来源未认证"
+                    for finding in refreshed.sessions[0].diagnosis
+                )
             )
             engine.close()
 
@@ -1169,6 +1395,7 @@ class EngineTests(unittest.TestCase):
             instance_b, process_b = create_instance(root / "two", 247, "duplicate", False)
             hook_events = root / "compact-hooks.jsonl"
             hook_events.write_text("")
+            hook_events.chmod(0o600)
             engine = MonitorEngine(
                 2.0,
                 30,
@@ -1204,9 +1431,7 @@ class EngineTests(unittest.TestCase):
 
             refreshed = engine.refresh_events(snapshot)
 
-            self.assertTrue(
-                any("缺少唯一可关联 session" in item for item in refreshed.diagnostics)
-            )
+            self.assertTrue(any("缺少唯一可关联 session" in item for item in refreshed.diagnostics))
             self.assertTrue(all(not session.compactions for session in refreshed.sessions))
             engine.close()
 
@@ -1269,9 +1494,11 @@ class EngineTests(unittest.TestCase):
                 proc=FakeProc(),
                 packet_inspector=packets,
             )
+            self.assertEqual(packets.starts, 0)
             engine.baseline()
             connection = engine.sample().sessions[0].network.connections[0]
             self.assertEqual(packets.starts, 1)
+            self.assertGreaterEqual(packets.allowlist_updates, 2)
             self.assertGreaterEqual(packets.annotations, 1)
             self.assertEqual(connection.tls_server_name, "api.openai.com")
             self.assertEqual(connection.tls_alpn_protocols, ("h2",))
@@ -1281,7 +1508,9 @@ class EngineTests(unittest.TestCase):
 
     def test_packet_permission_failure_is_reported_once_per_sample(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            instance, process = create_instance(Path(temp) / "one", 58, "session-packet-error", False)
+            instance, process = create_instance(
+                Path(temp) / "one", 58, "session-packet-error", False
+            )
             result = DiscoveryResult([process], {instance.instance_id: instance})
             engine = MonitorEngine(
                 0.1,
@@ -1297,7 +1526,9 @@ class EngineTests(unittest.TestCase):
                 snapshot.diagnostics,
                 ["网络解包不可用：AF_PACKET 原始套接字不可用：Operation not permitted"],
             )
-            packet_health = next(item for item in snapshot.collector_health if item.name == "packet")
+            packet_health = next(
+                item for item in snapshot.collector_health if item.name == "packet"
+            )
             self.assertEqual(packet_health.consecutive_failures, 1)
             engine.close()
 
@@ -1370,6 +1601,43 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(snapshot.sessions[0].network.stale)
             self.assertIsNotNone(snapshot.socket_data_stale_age_seconds)
             self.assertTrue(any("TCP 快照已过期" in item for item in snapshot.diagnostics))
+            engine.close()
+
+    def test_socket_overflow_retains_last_complete_set_and_publishes_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "one",
+                56,
+                "session-socket-overflow",
+                False,
+            )
+            result = DiscoveryResult([process], {instance.instance_id: instance})
+            socket = SocketInfo(
+                "ESTAB",
+                0,
+                0,
+                "192.0.2.10:43122",
+                "198.51.100.20:443",
+                process.pid,
+                route="external",
+            )
+            engine = MonitorEngine(
+                0.1,
+                30,
+                900,
+                discovery=FakeDiscovery(result),
+                sockets=SuccessThenOverflowSockets({process.pid: [socket]}),
+                proc=FakeProc(),
+            )
+            engine.baseline()
+            snapshot = engine.sample()
+            session = snapshot.sessions[0]
+            self.assertTrue(session.network.stale)
+            self.assertEqual(len(session.network.connections), 1)
+            self.assertEqual(session.network.connections[0].state, "ESTAB")
+            health = next(item for item in snapshot.collector_health if item.name == "socket")
+            self.assertEqual(health.command.reason, "stdout_byte_budget")
+            self.assertEqual(health.command.stdout_bytes_read, 16 * 1024 * 1024 + 1)
             engine.close()
 
     def test_exited_process_is_retained_without_health_failure(self) -> None:
@@ -1496,9 +1764,7 @@ class EngineTests(unittest.TestCase):
                         "payload": {
                             "type": "message",
                             "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": "new session task"}
-                            ],
+                            "content": [{"type": "input_text", "text": "new session task"}],
                         },
                     }
                 )
@@ -1536,8 +1802,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(closed.network.reason, "当前 Codex 窗口已切换到新会话")
             self.assertTrue(
                 any(
-                    event.kind == "SESSION_CLOSED"
-                    and event.summary == "会话已由 /new 关闭"
+                    event.kind == "SESSION_CLOSED" and event.summary == "会话已由 /new 关闭"
                     for event in closed.events
                 )
             )
@@ -1599,9 +1864,7 @@ class EngineTests(unittest.TestCase):
             logs.close()
             current = engine.sample().sessions[0]
             self.assertFalse(current.process_exited)
-            self.assertTrue(
-                any(event.kind == "PROCESS_RESUMED" for event in current.events)
-            )
+            self.assertTrue(any(event.kind == "PROCESS_RESUMED" for event in current.events))
             engine.close()
 
 

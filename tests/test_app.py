@@ -13,6 +13,7 @@ from app import (  # noqa: E402
     exit_code,
 )
 from models import (  # noqa: E402
+    AxisCompleteness,
     CodexPaths,
     InstanceSnapshot,
     LifecycleState,
@@ -22,6 +23,8 @@ from models import (  # noqa: E402
     ProcessIdentity,
     ProcessInfo,
     SessionHealth,
+    SessionCompleteness,
+    ObserverHealth,
 )
 
 
@@ -73,6 +76,61 @@ class AppTests(unittest.TestCase):
         snapshot = MonitorSnapshot("now", 2.0, [instance(Path("/tmp/home"))])
         snapshot.instances[0].sessions.append(health)
         self.assertEqual(exit_code(snapshot), 3)
+
+    def test_incomplete_state_axis_uses_degraded_exit(self) -> None:
+        process = ProcessInfo(
+            ProcessIdentity(10, 20),
+            1,
+            "codex",
+            1,
+            0.0,
+            "S",
+            "futex",
+            "codex",
+            "session",
+            instance_id="instance",
+            session_id="session",
+        )
+        health = SessionHealth(
+            "instance",
+            "session",
+            process,
+            completeness=SessionCompleteness(
+                attention=AxisCompleteness("attention", complete=False)
+            ),
+        )
+        snapshot = MonitorSnapshot("now", 2.0, [instance(Path("/tmp/home"))])
+        snapshot.instances[0].sessions.append(health)
+        self.assertEqual(exit_code(snapshot), 2)
+        self.assertEqual(exit_code(snapshot, strict_observation=True), 5)
+
+    def test_strict_observation_has_distinct_code_and_workload_priority(self) -> None:
+        snapshot = MonitorSnapshot(
+            "now",
+            2.0,
+            [instance(Path("/tmp/home"))],
+            observer=ObserverHealth(degraded=True, reason="snapshot_age_exceeded"),
+        )
+        self.assertEqual(exit_code(snapshot), 0)
+        self.assertEqual(exit_code(snapshot, strict_observation=True), 5)
+
+        process = ProcessInfo(
+            ProcessIdentity(10, 20),
+            1,
+            "codex",
+            1,
+            0.0,
+            "S",
+            "futex",
+            "codex",
+            "session",
+            instance_id="instance",
+            session_id="session",
+        )
+        snapshot.instances[0].sessions.append(
+            SessionHealth("instance", "session", process, LifecycleState.FAILED)
+        )
+        self.assertEqual(exit_code(snapshot, strict_observation=True), 3)
 
 
 if __name__ == "__main__":

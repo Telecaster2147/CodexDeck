@@ -49,6 +49,7 @@ py-modules = [
   "preferences",
   "snapshot_publisher",
   "state_machine",
+  "temporal",
   "utils",
 ]
 

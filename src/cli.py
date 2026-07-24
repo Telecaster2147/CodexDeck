@@ -105,8 +105,8 @@ def _add_source_arguments(
     parser.add_argument(
         "--history-days",
         type=positive_int,
-        default=_default(30, suppress=suppress_defaults),
-        help="历史保留天数，默认 30",
+        default=_default(7, suppress=suppress_defaults),
+        help="历史保留天数，默认 7",
     )
     parser.add_argument(
         "--history-max-mib",
@@ -150,6 +150,12 @@ def _add_monitor_arguments(
         action="store_true",
         default=_default(False, suppress=suppress_defaults),
         help="关闭终端颜色",
+    )
+    parser.add_argument(
+        "--strict-observation",
+        action="store_true",
+        default=_default(False, suppress=suppress_defaults),
+        help="observer blind/stale/unknown/budget/conflict 时使用独立退出码 5",
     )
 
 
@@ -283,6 +289,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         history_days=args.history_days,
         history_max_bytes=int(args.history_max_mib * 1024 * 1024),
         hook_events_path=args.hook_events,
+        strict_observation=args.strict_observation,
     )
     return run_application(options)
 

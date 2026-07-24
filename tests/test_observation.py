@@ -66,8 +66,7 @@ def _write_proc(
         f"syscr: {io_operations}\nsyscw: {io_operations}\n"
     )
     (directory / "status").write_text(
-        "Threads:\t2\nvoluntary_ctxt_switches:\t3\n"
-        "nonvoluntary_ctxt_switches:\t1\n"
+        "Threads:\t2\nvoluntary_ctxt_switches:\t3\nnonvoluntary_ctxt_switches:\t1\n"
     )
     (directory / "task" / str(pid) / "children").write_text(children)
     if cmdline:
@@ -85,9 +84,7 @@ class RolloutActivityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rollout.jsonl"
             reader = RolloutReader()
-            path.write_text(
-                '{"type":"event_msg","payload":{"type":"thread_goal_updated"}}\n'
-            )
+            path.write_text('{"type":"event_msg","payload":{"type":"thread_goal_updated"}}\n')
             first = reader.read_with_activity(path)
             self.assertEqual(first.events, ())
             self.assertGreater(first.activity.bytes_read, 0)
@@ -200,9 +197,7 @@ class ProcessActivityTests(unittest.TestCase):
                 io_bytes=0,
                 children="200",
             )
-            sandbox_setup = " ".join(
-                f"restore-variable-{index}" for index in range(700)
-            )
+            sandbox_setup = " ".join(f"restore-variable-{index}" for index in range(700))
             background_command = "python worker.py --watch"
             cmdline = (
                 b"codex-linux-sandbox\0/bin/bash\0-c\0"
