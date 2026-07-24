@@ -5,9 +5,21 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+from dataclasses import replace
 
 from models import SocketInfo
-from utils import CommandRunner
+from utils import CommandBudget, CommandError, CommandExecutionResult, CommandRunner
+
+
+SOCKET_COMMAND_BUDGET = CommandBudget(
+    stdout_bytes=16 * 1024 * 1024,
+    stdout_retained_bytes=4 * 1024 * 1024,
+    stderr_bytes=64 * 1024,
+    stderr_retained_bytes=16 * 1024,
+    stdout_lines=200_000,
+    stderr_lines=1_024,
+    retained_records=32_768,
+)
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, int | None]:
@@ -115,8 +127,38 @@ def parse_ss_output(text: str, interested_pids: set[int]) -> dict[int, list[Sock
 class SocketCollector:
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self.runner = runner or CommandRunner()
+        self.last_command_result: CommandExecutionResult | None = None
 
     def snapshot(self, pids: set[int]) -> dict[int, list[SocketInfo]]:
         if not pids:
+            self.last_command_result = None
             return {}
-        return parse_ss_output(self.runner.run(["ss", "-tinpH"]), pids)
+        keep_current = False
+
+        def retain_target_flow(line: str) -> bool:
+            nonlocal keep_current
+            if line[:1].isspace():
+                return keep_current
+            owners = {int(value) for value in re.findall(r"pid=(\d+)", line)}
+            keep_current = bool(owners & pids)
+            return keep_current
+
+        run_result = getattr(self.runner, "run_result", None)
+        if callable(run_result):
+            self.last_command_result = run_result(
+                ["ss", "-tinpH"],
+                budget=SOCKET_COMMAND_BUDGET,
+                stdout_line_filter=retain_target_flow,
+            )
+            if self.last_command_result.stderr.strip():
+                self.last_command_result = replace(
+                    self.last_command_result,
+                    complete=False,
+                    reason="stderr_output",
+                )
+                raise CommandError("stderr_output", "ss", self.last_command_result)
+            output = self.last_command_result.stdout
+        else:
+            self.last_command_result = None
+            output = self.runner.run(["ss", "-tinpH"])
+        return parse_ss_output(output, pids)

@@ -16,7 +16,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable
 
-from models import SocketInfo
+from models import ProcessIdentity, SocketInfo
 from network.sockets import parse_endpoint
 
 
@@ -31,6 +31,7 @@ _MAX_REASSEMBLY_BYTES = 64 * 1024
 _FLOW_TTL_SECONDS = 15.0
 _OBSERVATION_TTL_SECONDS = 300.0
 _MAX_OBSERVATIONS = 512
+_ALLOWLIST_TTL_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -244,7 +245,9 @@ def _parse_extensions(data: bytes) -> TlsMetadata | None:
                 item_cursor += 1
                 if item_cursor + size > item_end:
                     break
-                alpn_protocols.append(value[item_cursor : item_cursor + size].decode("ascii", "replace"))
+                alpn_protocols.append(
+                    value[item_cursor : item_cursor + size].decode("ascii", "replace")
+                )
                 item_cursor += size
         elif extension_type == 43 and value:
             list_size = value[0]
@@ -326,10 +329,14 @@ def parse_tls_client_hello(data: bytes) -> TlsMetadata | None:
     metadata = _parse_extensions(hello[cursor : cursor + extension_size])
     if metadata is None:
         return None
-    return metadata if metadata.tls_versions else TlsMetadata(
-        metadata.server_name,
-        metadata.alpn_protocols,
-        (_tls_version_name(struct.unpack_from("!H", hello, 0)[0]),),
+    return (
+        metadata
+        if metadata.tls_versions
+        else TlsMetadata(
+            metadata.server_name,
+            metadata.alpn_protocols,
+            (_tls_version_name(struct.unpack_from("!H", hello, 0)[0]),),
+        )
     )
 
 
@@ -419,6 +426,11 @@ class TlsHelloReassembler:
             if now - state[2] <= self.flow_ttl_seconds
         }
 
+    def retain_flows(self, allowed: set[FlowKey]) -> None:
+        """Discard partial handshakes outside the current capture boundary."""
+
+        self._flows = {flow: state for flow, state in self._flows.items() if flow in allowed}
+
 
 def _socket_flow(socket_info: SocketInfo) -> FlowKey | None:
     local_host, local_port = parse_endpoint(socket_info.local)
@@ -442,6 +454,7 @@ class PacketInspector:
         socket_factory: Callable[..., socket.socket] = socket.socket,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        allowlist_ttl_seconds: float = _ALLOWLIST_TTL_SECONDS,
     ) -> None:
         self._socket_factory = socket_factory
         self._clock = clock
@@ -452,6 +465,9 @@ class PacketInspector:
         self._lock = threading.Lock()
         self._reassembler = TlsHelloReassembler()
         self._observations: OrderedDict[FlowKey, PacketObservation] = OrderedDict()
+        self._allowlist: dict[FlowKey, ProcessIdentity] = {}
+        self._allowlist_updated_at: float | None = None
+        self._allowlist_ttl_seconds = allowlist_ttl_seconds
         self.error = ""
 
     @property
@@ -464,7 +480,9 @@ class PacketInspector:
         if self.running:
             return True
         try:
-            packet_socket = self._socket_factory(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
+            packet_socket = self._socket_factory(
+                socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
+            )
             packet_socket.settimeout(0.5)
         except (AttributeError, OSError) as exc:
             self.error = f"AF_PACKET 原始套接字不可用：{exc}"
@@ -482,22 +500,66 @@ class PacketInspector:
         segment = parse_ethernet_frame(frame)
         if segment is None:
             return None
-        metadata = self._reassembler.feed(segment, self._monotonic())
-        if metadata is None:
-            return None
-        observed_at = self._clock() if now is None else now
-        observation = PacketObservation(segment.flow, metadata, observed_at)
+        monotonic_now = self._monotonic()
         with self._lock:
+            self._expire_allowlist_locked(monotonic_now)
+            if segment.flow not in self._allowlist:
+                return None
+            metadata = self._reassembler.feed(segment, monotonic_now)
+            if metadata is None:
+                return None
+            observed_at = self._clock() if now is None else now
+            observation = PacketObservation(segment.flow, metadata, observed_at)
             self._observations[segment.flow] = observation
             self._observations.move_to_end(segment.flow)
             self._prune_observations_locked(observed_at)
         return observation
+
+    def update_allowlist(
+        self,
+        sockets_by_pid: dict[int, list[SocketInfo]],
+        process_identities: dict[int, ProcessIdentity],
+        *,
+        now: float | None = None,
+    ) -> None:
+        """Replace the current Codex flow boundary from one coherent snapshot."""
+
+        allowed: dict[FlowKey, ProcessIdentity] = {}
+        for pid, socket_list in sockets_by_pid.items():
+            identity = process_identities.get(pid)
+            if identity is None:
+                continue
+            for socket_info in socket_list:
+                flow = _socket_flow(socket_info)
+                if flow is not None:
+                    allowed[flow] = identity
+
+        updated_at = self._monotonic() if now is None else now
+        with self._lock:
+            unchanged = {
+                flow for flow, identity in allowed.items() if self._allowlist.get(flow) == identity
+            }
+            self._allowlist = allowed
+            self._allowlist_updated_at = updated_at
+            self._reassembler.retain_flows(unchanged)
+            self._observations = OrderedDict(
+                (flow, observation)
+                for flow, observation in self._observations.items()
+                if flow in unchanged
+            )
+
+    def invalidate_allowlist(self) -> None:
+        """Fail closed when process or socket ownership is no longer current."""
+
+        with self._lock:
+            self._clear_allowlist_locked()
 
     def annotate(self, sockets_by_pid: dict[int, list[SocketInfo]]) -> None:
         """Attach retained TLS metadata to the matching current TCP sockets."""
 
         now = self._clock()
         with self._lock:
+            self._expire_allowlist_locked(self._monotonic())
             self._prune_observations_locked(now)
             observations = dict(self._observations)
         for socket_list in sockets_by_pid.values():
@@ -549,3 +611,14 @@ class PacketInspector:
             self._observations.pop(flow, None)
         while len(self._observations) > _MAX_OBSERVATIONS:
             self._observations.popitem(last=False)
+
+    def _expire_allowlist_locked(self, now: float) -> None:
+        updated_at = self._allowlist_updated_at
+        if updated_at is None or now - updated_at > self._allowlist_ttl_seconds:
+            self._clear_allowlist_locked()
+
+    def _clear_allowlist_locked(self) -> None:
+        self._allowlist.clear()
+        self._allowlist_updated_at = None
+        self._reassembler.retain_flows(set())
+        self._observations.clear()

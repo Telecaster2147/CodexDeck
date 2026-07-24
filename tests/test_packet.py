@@ -28,6 +28,7 @@ from models import (  # noqa: E402
     SocketInfo,
 )
 from network.packet import (  # noqa: E402
+    FlowKey,
     PacketInspector,
     parse_ethernet_frame,
     parse_tls_client_hello,
@@ -159,6 +160,29 @@ def packet_output_snapshot() -> MonitorSnapshot:
     return MonitorSnapshot("2026-07-16T00:00:00+00:00", 2.0, [instance])
 
 
+def allow_ipv4_flow(
+    inspector: PacketInspector,
+    *,
+    identity: ProcessIdentity = ProcessIdentity(10, 20),
+    now: float = 10.0,
+) -> SocketInfo:
+    socket_info = SocketInfo(
+        "ESTAB",
+        0,
+        0,
+        "192.0.2.10:43122",
+        "198.51.100.20:443",
+        identity.pid,
+        route="external",
+    )
+    inspector.update_allowlist(
+        {identity.pid: [socket_info]},
+        {identity.pid: identity},
+        now=now,
+    )
+    return socket_info
+
+
 class PacketParsingTests(unittest.TestCase):
     def test_cli_exposes_opt_in_packet_inspection(self) -> None:
         args = build_parser().parse_args(["--packet-inspection", "--once"])
@@ -187,6 +211,7 @@ class PacketParsingTests(unittest.TestCase):
     def test_reassembles_client_hello_across_tcp_segments(self) -> None:
         payload = client_hello()
         inspector = PacketInspector(clock=lambda: 1000.0, monotonic=lambda: 10.0)
+        allow_ipv4_flow(inspector)
         first = inspector.observe_frame(ethernet_ipv4(payload[:19], sequence=100), now=1000.0)
         second = inspector.observe_frame(ethernet_ipv4(payload[19:], sequence=119), now=1000.0)
         self.assertIsNone(first)
@@ -195,6 +220,7 @@ class PacketParsingTests(unittest.TestCase):
 
     def test_reassembles_client_hello_across_tls_records(self) -> None:
         inspector = PacketInspector(clock=lambda: 1000.0, monotonic=lambda: 10.0)
+        allow_ipv4_flow(inspector)
         observation = inspector.observe_frame(
             ethernet_ipv4(client_hello_split_across_tls_records()), now=1000.0
         )
@@ -213,10 +239,8 @@ class PacketParsingTests(unittest.TestCase):
 
     def test_annotates_only_the_exact_current_socket_flow(self) -> None:
         inspector = PacketInspector(clock=lambda: 1000.0, monotonic=lambda: 10.0)
+        matching = allow_ipv4_flow(inspector)
         inspector.observe_frame(ethernet_ipv4(client_hello()), now=1000.0)
-        matching = SocketInfo(
-            "ESTAB", 0, 0, "192.0.2.10:43122", "198.51.100.20:443", 10, route="external"
-        )
         different = SocketInfo(
             "ESTAB", 0, 0, "192.0.2.10:43123", "198.51.100.20:443", 10, route="external"
         )
@@ -224,6 +248,60 @@ class PacketParsingTests(unittest.TestCase):
         self.assertEqual(matching.tls_server_name, "api.openai.com")
         self.assertEqual(matching.tls_alpn_protocols, ("h2", "http/1.1"))
         self.assertEqual(different.tls_server_name, "")
+
+    def test_unmatched_flow_never_enters_reassembly_or_observation_retention(self) -> None:
+        inspector = PacketInspector(clock=lambda: 1000.0, monotonic=lambda: 10.0)
+        other = SocketInfo("ESTAB", 0, 0, "192.0.2.10:43123", "198.51.100.20:443", 10)
+        inspector.update_allowlist({10: [other]}, {10: ProcessIdentity(10, 20)}, now=10.0)
+
+        self.assertIsNone(inspector.observe_frame(ethernet_ipv4(client_hello()[:19])))
+        self.assertEqual(inspector._reassembler._flows, {})
+        self.assertEqual(inspector._observations, {})
+
+    def test_allowlist_expiry_discards_partial_and_complete_state(self) -> None:
+        monotonic_now = [10.0]
+        inspector = PacketInspector(
+            clock=lambda: 1000.0,
+            monotonic=lambda: monotonic_now[0],
+            allowlist_ttl_seconds=2.0,
+        )
+        allow_ipv4_flow(inspector, now=10.0)
+        payload = client_hello()
+        inspector.observe_frame(ethernet_ipv4(payload[:19], sequence=100))
+        self.assertTrue(inspector._reassembler._flows)
+
+        monotonic_now[0] = 13.0
+        self.assertIsNone(inspector.observe_frame(ethernet_ipv4(payload[19:], sequence=119)))
+        self.assertEqual(inspector._allowlist, {})
+        self.assertEqual(inspector._reassembler._flows, {})
+        self.assertEqual(inspector._observations, {})
+
+    def test_pid_reuse_does_not_inherit_partial_or_observed_flow(self) -> None:
+        inspector = PacketInspector(clock=lambda: 1000.0, monotonic=lambda: 10.0)
+        old_identity = ProcessIdentity(10, 20)
+        socket_info = allow_ipv4_flow(inspector, identity=old_identity)
+        payload = client_hello()
+        inspector.observe_frame(ethernet_ipv4(payload[:19], sequence=100))
+
+        new_identity = ProcessIdentity(10, 21)
+        inspector.update_allowlist({10: [socket_info]}, {10: new_identity}, now=10.5)
+        self.assertEqual(inspector._reassembler._flows, {})
+        self.assertIsNone(inspector.observe_frame(ethernet_ipv4(payload[19:], sequence=119)))
+        self.assertEqual(inspector._observations, {})
+
+    def test_allowlist_update_drops_removed_flow_before_next_segment(self) -> None:
+        inspector = PacketInspector(clock=lambda: 1000.0, monotonic=lambda: 10.0)
+        allow_ipv4_flow(inspector)
+        payload = client_hello()
+        inspector.observe_frame(ethernet_ipv4(payload[:19], sequence=100))
+
+        inspector.update_allowlist({}, {}, now=10.5)
+        self.assertIsNone(inspector.observe_frame(ethernet_ipv4(payload[19:], sequence=119)))
+        self.assertNotIn(
+            FlowKey("192.0.2.10", 43122, "198.51.100.20", 443),
+            inspector._reassembler._flows,
+        )
+        self.assertEqual(inspector._observations, {})
 
     def test_permission_failure_is_a_nonfatal_collector_status(self) -> None:
         def denied(*_args: object, **_kwargs: object) -> socket.socket:
@@ -263,6 +341,7 @@ class PacketParsingTests(unittest.TestCase):
         self.assertEqual(connection["tls_server_name"], "api.openai.com")
         self.assertEqual(connection["tls_alpn_protocols"], ["h2"])
         self.assertIn("TLS：SNI api.openai.com; ALPN h2; TLS TLS 1.3", render_text(snapshot))
+
 
 if __name__ == "__main__":
     unittest.main()
