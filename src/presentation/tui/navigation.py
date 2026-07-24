@@ -10,22 +10,22 @@ from textual.widgets import ListItem, Static
 from config import LIFECYCLE_LABELS, RECOVERY_LABELS
 from models import LifecycleState, SessionHealth, SilenceState
 from presentation.tui.theme import STATE_COLORS
-from utils import compact_path
+from utils import compact_path, operator_text
 
 
 def session_title(session: SessionHealth) -> str:
-    return (
-        session.process.session_title
-        or session.process.current_task
-        or session.session_id[:12]
-    )
+    value = session.process.session_title or session.process.current_task or session.session_id[:12]
+    return operator_text(value, max_cells=80)
 
 
 def session_status(session: SessionHealth) -> str:
+    suffix = " · 证据不完整" if session.completeness.incomplete_axes else ""
     if session.process_exited:
-        return "进程已退出"
+        return "进程已退出" + suffix
     if session.process.foreground_active is False:
-        return "终端后台作业"
+        return "终端后台作业" + suffix
+    if session.protocol_uncertain:
+        return session.phase + suffix
     if session.attention_request:
         labels = {
             "APPROVAL": "等待审批",
@@ -34,27 +34,32 @@ def session_status(session: SessionHealth) -> str:
             "MCP_ELICITATION": "等待 MCP 输入",
             "AUTH_ELICITATION": "等待登录操作",
         }
-        return labels.get(session.attention.value, "等待用户操作")
+        return labels.get(session.attention.value, "等待用户操作") + suffix
     if (
         session.lifecycle == LifecycleState.RUNNING_TOOL
         and session.current_operation.category != "idle"
         and session.current_operation.label
     ):
-        return f"{session.phase or '工具正在运行'} · {session.current_operation.label}"
+        label = operator_text(session.current_operation.label, max_cells=48)
+        return f"{session.phase or '工具正在运行'} · {label}" + suffix
     if session.phase and (
         session.phase != LIFECYCLE_LABELS[LifecycleState.IDLE.value]
         or session.lifecycle == LifecycleState.IDLE
     ):
-        return session.phase
+        return session.phase + suffix
     recovery = RECOVERY_LABELS[session.recovery.value]
-    return recovery or LIFECYCLE_LABELS[session.lifecycle.value]
+    return (recovery or LIFECYCLE_LABELS[session.lifecycle.value]) + suffix
 
 
 def session_marker(session: SessionHealth) -> tuple[str, str]:
+    if session.protocol_uncertain:
+        return "?", STATE_COLORS["warning"]
     if session.attention_request:
         return "?", STATE_COLORS["warning"]
     if session.current_failure:
         return "×", STATE_COLORS["error"]
+    if session.completeness.incomplete_axes:
+        return "?", STATE_COLORS["warning"]
     if session.network.state.value == "STALLED" or session.alert_level == "严重":
         return "!", STATE_COLORS["error"]
     if session.silence.state == SilenceState.STALL_SUSPECT:
@@ -117,7 +122,7 @@ def session_hidden_label(session: SessionHealth) -> str:
 
 def session_workspace(session: SessionHealth) -> str:
     cwd = session.process.cwd.strip()
-    return compact_path(cwd) if cwd else "工作区未知"
+    return operator_text(compact_path(cwd), max_cells=96) if cwd else "工作区未知"
 
 
 def workspace_group_key(instance_id: str, workspace: str) -> str:

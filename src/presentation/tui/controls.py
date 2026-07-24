@@ -146,9 +146,7 @@ SHORTCUTS = (
 )
 
 
-APP_BINDINGS = [
-    Binding(spec.key, spec.action, spec.label, show=spec.show) for spec in SHORTCUTS
-]
+APP_BINDINGS = [Binding(spec.key, spec.action, spec.label, show=spec.show) for spec in SHORTCUTS]
 
 
 def keyboard_reference() -> str:
@@ -328,9 +326,7 @@ def reference_specs(section: str) -> tuple[ShortcutSpec, ...]:
     """Return controls in the order users encounter them in the interface."""
 
     available = {
-        spec.label: spec
-        for spec in (*SHORTCUTS, *REFERENCE_EXTRAS)
-        if spec.section == section
+        spec.label: spec for spec in (*SHORTCUTS, *REFERENCE_EXTRAS) if spec.section == section
     }
     return tuple(available[label] for label in REFERENCE_ORDER[section])
 
@@ -453,7 +449,11 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                         yield Static("默认 Inspector 页面", classes="setting-label")
                         yield Static("选择会话后优先显示的详情页面", classes="setting-detail")
                     yield Select(
-                        (("Activity", "activity"), ("Diagnosis", "diagnosis"), ("Terminal", "terminal")),
+                        (
+                            ("Activity", "activity"),
+                            ("Diagnosis", "diagnosis"),
+                            ("Terminal", "terminal"),
+                        ),
                         value=self.preferences.default_tab,
                         allow_blank=False,
                         id="default-tab-select",
@@ -521,9 +521,7 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
         default_tab = self.query_one("#default-tab-select", Select).value
         self.dismiss(
             CodexDeckPreferences(
-                startup_animation=self.query_one(
-                    "#startup-animation-switch", Switch
-                ).value,
+                startup_animation=self.query_one("#startup-animation-switch", Switch).value,
                 group_sessions=self.query_one("#group-sessions-switch", Switch).value,
                 show_hidden_sessions=self.query_one("#show-hidden-switch", Switch).value,
                 follow_output=self.query_one("#follow-output-switch", Switch).value,

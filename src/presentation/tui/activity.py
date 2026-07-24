@@ -11,6 +11,7 @@ from rich.text import Text
 
 from models import SessionHealth
 from presentation.tui.theme import STATE_COLORS
+from utils import operator_text
 
 
 def _tool_name_is_fallback(metadata: dict[str, object]) -> bool:
@@ -102,9 +103,7 @@ def timeline_entries(
             metadata = {
                 **event.metadata,
                 "category": resolved("category", tool.category if tool else ""),
-                "display_name": resolved(
-                    "display_name", tool.display_name if tool else ""
-                ),
+                "display_name": resolved("display_name", tool.display_name if tool else ""),
                 "tool_name": resolved("tool_name", tool.tool_name if tool else ""),
                 "command": resolved("command", tool.command if tool else ""),
                 "cwd": resolved("cwd", tool.cwd if tool else ""),
@@ -122,9 +121,7 @@ def timeline_entries(
                 event,
                 metadata={
                     **event.metadata,
-                    "auto_compact_token_limit": event.metadata.get(
-                        "auto_compact_token_limit"
-                    )
+                    "auto_compact_token_limit": event.metadata.get("auto_compact_token_limit")
                     or auto_compact_token_limit,
                 },
             )
@@ -158,10 +155,14 @@ def timeline_entries(
             "reconstructed": compact.reconstructed,
         }
         trigger = "手动" if compact.trigger == "manual" else "自动/未知"
-        if compact.requested_at is not None and (
-            "COMPACT_REQUESTED",
-            compact.requested_at,
-        ) not in visible_compactions:
+        if (
+            compact.requested_at is not None
+            and (
+                "COMPACT_REQUESTED",
+                compact.requested_at,
+            )
+            not in visible_compactions
+        ):
             entries.append(
                 {
                     "timestamp": compact.requested_at,
@@ -172,10 +173,14 @@ def timeline_entries(
                     "metadata": metadata,
                 }
             )
-        if compact.started_at is not None and (
-            "COMPACTING",
-            compact.started_at,
-        ) not in visible_compactions:
+        if (
+            compact.started_at is not None
+            and (
+                "COMPACTING",
+                compact.started_at,
+            )
+            not in visible_compactions
+        ):
             entries.append(
                 {
                     "timestamp": compact.started_at,
@@ -186,10 +191,14 @@ def timeline_entries(
                     "metadata": metadata,
                 }
             )
-        if compact.completed_at is not None and (
-            "COMPACT_COMPLETED",
-            compact.completed_at,
-        ) not in visible_compactions:
+        if (
+            compact.completed_at is not None
+            and (
+                "COMPACT_COMPLETED",
+                compact.completed_at,
+            )
+            not in visible_compactions
+        ):
             entries.append(
                 {
                     "timestamp": compact.completed_at,
@@ -200,10 +209,14 @@ def timeline_entries(
                     "metadata": metadata,
                 }
             )
-        if compact.failed_at is not None and (
-            "COMPACT_FAILED",
-            compact.failed_at,
-        ) not in visible_compactions:
+        if (
+            compact.failed_at is not None
+            and (
+                "COMPACT_FAILED",
+                compact.failed_at,
+            )
+            not in visible_compactions
+        ):
             entries.append(
                 {
                     "timestamp": compact.failed_at,
@@ -214,10 +227,14 @@ def timeline_entries(
                     "metadata": metadata,
                 }
             )
-        if compact.aborted_at is not None and (
-            "COMPACT_ABORTED",
-            compact.aborted_at,
-        ) not in visible_compactions:
+        if (
+            compact.aborted_at is not None
+            and (
+                "COMPACT_ABORTED",
+                compact.aborted_at,
+            )
+            not in visible_compactions
+        ):
             entries.append(
                 {
                     "timestamp": compact.aborted_at,
@@ -261,8 +278,7 @@ def timeline_entries(
                     entry,
                     metadata={
                         **metadata,
-                        "duration_seconds": metadata.get("duration_seconds")
-                        or max(0.0, duration),
+                        "duration_seconds": metadata.get("duration_seconds") or max(0.0, duration),
                     },
                 )
         folded.append(entry)
@@ -314,9 +330,7 @@ def _timeline_signature(event: object) -> tuple[object, ...]:
 
 
 def _trace_tag(kind: str, metadata: dict[str, object]) -> str:
-    name = " ".join(
-        str(metadata.get(key) or "") for key in ("tool_name", "display_name")
-    ).lower()
+    name = " ".join(str(metadata.get(key) or "") for key in ("tool_name", "display_name")).lower()
     category = str(metadata.get("category") or "").lower()
     nested_tools = [str(item) for item in (metadata.get("nested_tools") or [])]
     if kind == "ACTION_REQUIRED":
@@ -366,15 +380,11 @@ PLAN_MARKERS = {"completed": "✓", "in_progress": "→", "pending": "○"}
 
 def _looks_serialized(value: object) -> bool:
     text = str(value or "").strip()
-    return bool(
-        text[:1] in "[{\""
-        or text.startswith("```")
-        or "tools." in text
-        or "await " in text
-    )
+    return bool(text[:1] in '[{"' or text.startswith("```") or "tools." in text or "await " in text)
+
 
 def _timeline_line(event: object) -> Table:
-    timestamp = float(_value(event, "timestamp", 0) or 0)
+    timestamp = float(_value(event, "presentation_timestamp", _value(event, "timestamp", 0)) or 0)
     stamp = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
     kind = str(_value(event, "kind", ""))
     severity, color = event_severity(kind)
@@ -385,16 +395,11 @@ def _timeline_line(event: object) -> Table:
     tag = _trace_tag(kind, metadata)
     if kind in {"TOOL_RUNNING", "TOOL_COMPLETED"}:
         tool_label = str(
-            metadata.get("display_name")
-            or metadata.get("tool_name")
-            or detail
-            or "工具"
+            metadata.get("display_name") or metadata.get("tool_name") or detail or "工具"
         )
-        failed = (
-            metadata.get("exit_code") not in (None, 0)
-            or str(metadata.get("completion_status") or "").lower()
-            in {"failed", "error", "errored"}
-        )
+        failed = metadata.get("exit_code") not in (None, 0) or str(
+            metadata.get("completion_status") or ""
+        ).lower() in {"failed", "error", "errored"}
         if kind == "TOOL_RUNNING":
             summary = f"正在调用 {tool_label}"
         elif failed:
@@ -409,9 +414,11 @@ def _timeline_line(event: object) -> Table:
     table.add_column(width=9, no_wrap=True)
     table.add_column(ratio=1, overflow="fold")
 
-    headline = Text(summary, style=f"bold {color}")
+    headline = Text(operator_text(summary, max_cells=140), style=f"bold {color}")
     if detail and kind != "UNPARSED_PAYLOAD":
-        detail_text = _trace_excerpt(detail, max_lines=2, max_chars=420)
+        detail_text = operator_text(
+            _trace_excerpt(detail, max_lines=2, max_chars=420), max_cells=220
+        )
         headline.append(f"  ·  {detail_text}", style="#cbd5e1")
     table.add_row(
         Text(stamp, style="#64748b"),
@@ -421,7 +428,9 @@ def _timeline_line(event: object) -> Table:
     )
 
     def add_detail(label: str, value: object, style: str = "#94a3b8") -> None:
-        content = value if isinstance(value, Text) else Text(str(value), style=style)
+        content = value if isinstance(value, Text) else Text(
+            operator_text(value, max_cells=240), style=style
+        )
         table.add_row(
             "",
             Text(" │ ", style="#334155"),
@@ -467,9 +476,11 @@ def _timeline_line(event: object) -> Table:
     }:
         context_tokens = metadata.get("context_tokens")
         context_window = metadata.get("context_window")
-        if isinstance(context_tokens, (int, float)) and isinstance(
-            context_window, (int, float)
-        ) and context_window:
+        if (
+            isinstance(context_tokens, (int, float))
+            and isinstance(context_window, (int, float))
+            and context_window
+        ):
             ratio = float(context_tokens) / float(context_window)
             add_detail(
                 "CONTEXT",
@@ -477,9 +488,11 @@ def _timeline_line(event: object) -> Table:
                 "#7dd3fc",
             )
         auto_limit = metadata.get("auto_compact_token_limit")
-        if isinstance(context_tokens, (int, float)) and isinstance(
-            auto_limit, (int, float)
-        ) and auto_limit:
+        if (
+            isinstance(context_tokens, (int, float))
+            and isinstance(auto_limit, (int, float))
+            and auto_limit
+        ):
             remaining = int(auto_limit) - int(context_tokens)
             boundary = Text(
                 f"{int(context_tokens):,} / {int(auto_limit):,} · "

@@ -74,7 +74,7 @@ from preferences import (
     preferences_path,
     save_preferences,
 )
-from utils import format_duration
+from utils import format_duration, operator_text
 
 BINDING_KEY_LABELS = {
     "question_mark": "?",
@@ -256,6 +256,11 @@ class SessionInspector(Vertical):
 
         health = Text("HEALTH  ", style="bold #64748b")
         health.append(session_status(session), style="bold #f8fafc")
+        if session.completeness.incomplete_axes:
+            health.append(
+                "  |  不完整 " + ",".join(session.completeness.incomplete_axes),
+                style=STATE_COLORS["warning"],
+            )
         now = time.time()
         if session.phase_since is not None:
             health.append(
@@ -283,9 +288,7 @@ class SessionInspector(Vertical):
                 if session.silence.state == SilenceState.OBSERVER_BLIND
                 else STATE_COLORS["info"]
             )
-            health.append(
-                f"  |  {session.silence.state.value}", style=f"bold {silence_color}"
-            )
+            health.append(f"  |  {session.silence.state.value}", style=f"bold {silence_color}")
         health.append("  |  ", style="#64748b")
         health.append(
             NETWORK_LABELS[session.network.state.value],
@@ -427,8 +430,6 @@ class SessionInspector(Vertical):
             instance,
             follow=follow,
         )
-
-
 
 
 class CodexDeckApp(App[MonitorSnapshot]):
@@ -706,8 +707,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
             or bool(item.attention_request)
             or bool(item.alert)
             or item.network.state.value == "STALLED"
-            or item.silence.state
-            in {SilenceState.STALL_SUSPECT, SilenceState.OBSERVER_BLIND}
+            or item.silence.state in {SilenceState.STALL_SUSPECT, SilenceState.OBSERVER_BLIND}
             for item in visible
         )
         signature = (len(visible), hidden, issues, len(queue), self.show_hidden)
@@ -731,6 +731,12 @@ class CodexDeckApp(App[MonitorSnapshot]):
             return f"COLLECTOR ERROR  {self._collector_error}"
         if self._status_message and time.monotonic() < self._status_message_until:
             return self._status_message
+        observer = self.sampling_coordinator.summary(time.monotonic())
+        if observer.degraded:
+            return (
+                f"OBSERVER DEGRADED  {observer.reason}  "
+                f"age {observer.snapshot_age_seconds:.1f}s"
+            )
         follow = "FOLLOW" if self.follow else "PAUSED"
         return follow
 
@@ -796,8 +802,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
             sessions = [
                 item
                 for item in instance.sessions
-                if (self.show_hidden or session_is_visible(item))
-                and matches_session(item, query)
+                if (self.show_hidden or session_is_visible(item)) and matches_session(item, query)
             ]
             if query and not sessions:
                 continue
@@ -884,9 +889,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
                     if session.silence.state != SilenceState.NORMAL:
                         operation_detail = session.silence.reason
                     elif semantic_at is not None and now - semantic_at >= 10:
-                        operation_detail = (
-                            f"静默 {format_duration(max(0, now - semantic_at))}"
-                        )
+                        operation_detail = f"静默 {format_duration(max(0, now - semantic_at))}"
                     if evidence_at is not None and now - evidence_at <= 60:
                         auxiliary.append(
                             f"{session.observation.last_evidence_source or 'evidence'} "
@@ -901,15 +904,11 @@ class CodexDeckApp(App[MonitorSnapshot]):
                     if operation.agent:
                         auxiliary.append(f"a:{operation.agent[:6]}")
                     if session.observation.process_activity.child_count:
-                        auxiliary.append(
-                            f"child{session.observation.process_activity.child_count}"
-                        )
+                        auxiliary.append(f"child{session.observation.process_activity.child_count}")
                     detail_limit = 20 if not auxiliary else 10
                     if len(operation_detail) > detail_limit:
                         operation_detail = operation_detail[: detail_limit - 1] + "…"
-                    second_line = (
-                        f"\n   {operation_category.upper()} · {operation_detail} · {age}"
-                    )
+                    second_line = f"\n   {operation_category.upper()} · {operation_detail} · {age}"
                     if auxiliary:
                         second_line += " · " + " · ".join(auxiliary[:2])
                     label.append(second_line, style="#94a3b8")
@@ -924,9 +923,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
                         )
                     )
         previous = self.selected_key
-        current_items = [
-            item for item in list_view.children if isinstance(item, NavigationItem)
-        ]
+        current_items = [item for item in list_view.children if isinstance(item, NavigationItem)]
         stable_structure = [item.key_value for item in current_items] == [
             item.key_value for item in items
         ]
@@ -935,9 +932,17 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 current.update_from(updated)
             keys = [item.key_value for item in current_items]
             if keys:
-                index = keys.index(previous) if previous in keys else next(
-                    (position for position, item in enumerate(current_items) if item.kind == "session"),
-                    0,
+                index = (
+                    keys.index(previous)
+                    if previous in keys
+                    else next(
+                        (
+                            position
+                            for position, item in enumerate(current_items)
+                            if item.kind == "session"
+                        ),
+                        0,
+                    )
                 )
                 if list_view.index != index:
                     list_view.index = index
@@ -953,9 +958,13 @@ class CodexDeckApp(App[MonitorSnapshot]):
         if items:
             await list_view.extend(items)
             keys = [item.key_value for item in items]
-            index = keys.index(previous) if previous in keys else next(
-                (position for position, item in enumerate(items) if item.kind == "session"),
-                0,
+            index = (
+                keys.index(previous)
+                if previous in keys
+                else next(
+                    (position for position, item in enumerate(items) if item.kind == "session"),
+                    0,
+                )
             )
             list_view.index = index
             self.selected_key = items[index].key_value
@@ -1250,22 +1259,14 @@ class CodexDeckApp(App[MonitorSnapshot]):
 
     def action_next_anomaly(self) -> None:
         queue = attention_queue(
-            item
-            for item in self.snapshot.sessions
-            if self.show_hidden or session_is_visible(item)
+            item for item in self.snapshot.sessions if self.show_hidden or session_is_visible(item)
         )
         if not queue:
             self._set_status_message("ATTENTION QUEUE · EMPTY")
             return
         identities = [item.session for item in queue]
-        current = (
-            self.selected_session.session_identity if self.selected_session else None
-        )
-        index = (
-            (identities.index(current) + 1) % len(identities)
-            if current in identities
-            else 0
-        )
+        current = self.selected_session.session_identity if self.selected_session else None
+        index = (identities.index(current) + 1) % len(identities) if current in identities else 0
         target = f"session:{queue[index].session.storage_key}"
         list_view = self.query_one("#session-list", ListView)
         for position, item in enumerate(list_view.children):
@@ -1342,7 +1343,8 @@ class CodexDeckApp(App[MonitorSnapshot]):
         snapshot: MonitorSnapshot | None,
         error: str,
     ) -> None:
-        self.sampling_coordinator.finish()
+        completed_at = time.monotonic()
+        self.sampling_coordinator.finish(completed_at, success=not error and snapshot is not None)
         if error:
             self._show_collector_error(error)
         elif snapshot is not None and snapshot is not self.snapshot:
@@ -1383,13 +1385,15 @@ class CodexDeckApp(App[MonitorSnapshot]):
             title = session_title(session)
             if session.attention_request and not old.attention_request:
                 self.notify(
-                    session.attention_request.detail or session_status(session),
+                    operator_text(
+                        session.attention_request.detail or session_status(session), max_cells=160
+                    ),
                     title=f"ACTION REQUIRED · {title}",
                     severity="warning",
                 )
             elif session.current_failure and not old.current_failure:
                 self.notify(
-                    session.current_failure.message,
+                    operator_text(session.current_failure.message, max_cells=160),
                     title=f"FAILED · {title}",
                     severity="error",
                 )
@@ -1413,8 +1417,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 )
             elif (
                 session.compactions
-                and session.compactions[-1].status
-                in {"completed", "failed", "aborted"}
+                and session.compactions[-1].status in {"completed", "failed", "aborted"}
                 and (
                     not old.compactions
                     or old.compactions[-1].status != session.compactions[-1].status

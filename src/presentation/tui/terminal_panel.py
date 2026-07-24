@@ -16,7 +16,7 @@ from models import (
     TerminalCapability,
     TerminalSessionSummary,
 )
-from utils import compact_path, format_duration
+from utils import compact_path, format_duration, operator_text
 
 
 class TerminalLog(RichLog):
@@ -68,11 +68,11 @@ class TerminalPanel(Vertical):
     @staticmethod
     def _command_label(terminal: TerminalSessionSummary) -> str:
         command = terminal.command or "后台进程"
-        return command if len(command) <= 80 else command[:79] + "…"
+        return operator_text(command, max_cells=80)
 
     def _process_label(self, terminal: TerminalSessionSummary, now: float) -> Text:
         label = Text("● ", style="bold #4ade80")
-        label.append(terminal.process_id, style="bold #e2e8f0")
+        label.append(operator_text(terminal.process_id, max_cells=32), style="bold #e2e8f0")
         label.append(f"  {self._command_label(terminal)}", style="#cbd5e1")
         if terminal.last_output_at is not None:
             label.append(
@@ -107,13 +107,17 @@ class TerminalPanel(Vertical):
                     key=terminal.terminal_id,
                 )
             self._row_keys = row_keys
-            selected = previous if previous in row_keys else next(
-                (
-                    item.terminal_id
-                    for item in reversed(terminals)
-                    if item.status in RUNNING_TERMINAL_STATUSES
-                ),
-                row_keys[-1] if row_keys else "",
+            selected = (
+                previous
+                if previous in row_keys
+                else next(
+                    (
+                        item.terminal_id
+                        for item in reversed(terminals)
+                        if item.status in RUNNING_TERMINAL_STATUSES
+                    ),
+                    row_keys[-1] if row_keys else "",
+                )
             )
             self._selected_terminal_id = selected
             if selected:
@@ -137,10 +141,19 @@ class TerminalPanel(Vertical):
             header.append("  ·  当前没有运行中的后台进程", style="#64748b")
             return header
         capability = self.CAPABILITY_LABELS.get(terminal.capability, terminal.capability.value)
+        process_id = operator_text(terminal.process_id, max_cells=32)
         header.append("● RUNNING", style="bold #4ade80")
         header.append(
-            f"  ·  PID {terminal.process_id}  ·  {capability}",
+            f"  ·  PID {process_id}  ·  {capability}",
             style="#e2e8f0",
+        )
+        association_style = (
+            "#94a3b8" if terminal.association_status == "confirmed" else "bold #fbbf24"
+        )
+        header.append(
+            f"  ·  {terminal.association_status.upper()}"
+            + (f"/{terminal.correlation_source}" if terminal.correlation_source else ""),
+            style=association_style,
         )
         header.append("  ·  READ ONLY", style="#64748b")
         if terminal.dropped_bytes:
@@ -156,13 +169,13 @@ class TerminalPanel(Vertical):
         return header
 
     def _prompt_renderable(self, terminal: TerminalSessionSummary) -> Text:
-        prompt_path = compact_path(terminal.cwd) if terminal.cwd else "~"
+        prompt_path = operator_text(compact_path(terminal.cwd), max_cells=80) if terminal.cwd else "~"
         command = terminal.command
         if not command:
             command = f"后台进程 PID {terminal.process_id}" if terminal.process_id else "后台进程"
         prompt = Text(prompt_path, style="bold #38bdf8")
         prompt.append(" $ ", style="bold #4ade80")
-        prompt.append(command, style="#f8fafc")
+        prompt.append(operator_text(command, max_cells=160), style="#f8fafc")
         if self._search_query:
             prompt.highlight_regex(
                 re.escape(self._search_query),
@@ -189,7 +202,7 @@ class TerminalPanel(Vertical):
         rows: list[Text] = []
         for line in lines:
             text = Text(f"{tag:<3} │ ", style=f"bold {color}")
-            text.append(line, style=color)
+            text.append(operator_text(line, max_cells=240), style=color)
             if self._search_query:
                 text.highlight_regex(
                     re.escape(self._search_query),
@@ -202,11 +215,7 @@ class TerminalPanel(Vertical):
         if terminal is None:
             return []
         rows = [self._prompt_renderable(terminal)]
-        rows.extend(
-            row
-            for chunk in terminal.chunks
-            for row in self._chunk_renderables(chunk)
-        )
+        rows.extend(row for chunk in terminal.chunks for row in self._chunk_renderables(chunk))
         if not terminal.chunks:
             rows.append(Text("等待后台进程产生可读取输出", style="#64748b"))
         return rows

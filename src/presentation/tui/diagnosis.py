@@ -8,6 +8,7 @@ from rich.console import Group
 from rich.text import Text
 
 from config import NETWORK_LABELS
+from diagnostics import diagnostic_text
 from models import InstanceSnapshot, SessionHealth
 from presentation.projection import instance_quality_issues
 from presentation.tui.theme import STATE_COLORS
@@ -67,9 +68,7 @@ def _diagnosis_renderable(
         ("network", observation.network_probe_at),
         ("log", observation.log_probe_at),
     ):
-        freshness = (
-            format_duration(max(0, now - timestamp)) if timestamp is not None else "-"
-        )
+        freshness = format_duration(max(0, now - timestamp)) if timestamp is not None else "-"
         freshness_parts.append(f"{label} {freshness}")
 
     quality_issues: list[str] = []
@@ -117,8 +116,7 @@ def _diagnosis_renderable(
                 for connection in session.network.connections
             )
             network.append(
-                f"\n异常连接 {len(abnormal)} · packet 辅助证据 "
-                f"{'有' if packet_evidence else '无'}",
+                f"\n异常连接 {len(abnormal)} · packet 辅助证据 {'有' if packet_evidence else '无'}",
                 style="#94a3b8",
             )
         blocks.append(network)
@@ -165,9 +163,7 @@ def _diagnosis_renderable(
         and session.token_usage.context_percent is not None
         and session.token_usage.context_percent >= 85
     ):
-        capacity_warnings.append(
-            f"上下文使用 {session.token_usage.context_percent:.1f}%"
-        )
+        capacity_warnings.append(f"上下文使用 {session.token_usage.context_percent:.1f}%")
     if capacity_warnings:
         capacity = Text("\n容量提醒\n", style="bold #64748b")
         capacity.append(" · ".join(capacity_warnings), style="#fbbf24")
@@ -209,9 +205,8 @@ def _diagnosis_details_renderable(
         count += 1
         blocks.append(
             Text(
-                "采集证据陈旧\n" + (
-                    session.observation.collector_stale_reason or "会话采集证据已陈旧"
-                ),
+                "采集证据陈旧\n"
+                + (session.observation.collector_stale_reason or "会话采集证据已陈旧"),
                 style="#fbbf24",
             )
         )
@@ -219,7 +214,81 @@ def _diagnosis_details_renderable(
     if instance:
         for message in instance.diagnostics:
             count += 1
-            blocks.append(Text(f"实例诊断\n{message}", style="#fbbf24"))
+            blocks.append(Text(f"实例诊断\n{diagnostic_text(message)}", style="#fbbf24"))
+        rollout_activity = next(
+            (
+                item
+                for item in instance.rollout_activity
+                if item.get("path") == session.process.rollout_path
+                and (
+                    item.get("backlog_bytes")
+                    or item.get("gap_count")
+                    or item.get("metadata_backfill_dropped")
+                    or item.get("terminal_parser_evictions")
+                    or item.get("stream_uncertain")
+                )
+            ),
+            None,
+        )
+        if rollout_activity:
+            count += 1
+            blocks.append(
+                Text(
+                    "Rollout 入口"
+                    f"\n积压  {rollout_activity.get('backlog_bytes', 0)} bytes"
+                    f"\n积压记录下界  {rollout_activity.get('backlog_records_lower_bound', 0)}"
+                    f"\n积压年龄  {rollout_activity.get('backlog_age_seconds')}"
+                    f"\n预算耗尽  {'是' if rollout_activity.get('budget_exceeded') else '否'}"
+                    f"\n缺口  {rollout_activity.get('gap_count', 0)}"
+                    f"\n跳过  {rollout_activity.get('skipped_bytes', 0)} bytes"
+                    f"\n原因  {rollout_activity.get('gap_reason') or '-'}"
+                    f"\n元数据回填丢弃  "
+                    f"{rollout_activity.get('metadata_backfill_dropped', 0)}"
+                    f"\n回填原因  "
+                    f"{rollout_activity.get('metadata_backfill_reason') or '-'}"
+                    f"\n终端解析关联淘汰  "
+                    f"{rollout_activity.get('terminal_parser_evictions', 0)}"
+                    f"\n解析淘汰原因  "
+                    f"{rollout_activity.get('terminal_parser_eviction_reason') or '-'}"
+                    f"\nGeneration  {rollout_activity.get('generation', 0)}"
+                    f"\n流不确定  "
+                    f"{'是' if rollout_activity.get('stream_uncertain') else '否'}"
+                    f"\n流原因  "
+                    f"{rollout_activity.get('stream_uncertainty_reason') or '-'}",
+                    style="#fbbf24",
+                )
+            )
+        for name, source in (
+            ("TUI session log", instance.tui_session_log),
+            ("Compact hook", instance.hook_events),
+        ):
+            if (
+                not source.backlog_bytes
+                and not source.gap_count
+                and not source.stream_uncertain
+                and source.source_authenticity.value == "high"
+            ):
+                continue
+            count += 1
+            blocks.append(
+                Text(
+                    f"{name} 入口"
+                    f"\n积压  {source.backlog_bytes} bytes"
+                    f"\n积压记录下界  {source.backlog_records_lower_bound}"
+                    f"\n积压年龄  {source.backlog_age_seconds}"
+                    f"\n预算耗尽  {'是' if source.budget_exceeded else '否'}"
+                    f"\n缺口  {source.gap_count}"
+                    f"\n跳过  {source.skipped_bytes} bytes"
+                    f"\n原因  {source.gap_reason or '-'}"
+                    f"\nGeneration  {source.generation}"
+                    f"\n流不确定  {'是' if source.stream_uncertain else '否'}"
+                    f"\n流原因  {source.stream_uncertainty_reason or '-'}"
+                    f"\n真实性  {source.source_authenticity.value}"
+                    f"\n身份绑定  {source.identity_binding.value}"
+                    f"\n语义置信  {source.semantic_confidence.value}",
+                    style="#fbbf24",
+                )
+            )
         for collector in instance.collector_health:
             if not collector.error and collector.stale_age_seconds is None:
                 continue
@@ -234,6 +303,22 @@ def _diagnosis_details_renderable(
                 style="#cbd5e1",
             )
             blocks.append(collector_detail)
+        family_counters = instance.protocol_family_counters
+        dropped_families = family_counters.get(
+            "unknown_dropped_family_count", 0
+        ) + family_counters.get("shape_dropped_family_count", 0)
+        if dropped_families:
+            count += 1
+            blocks.append(
+                Text(
+                    "协议族计数已截断"
+                    f"\n容量  {family_counters.get('max_families_per_path', 0)} / rollout"
+                    f"\n未知 other  {family_counters.get('unknown_other', 0)}"
+                    f"\nshape other  {family_counters.get('shape_other', 0)}"
+                    f"\n溢出观测  {dropped_families}",
+                    style="#fbbf24",
+                )
+            )
         for event_type, event_count in instance.unknown_event_types.items():
             if any(
                 event.unparsed and event.unparsed.source_type == event_type
@@ -241,16 +326,15 @@ def _diagnosis_details_renderable(
             ):
                 continue
             count += 1
-            blocks.append(
-                Text(f"未知协议类型\n{event_type} × {event_count}", style="#fbbf24")
-            )
+            blocks.append(Text(f"未知协议类型\n{event_type} × {event_count}", style="#fbbf24"))
 
     for event in (event for event in session.events if event.unparsed):
         count += 1
         payload = event.unparsed
         protocol = Text(f"未知协议  {payload.source_type}", style="bold #fbbf24")
         protocol.append(
-            f"\n时间  {event.timestamp:.3f}"
+            f"\n来源时间  {event.presentation_timestamp:.3f}"
+            f"\n裁决时间  {event.decision_timestamp:.3f}"
             f"\n来源  {event.source_id or event.source}"
             f"\n长度  {payload.length} chars"
             f"\nSHA-256  {payload.sha256}",
