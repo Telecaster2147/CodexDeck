@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "record_contract": {
+    "required": [
+      "fixture_id",
+      "observed_at",
+      "terminal",
+      "input_bytes",
+      "expected_terminal_identity",
+      "expected_state",
+      "actual_state",
+      "visibility_result",
+      "domain_correctness_result",
+      "valid"
+    ],
+    "invalid_when": [
+      "fixture_id_missing",
+      "input_or_snapshot_missing",
+      "expected_and_actual_conflict",
+      "terminal_dimensions_missing",
+      "observation_time_missing"
+    ]
+  },
+  "cases": [
+    {
+      "fixture_id": "PTY-WIDE-001",
+      "width": 120,
+      "height": 30,
+      "input_bytes": ["33"],
+      "expected_tokens": [
+        "PTY Fixture Active",
+        "PTY Fixture Retained",
+        "PROCESS_4101",
+        "POLL",
+        "printf PTY_FIXTURE_OUTPUT",
+        "PTY_FIXTURE_OUTPUT"
+      ],
+      "expected_terminal_identity": {
+        "session_id": "SESSION_ACTIVE",
+        "terminal_id": "TERMINAL_ACTIVE",
+        "process_id": "PROCESS_4101",
+        "workspace": "/workspace-a"
+      },
+      "expected_state": {
+        "row_count": 2,
+        "active_lifecycle": "RUNNING_TOOL",
+        "retained_lifecycle": "IDLE",
+        "exit_retained": true,
+        "focus_preserved": true,
+        "scroll_preserved": true
+      }
+    },
+    {
+      "fixture_id": "PTY-NARROW-001",
+      "width": 80,
+      "height": 24,
+      "input_bytes": ["0d", "33"],
+      "expected_tokens": [
+        "PTY Fixture Active",
+        "PTY Fixture Retained",
+        "PROCESS_4101",
+        "POLL",
+        "PTY_FIXTURE_OUTPUT"
+      ],
+      "expected_terminal_identity": {
+        "session_id": "SESSION_ACTIVE",
+        "terminal_id": "TERMINAL_ACTIVE",
+        "process_id": "PROCESS_4101",
+        "workspace": "/workspace-a"
+      },
+      "expected_state": {
+        "row_count": 2,
+        "active_lifecycle": "RUNNING_TOOL",
+        "retained_lifecycle": "IDLE",
+        "exit_retained": true,
+        "focus_preserved": true,
+        "scroll_preserved": true
+      }
+    }
+  ]
+}
