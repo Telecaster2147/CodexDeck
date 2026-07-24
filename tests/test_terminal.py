@@ -26,6 +26,250 @@ from models import (
 
 
 class TerminalTranscriptTests(unittest.TestCase):
+    def test_terminal_private_state_bounds_fail_closed_and_recover_by_scope(self) -> None:
+        store = TerminalStore()
+        old_scope = RolloutIdentity(Path("/workspace-a/old.jsonl"), 1, 10, 0)
+        new_scope = RolloutIdentity(Path("/workspace-a/new.jsonl"), 1, 11, 0)
+        with patch("codex.terminal.MAX_TERMINAL_SOURCE_IDS_PER_SCOPE", 3):
+            for index in range(3):
+                store.apply(
+                    "session",
+                    (
+                        TerminalUpdate(
+                            f"source-{index}",
+                            float(index),
+                            process_id="PROCESS_ID",
+                            output=f"accepted-{index}\n",
+                            terminal_candidate=True,
+                            scope=old_scope,
+                        ),
+                    ),
+                )
+            store.apply(
+                "session",
+                (
+                    TerminalUpdate(
+                        "source-over-limit",
+                        4.0,
+                        process_id="PROCESS_ID",
+                        output="DROPPED_SENTINEL\n",
+                        terminal_candidate=True,
+                        scope=old_scope,
+                    ),
+                ),
+            )
+            store.apply(
+                "session",
+                (
+                    TerminalUpdate(
+                        "source-over-limit",
+                        5.0,
+                        process_id="PROCESS_ID",
+                        output="REPLAY_SENTINEL\n",
+                        terminal_candidate=True,
+                        scope=old_scope,
+                    ),
+                ),
+            )
+
+        retained = "".join(
+            chunk.text for summary in store.summaries("session") for chunk in summary.chunks
+        )
+        private = store.private_state_summary("session")
+        association = store.association_summary("session")
+        self.assertNotIn("DROPPED_SENTINEL", retained)
+        self.assertNotIn("REPLAY_SENTINEL", retained)
+        self.assertEqual(private["source_entries"], 3)
+        self.assertEqual(private["saturated_scopes"], 1)
+        self.assertGreaterEqual(association.private_state_dropped, 2)
+        self.assertIn(("dedupe_source_limit", 1), association.private_state_reasons)
+
+        store.prune_scopes({new_scope})
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "new-source",
+                    6.0,
+                    process_id="NEW_PROCESS",
+                    output="new generation\n",
+                    terminal_candidate=True,
+                    scope=new_scope,
+                ),
+            ),
+        )
+        recovered = store.association_summary("session")
+        self.assertEqual(store.private_state_summary("session")["saturated_scopes"], 0)
+        self.assertEqual(recovered.private_state_recoveries, 1)
+        self.assertIn("new generation\n", store.summaries("session")[-1].chunks[-1].text)
+
+    def test_terminal_correlation_aliases_are_bounded_per_retained_terminal(self) -> None:
+        store = TerminalStore()
+        scope = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10, 0)
+        with patch("codex.terminal.MAX_TERMINAL_ALIASES_PER_TERMINAL", 2):
+            for index in range(8):
+                store.apply(
+                    "session",
+                    (
+                        TerminalUpdate(
+                            f"source-{index}",
+                            float(index),
+                            call_id=f"call-{index}",
+                            process_id="PROCESS_ID",
+                            terminal_candidate=True,
+                            continuation=True,
+                            wait_for_completion=True,
+                            scope=scope,
+                        ),
+                    ),
+                )
+
+        private = store.private_state_summary("session")
+        association = store.association_summary("session")
+        self.assertEqual(private["call_entries"], 2)
+        self.assertEqual(private["continuation_entries"], 2)
+        self.assertEqual(private["wait_entries"], 2)
+        self.assertLessEqual(private["process_entries"], 2)
+        self.assertGreater(association.private_state_evictions, 0)
+        self.assertIn("call_alias_limit", dict(association.private_state_reasons))
+
+    def test_association_summary_reports_confirmed_ambiguous_and_unresolved(self) -> None:
+        store = TerminalStore()
+        scope = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10)
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "confirmed",
+                    1.0,
+                    call_id="CALL_CONFIRMED",
+                    terminal_candidate=True,
+                    scope=scope,
+                ),
+                TerminalUpdate(
+                    "ambiguous",
+                    2.0,
+                    call_id="CALL_AMBIGUOUS",
+                    terminal_candidate=True,
+                ),
+                TerminalUpdate("unresolved", 3.0, terminal_candidate=True),
+            ),
+        )
+
+        summaries = {item.terminal_id: item for item in store.summaries("session")}
+        association = store.association_summary("session")
+
+        self.assertEqual(summaries["CALL_CONFIRMED"].association_status, "confirmed")
+        self.assertEqual(
+            summaries["CALL_CONFIRMED"].correlation_source,
+            "rollout_scoped_call_id",
+        )
+        self.assertEqual(summaries["CALL_AMBIGUOUS"].association_status, "ambiguous")
+        self.assertEqual(summaries["unresolved"].association_status, "unresolved")
+        self.assertEqual(association.eligible_operations, 3)
+        self.assertEqual(association.associated_operations, 2)
+        self.assertAlmostEqual(association.association_coverage, 2 / 3)
+        self.assertAlmostEqual(association.unresolved_rate, 1 / 3)
+        self.assertIsNone(association.precision)
+
+    def test_conflicting_process_and_call_identity_drops_update_fail_closed(self) -> None:
+        store = TerminalStore()
+        scope = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10)
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "process",
+                    1.0,
+                    process_id="PROCESS_ID",
+                    terminal_candidate=True,
+                    scope=scope,
+                ),
+                TerminalUpdate(
+                    "call",
+                    2.0,
+                    call_id="CALL_ID",
+                    terminal_candidate=True,
+                    scope=scope,
+                ),
+            ),
+        )
+        store.apply(
+            "session",
+            (
+                TerminalUpdate(
+                    "conflict",
+                    3.0,
+                    process_id="PROCESS_ID",
+                    call_id="CALL_ID",
+                    output="CONFLICT_TRANSCRIPT_SENTINEL",
+                    terminal_candidate=True,
+                    scope=scope,
+                ),
+            ),
+        )
+
+        association = store.association_summary("session")
+        retained = "".join(
+            chunk.text for summary in store.summaries("session") for chunk in summary.chunks
+        )
+        self.assertNotIn("CONFLICT_TRANSCRIPT_SENTINEL", retained)
+        self.assertEqual(association.conflicting, 1)
+        self.assertEqual(association.dropped, 1)
+        self.assertIn(("process_call_identity_conflict", 1), association.reasons)
+
+    def test_labeled_association_metrics_only_compute_precision_with_ground_truth(self) -> None:
+        store = TerminalStore()
+        store.apply(
+            "session",
+            (TerminalUpdate("source", 1.0, process_id="PROCESS_ID", terminal_candidate=True),),
+        )
+
+        unlabeled = store.association_summary("session")
+        labeled = store.association_summary("session", labeled_correct=3, labeled_incorrect=1)
+
+        self.assertIsNone(unlabeled.precision)
+        self.assertEqual(labeled.precision, 0.75)
+
+    def test_terminal_association_isolated_across_home_and_workspace_sessions(self) -> None:
+        session_a = SessionIdentity(
+            InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A")),
+            "SESSION_ID",
+        )
+        session_b = SessionIdentity(
+            InstanceIdentity(Path("/CODEX_HOME_B"), Path("/SQLITE_HOME_B")),
+            "SESSION_ID",
+        )
+        scope_a = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10)
+        scope_b = RolloutIdentity(Path("/workspace-b/rollout.jsonl"), 1, 10)
+        store = TerminalStore()
+
+        for session, scope, output in (
+            (session_a, scope_a, "workspace-a\n"),
+            (session_b, scope_b, "workspace-b\n"),
+        ):
+            store.apply(
+                session,
+                (
+                    TerminalUpdate(
+                        "SAME_SOURCE",
+                        1.0,
+                        call_id="SAME_CALL",
+                        process_id="SAME_PROCESS",
+                        output=output,
+                        terminal_candidate=True,
+                        scope=scope,
+                    ),
+                ),
+            )
+
+        transcript_a = "".join(chunk.text for chunk in store.summaries(session_a)[0].chunks)
+        transcript_b = "".join(chunk.text for chunk in store.summaries(session_b)[0].chunks)
+        self.assertEqual(transcript_a, "workspace-a\n")
+        self.assertEqual(transcript_b, "workspace-b\n")
+        self.assertEqual(store.association_summary(session_a).confirmed, 1)
+        self.assertEqual(store.association_summary(session_b).confirmed, 1)
+
     def test_store_scopes_reused_call_and_process_ids_by_rollout(self) -> None:
         session = SessionIdentity(
             InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A")),
@@ -93,7 +337,13 @@ class TerminalTranscriptTests(unittest.TestCase):
             second = reader.read_with_activity(path)
 
         self.assertTrue(second.activity.truncated or second.activity.copy_truncated)
+        self.assertEqual(second.activity.generation, 1)
+        self.assertTrue(second.activity.stream_uncertain)
         self.assertEqual(second.terminal_updates[0].command, "")
+        self.assertNotEqual(
+            first.terminal_updates[0].source_id,
+            second.terminal_updates[0].source_id,
+        )
         self.assertNotEqual(
             first.terminal_updates[0].scope,
             second.terminal_updates[0].scope,
@@ -148,9 +398,7 @@ class TerminalTranscriptTests(unittest.TestCase):
                         "type": "function_call",
                         "call_id": "call-start",
                         "name": "exec_command",
-                        "arguments": json.dumps(
-                            {"cmd": "make watch", "workdir": "/workspace-a"}
-                        ),
+                        "arguments": json.dumps({"cmd": "make watch", "workdir": "/workspace-a"}),
                     },
                 },
                 {
@@ -213,7 +461,7 @@ class TerminalTranscriptTests(unittest.TestCase):
                     "call_id": "call-start",
                     "name": "exec",
                     "input": (
-                        'const result = await tools.exec_command('
+                        "const result = await tools.exec_command("
                         '{"cmd":"npm run dev","workdir":"/workspace-a"});'
                     ),
                 },
@@ -245,8 +493,7 @@ class TerminalTranscriptTests(unittest.TestCase):
                     "call_id": "call-poll",
                     "name": "exec",
                     "input": (
-                        'const result = await tools.write_stdin('
-                        '{"session_id":777,"chars":""});'
+                        'const result = await tools.write_stdin({"session_id":777,"chars":""});'
                     ),
                 },
             },
@@ -293,7 +540,7 @@ class TerminalTranscriptTests(unittest.TestCase):
                     "call_id": "call-source",
                     "name": "exec",
                     "input": (
-                        'const result = await tools.exec_command('
+                        "const result = await tools.exec_command("
                         '{"cmd":"sed -n 1,80p tests/test_terminal.py"});'
                     ),
                 },
@@ -583,6 +830,8 @@ const results = await Promise.all([
             [call_id for _scope, call_id in parser.pending_batches],
             ["call-1", "call-2"],
         )
+        self.assertEqual(parser.pending_batch_evictions, 1)
+        self.assertEqual(parser.pending_batch_eviction_reason, "pending_batch_limit")
 
     def test_wrapper_output_fragments_keep_explicit_session_with_single_call(self) -> None:
         parser = TerminalProtocolParser()
@@ -700,8 +949,7 @@ const results = await Promise.all([
                         "call_id": "call-start",
                         "name": "exec",
                         "input": (
-                            'await tools.exec_command({cmd:"npm run dev", '
-                            'workdir:"/workspace-a"});'
+                            'await tools.exec_command({cmd:"npm run dev", workdir:"/workspace-a"});'
                         ),
                     },
                 },
@@ -735,7 +983,7 @@ const results = await Promise.all([
                             "type": "custom_tool_call",
                             "call_id": "call-poll",
                             "name": "exec",
-                            "input": "await tools.write_stdin({session_id:321, chars:\"\"});",
+                            "input": 'await tools.write_stdin({session_id:321, chars:""});',
                         },
                     },
                     {
@@ -888,10 +1136,67 @@ const results = await Promise.all([
                 process_call_ids={"321": set()},
             )
 
-            updates, _finished = RolloutReader._terminal_metadata_backfill_step(path, state)
+            updates, _finished = RolloutReader()._terminal_metadata_backfill_step(
+                path,
+                state,
+                512 * 1024,
+            )
 
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0].process_id, "321")
+
+    def test_metadata_backfill_private_identity_state_is_bounded_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text("{}\n")
+            stat = path.stat()
+            reader = RolloutReader()
+            reader.bootstrap_truncated.add(str(path))
+            updates = tuple(
+                TerminalUpdate(
+                    f"source-{index}",
+                    float(index),
+                    process_id=f"PROCESS_{index}",
+                    terminal_candidate=True,
+                    scope=RolloutIdentity(path, stat.st_dev, stat.st_ino, 0),
+                )
+                for index in range(6)
+            )
+
+            with patch("codex.rollout.MAX_TERMINAL_METADATA_PROCESS_IDS", 2):
+                reader._advance_terminal_metadata_backfill(
+                    path,
+                    stat.st_size,
+                    updates,
+                    inode=stat.st_ino,
+                    generation=0,
+                    allow=False,
+                    max_bytes=0,
+                )
+                state = reader.terminal_metadata_backfills[str(path)]
+                first_dropped = reader.terminal_metadata_dropped[str(path)]
+                reader._advance_terminal_metadata_backfill(
+                    path,
+                    stat.st_size,
+                    (
+                        TerminalUpdate(
+                            "later-source",
+                            10.0,
+                            process_id="LATER_PROCESS",
+                            terminal_candidate=True,
+                            scope=RolloutIdentity(path, stat.st_dev, stat.st_ino, 0),
+                        ),
+                    ),
+                    inode=stat.st_ino,
+                    generation=0,
+                    allow=False,
+                    max_bytes=0,
+                )
+
+            self.assertEqual(len(state.process_ids), 2)
+            self.assertIn(str(path), reader.terminal_metadata_saturated)
+            self.assertGreaterEqual(first_dropped, 4)
+            self.assertGreater(reader.terminal_metadata_dropped[str(path)], first_dropped)
 
     def test_later_unknown_process_can_start_backfill_after_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -916,8 +1221,7 @@ const results = await Promise.all([
                         "type": "function_call_output",
                         "call_id": "call-start",
                         "output": (
-                            "Script running with cell ID 321\n"
-                            "Wall time 1 seconds\nOutput:\nready\n"
+                            "Script running with cell ID 321\nWall time 1 seconds\nOutput:\nready\n"
                         ),
                     },
                 },
@@ -986,8 +1290,7 @@ const results = await Promise.all([
                     "type": "function_call_output",
                     "call_id": "call-start",
                     "output": (
-                        "Script running with cell ID 321\n"
-                        "Wall time 1 seconds\nOutput:\nready\n"
+                        "Script running with cell ID 321\nWall time 1 seconds\nOutput:\nready\n"
                     ),
                 },
             },
@@ -1058,9 +1361,7 @@ const results = await Promise.all([
             state="S",
         )
 
-        self.assertFalse(
-            store.reconcile_children("session", (python_child, npm_child), 3.0)
-        )
+        self.assertFalse(store.reconcile_children("session", (python_child, npm_child), 3.0))
         matched = {item.process_id: item for item in store.summaries("session")}
         self.assertTrue(matched["cell-python"].process_active)
         self.assertTrue(matched["cell-npm"].process_active)
@@ -1123,9 +1424,7 @@ const results = await Promise.all([
         unrelated_child = ChildProcessActivity(
             ProcessIdentity(99, 1), command="mcp-server", state="S"
         )
-        self.assertFalse(
-            unrelated_store.reconcile_children("session", (unrelated_child,), 2.0)
-        )
+        self.assertFalse(unrelated_store.reconcile_children("session", (unrelated_child,), 2.0))
         self.assertFalse(unrelated_store.summaries("session")[0].process_active)
 
         unconfirmed_store = TerminalStore()
@@ -1283,7 +1582,9 @@ const results = await Promise.all([
                 "sleep 600",
             },
         )
-        self.assertTrue(all(item.capability == TerminalCapability.METADATA_ONLY for item in current))
+        self.assertTrue(
+            all(item.capability == TerminalCapability.METADATA_ONLY for item in current)
+        )
         self.assertTrue(all(item.source == "process" for item in current))
         self.assertTrue(all(item.cwd == "/workspace" for item in current))
 
@@ -1319,12 +1620,12 @@ const results = await Promise.all([
 
     def test_process_reconciliation_matches_expanded_shell_c_script(self) -> None:
         command = (
-            "sh -c 'printf \"codexdeck-live-probe-start\\n\"; sleep 90; "
-            "printf \"codexdeck-live-probe-end\\n\"'"
+            'sh -c \'printf "codexdeck-live-probe-start\\n"; sleep 90; '
+            'printf "codexdeck-live-probe-end\\n"\''
         )
         child_command = (
-            "/sandbox -- /bin/bash -c sh -c printf \"codexdeck-live-probe-start\\n\"; "
-            "sleep 90; printf \"codexdeck-live-probe-end\\n\""
+            '/sandbox -- /bin/bash -c sh -c printf "codexdeck-live-probe-start\\n"; '
+            'sleep 90; printf "codexdeck-live-probe-end\\n"'
         )
 
         self.assertTrue(TerminalStore._command_matches_child(command, child_command))
@@ -1831,9 +2132,7 @@ const results = await Promise.all([
         self.assertNotIn("metadata-2", terminal_ids)
 
     def test_terminal_control_sequences_are_not_replayed(self) -> None:
-        text = sanitize_terminal_text(
-            "start\x1b[2J\x1b]52;c;SECRET\x07\x1b[31mred\x1b[0m\rnext"
-        )
+        text = sanitize_terminal_text("start\x1b[2J\x1b]52;c;SECRET\x07\x1b[31mred\x1b[0m\rnext")
 
         self.assertEqual(text, "startred\nnext")
 
@@ -1848,9 +2147,7 @@ const results = await Promise.all([
             fd_dir.mkdir(parents=True)
             (fd_dir / "1").symlink_to(log)
             (fd_dir / "2").symlink_to("pipe:[123]")
-            child = ChildProcessActivity(
-                ProcessIdentity(42, 7), command="server", state="S"
-            )
+            child = ChildProcessActivity(ProcessIdentity(42, 7), command="server", state="S")
             collector = RegularFileTailCollector(root / "proc")
 
             first = collector.read("session", str(workspace), (child,), 1.0)
@@ -1925,6 +2222,135 @@ const results = await Promise.all([
             "".join(update.output for batch in updates for update in batch),
             "好",
         )
+
+    def test_regular_file_tail_discards_descriptor_reuse_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace-a"
+            workspace.mkdir()
+            allowed = workspace / "allowed.log"
+            replacement = workspace / "replacement.log"
+            allowed.write_text("allowed\n")
+            replacement.write_text("replacement\n")
+            descriptor = root / "proc" / "42" / "fd" / "1"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.symlink_to(allowed)
+            child = ChildProcessActivity(ProcessIdentity(42, 7), command="server")
+            collector = RegularFileTailCollector(root / "proc")
+            original_open = Path.open
+
+            def replace_before_open(path: Path, *args: object, **kwargs: object):
+                if path == descriptor:
+                    path.unlink()
+                    path.symlink_to(replacement)
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", replace_before_open):
+                updates = collector.read("session", str(workspace), (child,), 1.0)
+
+        self.assertEqual(updates, ())
+        self.assertEqual(collector.cursors, {})
+        self.assertEqual(len(collector.diagnostics), 1)
+        self.assertEqual(collector.diagnostics[0].reason, "opened_identity_mismatch")
+        self.assertEqual(collector.diagnostics[0].fds, (1,))
+
+    def test_regular_file_tail_scopes_cursor_to_process_start_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace-a"
+            workspace.mkdir()
+            log = workspace / "server.log"
+            log.write_text("first\n")
+            descriptor = root / "proc" / "42" / "fd" / "1"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.symlink_to(log)
+            collector = RegularFileTailCollector(root / "proc")
+
+            first = collector.read(
+                "session",
+                str(workspace),
+                (ChildProcessActivity(ProcessIdentity(42, 7), command="server"),),
+                1.0,
+            )
+            log.write_text("second\n")
+            second = collector.read(
+                "session",
+                str(workspace),
+                (ChildProcessActivity(ProcessIdentity(42, 8), command="server"),),
+                2.0,
+            )
+
+        first_processes = {update.process_id for update in first}
+        second_processes = {update.process_id for update in second}
+        self.assertEqual(first_processes, {"os:42:7"})
+        self.assertIn("os:42:8", second_processes)
+        self.assertIn("os:42:7", second_processes)
+        self.assertEqual(
+            "".join(update.output for update in second if update.process_id == "os:42:8"),
+            "second\n",
+        )
+
+    def test_regular_file_tail_inode_change_opens_a_new_terminal_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace-a"
+            workspace.mkdir()
+            log = workspace / "server.log"
+            log.write_text("first\n")
+            descriptor = root / "proc" / "42" / "fd" / "1"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.symlink_to(log)
+            child = ChildProcessActivity(ProcessIdentity(42, 7), command="server")
+            collector = RegularFileTailCollector(root / "proc")
+            store = TerminalStore()
+
+            store.apply("session", collector.read("session", str(workspace), (child,), 1.0))
+            replacement = workspace / "replacement.log"
+            replacement.write_text("second\n")
+            replacement.replace(log)
+            store.apply("session", collector.read("session", str(workspace), (child,), 2.0))
+
+        summaries = store.summaries("session")
+        self.assertEqual(len(summaries), 2)
+        transcript_sets = [{chunk.text for chunk in item.chunks} for item in summaries]
+        self.assertIn({"first\n"}, transcript_sets)
+        self.assertIn({"second\n"}, transcript_sets)
+
+    def test_regular_file_tail_proc_disappearance_does_not_publish_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace-a"
+            workspace.mkdir()
+            log = workspace / "server.log"
+            log.write_text("first\n")
+            descriptor = root / "proc" / "42" / "fd" / "1"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.symlink_to(log)
+            child = ChildProcessActivity(ProcessIdentity(42, 7), command="server")
+            collector = RegularFileTailCollector(root / "proc")
+            collector.read("session", str(workspace), (child,), 1.0)
+            descriptor.unlink()
+
+            updates = collector.read("session", str(workspace), (child,), 2.0)
+
+        self.assertEqual(updates, ())
+        self.assertIn("descriptor_unavailable", {item.reason for item in collector.diagnostics})
+        self.assertTrue(collector.cursors)
+
+    def test_regular_file_tail_diagnostics_are_bounded(self) -> None:
+        collector = RegularFileTailCollector()
+        for index in range(100):
+            collector._diagnose(
+                "session",
+                float(index),
+                42,
+                7,
+                {1},
+                "opened_identity_mismatch",
+            )
+
+        self.assertEqual(len(collector.diagnostics), 64)
+        self.assertEqual(collector.diagnostics[0].observed_at, 36.0)
 
 
 if __name__ == "__main__":

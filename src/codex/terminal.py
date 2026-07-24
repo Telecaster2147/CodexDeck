@@ -11,7 +11,7 @@ import stat
 from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Mapping
 
 from models import (
     RUNNING_TERMINAL_STATUSES,
@@ -20,6 +20,7 @@ from models import (
     TerminalCapability,
     TerminalChunk,
     TerminalIdentity,
+    TerminalAssociationSummary,
     TerminalSessionSummary,
 )
 from utils import redact_sensitive
@@ -29,8 +30,12 @@ MAX_TERMINAL_BYTES = 2 * 1024 * 1024
 MAX_TERMINAL_CHUNKS = 4_000
 MAX_TERMINALS_PER_SESSION = 16
 MAX_GLOBAL_TERMINAL_BYTES = 16 * 1024 * 1024
+MAX_TERMINAL_DEDUPE_SCOPES_PER_SESSION = 32
+MAX_TERMINAL_SOURCE_IDS_PER_SCOPE = 8_192
+MAX_TERMINAL_ALIASES_PER_TERMINAL = 64
 TERMINAL_OS_MISS_WINDOWS = 2
 TERMINAL_OS_FALLBACK_MIN_AGE_SECONDS = 10.0
+MAX_FILE_TAIL_DIAGNOSTICS = 64
 
 _OSC = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.DOTALL)
 _STRING_ESCAPE = re.compile(r"\x1b[PX^_].*?\x1b\\", re.DOTALL)
@@ -224,9 +229,7 @@ def _nested_tool_calls(value: object) -> list[_NestedToolCall]:
         arguments_start = call_start + 1
         object_end = _js_object_end(value, arguments_start)
         try:
-            parsed, consumed = json.JSONDecoder().raw_decode(
-                value[arguments_start:object_end]
-            )
+            parsed, consumed = json.JSONDecoder().raw_decode(value[arguments_start:object_end])
         except (json.JSONDecodeError, TypeError):
             parsed = _js_terminal_arguments(value, arguments_start, object_end)
         else:
@@ -262,11 +265,7 @@ def _arguments(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
 
 def _tool_name(payload: dict[str, Any], item: dict[str, Any], item_type: str) -> str:
     explicit = str(
-        payload.get("name")
-        or payload.get("tool")
-        or item.get("name")
-        or item.get("tool")
-        or ""
+        payload.get("name") or payload.get("tool") or item.get("name") or item.get("tool") or ""
     ).strip()
     if explicit:
         return explicit
@@ -312,10 +311,7 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
 
     if isinstance(value, dict):
         process_id = _process_id(
-            value.get("process_id")
-            or value.get("session_id")
-            or value.get("cell_id")
-            or ""
+            value.get("process_id") or value.get("session_id") or value.get("cell_id") or ""
         )
         exit_code = value.get("exit_code")
         text = _content_text(
@@ -331,7 +327,8 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
             stream,
             process_id,
             int(exit_code) if isinstance(exit_code, (int, float)) else None,
-            bool(value.get("truncated") or value.get("omitted_bytes")) or bool(_TRUNCATED.search(text)),
+            bool(value.get("truncated") or value.get("omitted_bytes"))
+            or bool(_TRUNCATED.search(text)),
         )
     text = sanitize_terminal_text(_content_text(value))
     explicit_processes = list(_EXPLICIT_PROCESS_ID.finditer(text))
@@ -361,9 +358,8 @@ def _output_fields(value: object) -> tuple[str, str, str, int | None, bool]:
     if script_result:
         text = script_result.group("output")
         nested_result = _mapping(text)
-        if (
-            "wall_time_seconds" in nested_result
-            and ("session_id" in nested_result or "exit_code" in nested_result)
+        if "wall_time_seconds" in nested_result and (
+            "session_id" in nested_result or "exit_code" in nested_result
         ):
             return _output_fields(nested_result)
         running = _BACKGROUND_RUNNING.match(text)
@@ -530,13 +526,13 @@ class TerminalProtocolParser:
 
     def __init__(self, max_pending_batches: int = 4_096) -> None:
         self.max_pending_batches = max_pending_batches
-        self.pending_batches: OrderedDict[
-            tuple[str | RolloutIdentity, str], _ToolCallBatch
-        ] = OrderedDict()
+        self.pending_batch_evictions = 0
+        self.pending_batch_eviction_reason = ""
+        self.pending_batches: OrderedDict[tuple[str | RolloutIdentity, str], _ToolCallBatch] = (
+            OrderedDict()
+        )
 
-    def _remember(
-        self, scope: str | RolloutIdentity, batch: _ToolCallBatch
-    ) -> None:
+    def _remember(self, scope: str | RolloutIdentity, batch: _ToolCallBatch) -> None:
         if not batch.outer_call_id:
             return
         key = (scope, batch.outer_call_id)
@@ -544,6 +540,8 @@ class TerminalProtocolParser:
         self.pending_batches.move_to_end(key)
         while len(self.pending_batches) > self.max_pending_batches:
             self.pending_batches.popitem(last=False)
+            self.pending_batch_evictions += 1
+            self.pending_batch_eviction_reason = "pending_batch_limit"
 
     @staticmethod
     def _combine_fragments(fragments: list[object]) -> object:
@@ -563,10 +561,7 @@ class TerminalProtocolParser:
         if len(results) == len(calls) and all(
             _mapping(result) or _command_result(result) for result in results
         ):
-            return [
-                (ordinal, calls[ordinal], result)
-                for ordinal, result in enumerate(results)
-            ]
+            return [(ordinal, calls[ordinal], result) for ordinal, result in enumerate(results)]
 
         groups: list[object] = []
         pending: list[object] = []
@@ -585,10 +580,7 @@ class TerminalProtocolParser:
         if pending:
             groups.append(cls._combine_fragments(pending))
         if len(groups) == len(calls):
-            return [
-                (ordinal, calls[ordinal], result)
-                for ordinal, result in enumerate(groups)
-            ]
+            return [(ordinal, calls[ordinal], result) for ordinal, result in enumerate(groups)]
 
         return [
             (ordinal, calls[ordinal], result)
@@ -715,9 +707,7 @@ class TerminalProtocolParser:
             if pending_batch is not None:
                 selected = [
                     (ordinal, call, result)
-                    for ordinal, call, result in self._result_slots(
-                        pending_batch.calls, results
-                    )
+                    for ordinal, call, result in self._result_slots(pending_batch.calls, results)
                     if call.tool_name.lower() in _TERMINAL_TOOLS
                 ]
                 total = len(pending_batch.calls)
@@ -767,11 +757,7 @@ def _extract_direct_terminal_updates(
         item_type = str(item.get("type") or "")
 
     call_id = str(
-        payload.get("call_id")
-        or payload.get("id")
-        or item.get("call_id")
-        or item.get("id")
-        or ""
+        payload.get("call_id") or payload.get("id") or item.get("call_id") or item.get("id") or ""
     )
     turn_id = str(payload.get("turn_id") or item.get("turn_id") or "")
     process_id = _process_id(payload.get("process_id") or item.get("process_id") or "")
@@ -802,10 +788,7 @@ def _extract_direct_terminal_updates(
     )
 
     output_value = (
-        payload.get("output")
-        or payload.get("result")
-        or item.get("output")
-        or item.get("result")
+        payload.get("output") or payload.get("result") or item.get("output") or item.get("result")
     )
     direct_end = item_type in {"exec_command_end", "command_execution"}
     if direct_end:
@@ -891,10 +874,7 @@ def _extract_direct_terminal_updates(
                     else TerminalCapability.FINAL_TRANSCRIPT
                 ),
                 terminal_candidate=bool(
-                    tool_name in _TERMINAL_TOOLS
-                    or process_id
-                    or command
-                    or direct_end
+                    tool_name in _TERMINAL_TOOLS or process_id or command or direct_end
                 ),
                 cumulative=direct_end,
                 upstream_truncated=truncated,
@@ -983,6 +963,9 @@ class _TerminalSession:
     chunks: deque[TerminalChunk] = field(default_factory=deque)
     retained_bytes: int = 0
     identity: TerminalIdentity | None = None
+    association_status: str = "unresolved"
+    correlation_source: str = ""
+    association_reason: str = "missing_correlation_identity"
 
     def append(self, update: TerminalUpdate, sequence: int) -> None:
         text = update.output
@@ -1011,8 +994,7 @@ class _TerminalSession:
         self.retained_bytes += len(encoded)
         self.last_output_at = update.observed_at
         while self.chunks and (
-            len(self.chunks) > MAX_TERMINAL_CHUNKS
-            or self.retained_bytes > MAX_TERMINAL_BYTES
+            len(self.chunks) > MAX_TERMINAL_CHUNKS or self.retained_bytes > MAX_TERMINAL_BYTES
         ):
             removed = self.chunks.popleft()
             size = len(removed.text.encode("utf-8", errors="replace"))
@@ -1049,6 +1031,9 @@ class _TerminalSession:
             stale=self.stale,
             process_active=self.process_active,
             source=self.source,
+            association_status=self.association_status,
+            correlation_source=self.correlation_source,
+            association_reason=self.association_reason,
             chunks=chunks,
             identity=self.identity,
         )
@@ -1059,21 +1044,33 @@ class TerminalStore:
 
     def __init__(self) -> None:
         self.sessions: dict[str | SessionIdentity, dict[str, _TerminalSession]] = defaultdict(dict)
-        self.call_ids: dict[
-            str | SessionIdentity, dict[tuple[str | RolloutIdentity, str], str]
-        ] = defaultdict(dict)
+        self.association_conflicts: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.association_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.call_ids: dict[str | SessionIdentity, dict[tuple[str | RolloutIdentity, str], str]] = (
+            defaultdict(dict)
+        )
         self.process_ids: dict[
             str | SessionIdentity, dict[tuple[str | RolloutIdentity, str], str]
         ] = defaultdict(dict)
         self.continuation_call_ids: dict[
             str | SessionIdentity, set[tuple[str | RolloutIdentity, str]]
         ] = defaultdict(set)
-        self.wait_call_ids: dict[
-            str | SessionIdentity, set[tuple[str | RolloutIdentity, str]]
-        ] = defaultdict(set)
+        self.wait_call_ids: dict[str | SessionIdentity, set[tuple[str | RolloutIdentity, str]]] = (
+            defaultdict(set)
+        )
         self.seen_sources: dict[
-            str | SessionIdentity, set[tuple[str | RolloutIdentity, str]]
-        ] = defaultdict(set)
+            str | SessionIdentity,
+            OrderedDict[str | RolloutIdentity, OrderedDict[str, None]],
+        ] = defaultdict(OrderedDict)
+        self.saturated_source_scopes: dict[str | SessionIdentity, set[str | RolloutIdentity]] = (
+            defaultdict(set)
+        )
+        self.private_state_evictions: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.private_state_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.private_state_recoveries: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.private_state_reasons: dict[str | SessionIdentity, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
         self.invocations: dict[str | SessionIdentity, int] = defaultdict(int)
         self.sequence = 0
 
@@ -1093,6 +1090,94 @@ class TerminalStore:
             TerminalCapability.STREAMING: 4,
         }[capability]
 
+    def _record_private_degradation(
+        self,
+        session_key: str | SessionIdentity,
+        reason: str,
+        *,
+        dropped: bool = False,
+        eviction: bool = False,
+    ) -> None:
+        self.private_state_reasons[session_key][reason] += 1
+        if dropped:
+            self.private_state_dropped[session_key] += 1
+            self.association_dropped[session_key] += 1
+        if eviction:
+            self.private_state_evictions[session_key] += 1
+
+    def _accept_source(
+        self,
+        session_key: str | SessionIdentity,
+        scope: str | RolloutIdentity,
+        source_id: str,
+    ) -> bool:
+        scopes = self.seen_sources[session_key]
+        sources = scopes.get(scope)
+        if sources is None:
+            if len(scopes) >= MAX_TERMINAL_DEDUPE_SCOPES_PER_SESSION:
+                self._record_private_degradation(
+                    session_key,
+                    "dedupe_scope_limit",
+                    dropped=True,
+                    eviction=True,
+                )
+                return False
+            sources = OrderedDict()
+            scopes[scope] = sources
+        scopes.move_to_end(scope)
+        if source_id in sources:
+            return False
+        if scope in self.saturated_source_scopes[session_key]:
+            self._record_private_degradation(
+                session_key,
+                "dedupe_scope_saturated",
+                dropped=True,
+            )
+            return False
+        if len(sources) >= MAX_TERMINAL_SOURCE_IDS_PER_SCOPE:
+            self.saturated_source_scopes[session_key].add(scope)
+            self._record_private_degradation(
+                session_key,
+                "dedupe_source_limit",
+                dropped=True,
+                eviction=True,
+            )
+            return False
+        return True
+
+    def _remember_source(
+        self,
+        session_key: str | SessionIdentity,
+        scope: str | RolloutIdentity,
+        source_id: str,
+    ) -> None:
+        sources = self.seen_sources[session_key].get(scope)
+        if sources is not None:
+            sources[source_id] = None
+
+    def _set_correlation(
+        self,
+        session_key: str | SessionIdentity,
+        mapping: dict[tuple[str | RolloutIdentity, str], str],
+        key: tuple[str | RolloutIdentity, str],
+        terminal_id: str,
+        reason: str,
+    ) -> bool:
+        if key in mapping:
+            mapping[key] = terminal_id
+            return True
+        aliases = sum(value == terminal_id for value in mapping.values())
+        if aliases >= MAX_TERMINAL_ALIASES_PER_TERMINAL:
+            self._record_private_degradation(
+                session_key,
+                reason,
+                dropped=True,
+                eviction=True,
+            )
+            return False
+        mapping[key] = terminal_id
+        return True
+
     def apply(
         self,
         session_key: str | SessionIdentity,
@@ -1100,26 +1185,28 @@ class TerminalStore:
     ) -> bool:
         changed = False
         for update in updates:
-            source_key = self._correlation_key(update.scope, update.source_id)
-            if source_key in self.seen_sources[session_key]:
+            dropped_before = self.private_state_dropped.get(session_key, 0)
+            if not self._accept_source(session_key, update.scope, update.source_id):
+                changed |= self.private_state_dropped.get(session_key, 0) > dropped_before
                 continue
-            if update.continuation and update.call_id:
-                self.continuation_call_ids[session_key].add(
-                    self._correlation_key(update.scope, update.call_id)
-                )
-            if update.wait_for_completion and update.call_id:
-                self.wait_call_ids[session_key].add(
-                    self._correlation_key(update.scope, update.call_id)
-                )
             terminal_id = ""
+            process_terminal = ""
+            call_terminal = ""
             if update.process_id:
-                terminal_id = self.process_ids[session_key].get(
+                process_terminal = self.process_ids[session_key].get(
                     self._correlation_key(update.scope, update.process_id), ""
                 )
-            if not terminal_id and update.call_id:
-                terminal_id = self.call_ids[session_key].get(
+            if update.call_id:
+                call_terminal = self.call_ids[session_key].get(
                     self._correlation_key(update.scope, update.call_id), ""
                 )
+            if process_terminal and call_terminal and process_terminal != call_terminal:
+                self.association_conflicts[session_key] += 1
+                self.association_dropped[session_key] += 1
+                self._remember_source(session_key, update.scope, update.source_id)
+                changed = True
+                continue
+            terminal_id = process_terminal or call_terminal
             if not terminal_id and not update.terminal_candidate:
                 continue
             if not terminal_id:
@@ -1128,6 +1215,9 @@ class TerminalStore:
                 terminal_id = base_terminal_id
                 if terminal_id in self.sessions[session_key]:
                     terminal_id = f"{base_terminal_id}:{self.invocations[session_key]}"
+                association_status, correlation_source, association_reason = self._association_for(
+                    update
+                )
                 self.sessions[session_key][terminal_id] = _TerminalSession(
                     terminal_id=terminal_id,
                     root_call_id=update.call_id,
@@ -1150,16 +1240,45 @@ class TerminalStore:
                         if isinstance(session_key, SessionIdentity)
                         else None
                     ),
+                    association_status=association_status,
+                    correlation_source=correlation_source,
+                    association_reason=association_reason,
                 )
             terminal = self.sessions[session_key][terminal_id]
+            association_status, correlation_source, association_reason = self._association_for(
+                update
+            )
+            association_rank = {
+                "unresolved": 0,
+                "ambiguous": 1,
+                "confirmed": 2,
+                "conflicting": 3,
+            }
+            if association_rank[association_status] > association_rank[terminal.association_status]:
+                terminal.association_status = association_status
+                terminal.correlation_source = correlation_source
+                terminal.association_reason = association_reason
             if update.call_id:
-                self.call_ids[session_key][
-                    self._correlation_key(update.scope, update.call_id)
-                ] = terminal_id
+                call_key = self._correlation_key(update.scope, update.call_id)
+                call_remembered = self._set_correlation(
+                    session_key,
+                    self.call_ids[session_key],
+                    call_key,
+                    terminal_id,
+                    "call_alias_limit",
+                )
+                if call_remembered and update.continuation:
+                    self.continuation_call_ids[session_key].add(call_key)
+                if call_remembered and update.wait_for_completion:
+                    self.wait_call_ids[session_key].add(call_key)
             if update.process_id:
-                self.process_ids[session_key][
-                    self._correlation_key(update.scope, update.process_id)
-                ] = terminal_id
+                self._set_correlation(
+                    session_key,
+                    self.process_ids[session_key],
+                    self._correlation_key(update.scope, update.process_id),
+                    terminal_id,
+                    "process_alias_limit",
+                )
                 terminal.process_id = terminal.process_id or update.process_id
             terminal.root_call_id = terminal.root_call_id or update.call_id
             terminal.turn_id = terminal.turn_id or update.turn_id
@@ -1190,18 +1309,123 @@ class TerminalStore:
                 if terminal.status in {"completed", "failed", "declined", "error", "errored"}:
                     terminal.completed_at = update.observed_at
                     terminal.process_active = False
-                elif (
-                    terminal.status in RUNNING_TERMINAL_STATUSES
-                    and update.source == "file-tail"
-                ):
+                elif terminal.status in RUNNING_TERMINAL_STATUSES and update.source == "file-tail":
                     terminal.process_active = True
             self.sequence += 1
             terminal.append(update, self.sequence)
-            self.seen_sources[session_key].add(source_key)
+            self._remember_source(session_key, update.scope, update.source_id)
             changed = True
         self._trim_sessions(session_key)
+        self._prune_indices(session_key)
         self._trim_global()
         return changed
+
+    @staticmethod
+    def _association_for(update: TerminalUpdate) -> tuple[str, str, str]:
+        if update.source == "file-tail" and update.process_id and update.scope:
+            return "confirmed", "file_identity", "pid_start_device_inode"
+        if update.source == "process" and update.process_id:
+            return "confirmed", "os_metadata", "pid_and_kernel_start_time"
+        if update.process_id:
+            return "confirmed", "process_id", "protocol_process_id"
+        if update.call_id and update.scope:
+            return "confirmed", "rollout_scoped_call_id", "call_id_with_rollout_generation"
+        if update.call_id:
+            return "ambiguous", "call_id", "call_id_without_rollout_generation"
+        return "unresolved", "invocation", "missing_process_and_call_id"
+
+    def association_summary(
+        self,
+        session_key: str | SessionIdentity,
+        *,
+        labeled_correct: int = 0,
+        labeled_incorrect: int = 0,
+    ) -> TerminalAssociationSummary:
+        terminals = tuple(self.sessions.get(session_key, {}).values())
+        counts = {
+            status: sum(item.association_status == status for item in terminals)
+            for status in ("confirmed", "ambiguous", "conflicting", "unresolved")
+        }
+        conflict_count = self.association_conflicts.get(session_key, 0)
+        dropped = self.association_dropped.get(session_key, 0)
+        counts["conflicting"] += conflict_count
+        reasons: dict[str, int] = defaultdict(int)
+        for item in terminals:
+            reasons[item.association_reason] += 1
+        if conflict_count:
+            reasons["process_call_identity_conflict"] += conflict_count
+        eligible = len(terminals) + conflict_count
+        associated = counts["confirmed"] + counts["ambiguous"]
+        labeled = labeled_correct + labeled_incorrect
+        private_state = self.private_state_summary(session_key)
+        return TerminalAssociationSummary(
+            eligible_operations=eligible,
+            associated_operations=associated,
+            confirmed=counts["confirmed"],
+            ambiguous=counts["ambiguous"],
+            conflicting=counts["conflicting"],
+            unresolved=counts["unresolved"],
+            dropped=dropped,
+            reasons=tuple(sorted(reasons.items())),
+            labeled_correct=labeled_correct,
+            labeled_incorrect=labeled_incorrect,
+            association_coverage=associated / eligible if eligible else None,
+            unresolved_rate=(counts["unresolved"] + counts["conflicting"]) / eligible
+            if eligible
+            else None,
+            precision=labeled_correct / labeled if labeled else None,
+            private_state_entries=private_state["entries"],
+            private_state_estimated_bytes=private_state["estimated_bytes"],
+            private_state_evictions=self.private_state_evictions.get(session_key, 0),
+            private_state_dropped=self.private_state_dropped.get(session_key, 0),
+            private_state_recoveries=self.private_state_recoveries.get(session_key, 0),
+            private_state_reasons=tuple(
+                sorted(self.private_state_reasons.get(session_key, {}).items())
+            ),
+        )
+
+    def private_state_summary(self, session_key: str | SessionIdentity) -> dict[str, int]:
+        scopes: Mapping[str | RolloutIdentity, OrderedDict[str, None]] = self.seen_sources.get(
+            session_key, {}
+        )
+        source_entries = sum(len(values) for values in scopes.values())
+        call_entries = len(self.call_ids.get(session_key, {}))
+        process_entries = len(self.process_ids.get(session_key, {}))
+        continuation_entries = len(self.continuation_call_ids.get(session_key, set()))
+        wait_entries = len(self.wait_call_ids.get(session_key, set()))
+        entries = (
+            len(scopes)
+            + source_entries
+            + call_entries
+            + process_entries
+            + continuation_entries
+            + wait_entries
+        )
+        string_bytes = sum(
+            len(source_id.encode("utf-8", errors="replace"))
+            for values in scopes.values()
+            for source_id in values
+        )
+        string_bytes += sum(
+            len(str(value).encode("utf-8", errors="replace"))
+            for mapping in (
+                self.call_ids.get(session_key, {}),
+                self.process_ids.get(session_key, {}),
+            )
+            for key in mapping
+            for value in key
+        )
+        return {
+            "entries": entries,
+            "estimated_bytes": string_bytes + entries * 72,
+            "source_entries": source_entries,
+            "call_entries": call_entries,
+            "process_entries": process_entries,
+            "continuation_entries": continuation_entries,
+            "wait_entries": wait_entries,
+            "scope_entries": len(scopes),
+            "saturated_scopes": len(self.saturated_source_scopes.get(session_key, set())),
+        }
 
     def _merge_terminal(
         self,
@@ -1221,9 +1445,21 @@ class TerminalStore:
             key=self._rank,
         )
         target.upstream_truncated |= source.upstream_truncated
+        association_rank = {"unresolved": 0, "ambiguous": 1, "confirmed": 2, "conflicting": 3}
+        if (
+            association_rank[source.association_status]
+            > association_rank[target.association_status]
+        ):
+            target.association_status = source.association_status
+            target.correlation_source = source.correlation_source
+            target.association_reason = source.association_reason
         target.dropped_bytes += source.dropped_bytes
         target.last_output_at = max(
-            (value for value in (target.last_output_at, source.last_output_at) if value is not None),
+            (
+                value
+                for value in (target.last_output_at, source.last_output_at)
+                if value is not None
+            ),
             default=None,
         )
         target.chunks = deque(
@@ -1233,12 +1469,10 @@ class TerminalStore:
             )
         )
         target.retained_bytes = sum(
-            len(chunk.text.encode("utf-8", errors="replace"))
-            for chunk in target.chunks
+            len(chunk.text.encode("utf-8", errors="replace")) for chunk in target.chunks
         )
         while target.chunks and (
-            len(target.chunks) > MAX_TERMINAL_CHUNKS
-            or target.retained_bytes > MAX_TERMINAL_BYTES
+            len(target.chunks) > MAX_TERMINAL_CHUNKS or target.retained_bytes > MAX_TERMINAL_BYTES
         ):
             removed = target.chunks.popleft()
             size = len(removed.text.encode("utf-8", errors="replace"))
@@ -1250,6 +1484,16 @@ class TerminalStore:
                 if value == source_id:
                     mapping[key] = target_id
         return True
+
+    def _prune_indices(self, session_key: str | SessionIdentity) -> None:
+        retained = set(self.sessions.get(session_key, {}))
+        for mapping in (self.call_ids[session_key], self.process_ids[session_key]):
+            for key, terminal_id in list(mapping.items()):
+                if terminal_id not in retained:
+                    mapping.pop(key, None)
+        call_keys = set(self.call_ids[session_key])
+        self.continuation_call_ids[session_key].intersection_update(call_keys)
+        self.wait_call_ids[session_key].intersection_update(call_keys)
 
     def _trim_sessions(self, session_key: str | SessionIdentity) -> None:
         values = self.sessions.get(session_key, {})
@@ -1279,14 +1523,13 @@ class TerminalStore:
         )
         for terminal in ordered[: len(values) - MAX_TERMINALS_PER_SESSION]:
             values.pop(terminal.terminal_id, None)
+            self.association_dropped[session_key] += 1
             for mapping in (self.call_ids[session_key], self.process_ids[session_key]):
                 for key, value in list(mapping.items()):
                     if value == terminal.terminal_id:
                         mapping.pop(key, None)
 
-    def summaries(
-        self, session_key: str | SessionIdentity
-    ) -> list[TerminalSessionSummary]:
+    def summaries(self, session_key: str | SessionIdentity) -> list[TerminalSessionSummary]:
         return [
             terminal.summary()
             for terminal in sorted(
@@ -1295,9 +1538,7 @@ class TerminalStore:
             )
         ]
 
-    def current_summaries(
-        self, session_key: str | SessionIdentity
-    ) -> list[TerminalSessionSummary]:
+    def current_summaries(self, session_key: str | SessionIdentity) -> list[TerminalSessionSummary]:
         """Publish background tasks known active from protocol or current OS evidence."""
 
         return [
@@ -1335,11 +1576,7 @@ class TerminalStore:
                 values = shlex.split(value)
             except ValueError:
                 values = value.split()
-            return [
-                Path(token).name.lower()
-                for token in values
-                if token
-            ]
+            return [Path(token).name.lower() for token in values if token]
 
         def executable(value: str) -> str:
             return re.sub(r"[\d.]+$", "", Path(value).name.lower())
@@ -1374,9 +1611,7 @@ class TerminalStore:
         if len(child_tokens) == 1:
             return True
         required = [
-            token
-            for token in command_tokens[1:]
-            if not token.startswith("-") and "=" not in token
+            token for token in command_tokens[1:] if not token.startswith("-") and "=" not in token
         ]
         return bool(required) and all(token in child_tokens for token in required)
 
@@ -1639,8 +1874,7 @@ class TerminalStore:
             child
             for child in children
             if str(getattr(child, "state", "")).upper() != "Z"
-            and getattr(getattr(child, "identity", None), "pid", None)
-            not in observer_process_ids
+            and getattr(getattr(child, "identity", None), "pid", None) not in observer_process_ids
         ]
         child_by_pid = {
             pid: child
@@ -1657,19 +1891,10 @@ class TerminalStore:
             and terminal.command
             and not terminal.stale
             and (
-                (
-                    bool(terminal.process_id)
-                    and terminal.status in RUNNING_TERMINAL_STATUSES
-                )
-                or (
-                    not terminal.process_id
-                    and terminal.completed_at is not None
-                )
+                (bool(terminal.process_id) and terminal.status in RUNNING_TERMINAL_STATUSES)
+                or (not terminal.process_id and terminal.completed_at is not None)
             )
-            and (
-                evidence_cutoff is None
-                or terminal.last_state_at <= evidence_cutoff
-            )
+            and (evidence_cutoff is None or terminal.last_state_at <= evidence_cutoff)
         ]
         for terminal in candidates:
             if terminal.os_confirmed:
@@ -1678,10 +1903,7 @@ class TerminalStore:
         claimed_job_roots: set[int] = set()
         changed = False
         for terminal in reversed(candidates):
-            exact_only = (
-                not terminal.process_id
-                or terminal.process_id.startswith("os:")
-            )
+            exact_only = not terminal.process_id or terminal.process_id.startswith("os:")
             matching_children = [
                 child
                 for child in all_live_children
@@ -1729,12 +1951,9 @@ class TerminalStore:
                             existing_terminal.process_active = False
                             existing_terminal.os_confirmed = False
                     matched_terminal_ids.add(terminal.terminal_id)
-                    claimed_job_roots.add(
-                        self._top_level_child_pid(child_by_pid, child_pid)
-                    )
+                    claimed_job_roots.add(self._top_level_child_pid(child_by_pid, child_pid))
                     protocol_confirmed = bool(
-                        terminal.process_id
-                        and not terminal.process_id.startswith("os:")
+                        terminal.process_id and not terminal.process_id.startswith("os:")
                     )
                     if protocol_confirmed:
                         terminal.os_match_windows = TERMINAL_OS_MISS_WINDOWS
@@ -1745,9 +1964,13 @@ class TerminalStore:
                         terminal.os_match_windows = 1
                     if terminal.os_match_windows >= TERMINAL_OS_MISS_WINDOWS:
                         if os_process_id:
-                            self.process_ids[session_key][
-                                self._correlation_key("", os_process_id)
-                            ] = terminal.terminal_id
+                            self._set_correlation(
+                                session_key,
+                                self.process_ids[session_key],
+                                self._correlation_key("", os_process_id),
+                                terminal.terminal_id,
+                                "process_alias_limit",
+                            )
                         if not terminal.process_id and os_process_id:
                             terminal.process_id = os_process_id
                             changed = True
@@ -1777,9 +2000,7 @@ class TerminalStore:
                         )
                     break
         unmatched = [
-            terminal
-            for terminal in candidates
-            if terminal.terminal_id not in matched_terminal_ids
+            terminal for terminal in candidates if terminal.terminal_id not in matched_terminal_ids
         ]
         for terminal in unmatched:
             if not terminal.os_confirmed:
@@ -1802,15 +2023,35 @@ class TerminalStore:
             workspace,
         )
         self._trim_sessions(session_key)
+        self._prune_indices(session_key)
         self._trim_global()
         return changed
 
+    def prune_scopes(
+        self,
+        active_scopes: set[str | RolloutIdentity],
+    ) -> None:
+        active = set(active_scopes)
+        active.add("")
+        for session_key, scopes in self.seen_sources.items():
+            removed = {scope for scope in scopes if scope not in active}
+            if not removed:
+                continue
+            for scope in removed:
+                scopes.pop(scope, None)
+            saturated = self.saturated_source_scopes[session_key]
+            recovered = len(saturated & removed)
+            saturated.difference_update(removed)
+            if recovered:
+                self.private_state_recoveries[session_key] += recovered
+                self.private_state_reasons[session_key]["dedupe_scope_recovered"] += recovered
+            for mapping in (self.call_ids[session_key], self.process_ids[session_key]):
+                for key in [key for key in mapping if key[0] in removed]:
+                    mapping.pop(key, None)
+            self._prune_indices(session_key)
+
     def _trim_global(self) -> None:
-        terminals = [
-            terminal
-            for values in self.sessions.values()
-            for terminal in values.values()
-        ]
+        terminals = [terminal for values in self.sessions.values() for terminal in values.values()]
         total = sum(terminal.retained_bytes for terminal in terminals)
         if total <= MAX_GLOBAL_TERMINAL_BYTES:
             return
@@ -1858,7 +2099,14 @@ class TerminalStore:
             self.continuation_call_ids.pop(session_key, None)
             self.wait_call_ids.pop(session_key, None)
             self.seen_sources.pop(session_key, None)
+            self.saturated_source_scopes.pop(session_key, None)
             self.invocations.pop(session_key, None)
+            self.association_conflicts.pop(session_key, None)
+            self.association_dropped.pop(session_key, None)
+            self.private_state_evictions.pop(session_key, None)
+            self.private_state_dropped.pop(session_key, None)
+            self.private_state_recoveries.pop(session_key, None)
+            self.private_state_reasons.pop(session_key, None)
 
 
 @dataclass
@@ -1872,13 +2120,60 @@ class _FileCursor:
     cwd: str = ""
 
 
+@dataclass(frozen=True)
+class RegularFileTailDiagnostic:
+    session_key: str | SessionIdentity
+    observed_at: float
+    pid: int
+    start_time: int
+    fds: tuple[int, ...]
+    reason: str
+
+
 class RegularFileTailCollector:
     """Tail child stdout/stderr only when they resolve to allowed regular files."""
 
     def __init__(self, root: Path = Path("/proc"), max_read_bytes: int = 512 * 1024) -> None:
         self.root = root
         self.max_read_bytes = max_read_bytes
-        self.cursors: dict[tuple[str | SessionIdentity, int, int], _FileCursor] = {}
+        self.cursors: dict[tuple[str | SessionIdentity, int, int, int, int], _FileCursor] = {}
+        self.diagnostics: deque[RegularFileTailDiagnostic] = deque(maxlen=MAX_FILE_TAIL_DIAGNOSTICS)
+
+    def _diagnose(
+        self,
+        session_key: str | SessionIdentity,
+        observed_at: float,
+        pid: int,
+        start_time: int,
+        fds: set[int],
+        reason: str,
+    ) -> None:
+        diagnostic = RegularFileTailDiagnostic(
+            session_key,
+            observed_at,
+            pid,
+            start_time,
+            tuple(sorted(fds)),
+            reason,
+        )
+        if not self.diagnostics or self.diagnostics[-1] != diagnostic:
+            self.diagnostics.append(diagnostic)
+
+    def pop_diagnostics(
+        self, session_key: str | SessionIdentity
+    ) -> tuple[RegularFileTailDiagnostic, ...]:
+        matched = tuple(item for item in self.diagnostics if item.session_key == session_key)
+        self.diagnostics = deque(
+            (item for item in self.diagnostics if item.session_key != session_key),
+            maxlen=MAX_FILE_TAIL_DIAGNOSTICS,
+        )
+        return matched
+
+    def active_scopes(self) -> set[str]:
+        return {
+            f"file:{pid}:{start_time}:{device}:{inode}"
+            for _, pid, start_time, device, inode in self.cursors
+        }
 
     @staticmethod
     def _allowed(target: Path, workspace: Path) -> bool:
@@ -1892,6 +2187,35 @@ class RegularFileTailCollector:
                 continue
         return False
 
+    @classmethod
+    def _opened_file_matches(
+        cls,
+        handle: BinaryIO,
+        descriptor: Path,
+        *,
+        device: int,
+        inode: int,
+        workspace: Path,
+    ) -> os.stat_result | None:
+        try:
+            fileno = handle.fileno()
+            opened_stat = os.fstat(fileno)
+            current_stat = descriptor.stat()
+            raw_target = os.readlink(Path("/proc/self/fd") / str(fileno))
+        except (AttributeError, OSError):
+            return None
+        if not stat.S_ISREG(opened_stat.st_mode):
+            return None
+        expected = (device, inode)
+        if (opened_stat.st_dev, opened_stat.st_ino) != expected:
+            return None
+        if (current_stat.st_dev, current_stat.st_ino) != expected:
+            return None
+        opened_target = Path(raw_target.removesuffix(" (deleted)"))
+        if not opened_target.is_absolute() or not cls._allowed(opened_target, workspace):
+            return None
+        return opened_stat
+
     def read(
         self,
         session_key: str | SessionIdentity,
@@ -1901,11 +2225,10 @@ class RegularFileTailCollector:
     ) -> tuple[TerminalUpdate, ...]:
         workspace_path = Path(workspace or ".")
         updates: list[TerminalUpdate] = []
-        active_keys: set[tuple[str | SessionIdentity, int, int]] = set()
+        active_keys: set[tuple[str | SessionIdentity, int, int, int, int]] = set()
         observer_process_ids = TerminalStore._observer_process_ids(children)
         child_by_pid = {
-            getattr(getattr(child, "identity", None), "pid", None): child
-            for child in children
+            getattr(getattr(child, "identity", None), "pid", None): child for child in children
         }
 
         def depth(child: object) -> int:
@@ -1935,6 +2258,21 @@ class RegularFileTailCollector:
                     target = Path(raw_target.removesuffix(" (deleted)"))
                     descriptor_stat = descriptor.stat()
                 except OSError:
+                    process_cursor_keys = {
+                        key
+                        for key in self.cursors
+                        if key[0] == session_key and key[1:3] == (pid, start_time)
+                    }
+                    if process_cursor_keys:
+                        active_keys.update(process_cursor_keys)
+                        self._diagnose(
+                            session_key,
+                            observed_at,
+                            pid,
+                            start_time,
+                            {fd},
+                            "descriptor_unavailable",
+                        )
                     continue
                 if not target.is_absolute() or not stat.S_ISREG(descriptor_stat.st_mode):
                     continue
@@ -1949,67 +2287,105 @@ class RegularFileTailCollector:
                 if (device, inode) in claimed_files:
                     continue
                 claimed_files.add((device, inode))
-                cursor_key = (session_key, pid, inode)
-                active_keys.add(cursor_key)
+                cursor_key = (session_key, pid, start_time, device, inode)
                 cursor = self.cursors.get(cursor_key)
                 try:
-                    size = descriptor.stat().st_size
+                    handle = descriptor.open("rb")
                 except OSError:
-                    continue
-                upstream_truncated = False
-                if cursor is None or (cursor.device, cursor.inode) != (device, inode):
-                    offset = max(0, size - MAX_TERMINAL_BYTES)
-                    upstream_truncated = offset > 0
-                    cursor = _FileCursor(
-                        device,
-                        inode,
-                        offset,
-                        process_id=f"os:{pid}:{start_time}",
-                        command=str(getattr(child, "command", "") or "child process"),
-                        cwd=workspace,
+                    self._diagnose(
+                        session_key,
+                        observed_at,
+                        pid,
+                        start_time,
+                        fds,
+                        "descriptor_open_failed",
                     )
-                    self.cursors[cursor_key] = cursor
-                elif size < cursor.offset:
-                    cursor.offset = 0
-                    cursor.partial = b""
-                updates.append(
-                    TerminalUpdate(
-                        source_id=f"file-active:{device}:{inode}:{observed_at}",
-                        observed_at=observed_at,
-                        process_id=cursor.process_id,
-                        command=cursor.command,
-                        cwd=cursor.cwd,
-                        status="running",
-                        capability=TerminalCapability.FILE_TAIL,
-                        terminal_candidate=True,
-                        upstream_truncated=upstream_truncated,
-                        source="file-tail",
-                    )
-                )
-                if size <= cursor.offset:
+                    if cursor is not None:
+                        active_keys.add(cursor_key)
                     continue
-                try:
-                    with descriptor.open("rb") as handle:
+                with handle:
+                    opened_stat = self._opened_file_matches(
+                        handle,
+                        descriptor,
+                        device=device,
+                        inode=inode,
+                        workspace=workspace_path,
+                    )
+                    if opened_stat is None:
+                        self._diagnose(
+                            session_key,
+                            observed_at,
+                            pid,
+                            start_time,
+                            fds,
+                            "opened_identity_mismatch",
+                        )
+                        if cursor is not None:
+                            active_keys.add(cursor_key)
+                        continue
+                    active_keys.add(cursor_key)
+                    scope = f"file:{pid}:{start_time}:{device}:{inode}"
+                    size = opened_stat.st_size
+                    upstream_truncated = False
+                    if cursor is None:
+                        offset = max(0, size - MAX_TERMINAL_BYTES)
+                        upstream_truncated = offset > 0
+                        cursor = _FileCursor(
+                            device,
+                            inode,
+                            offset,
+                            process_id=f"os:{pid}:{start_time}",
+                            command=str(getattr(child, "command", "") or "child process"),
+                            cwd=workspace,
+                        )
+                        self.cursors[cursor_key] = cursor
+                    elif size < cursor.offset:
+                        cursor.offset = 0
+                        cursor.partial = b""
+                    updates.append(
+                        TerminalUpdate(
+                            source_id=(
+                                f"file-active:{pid}:{start_time}:{device}:{inode}:{observed_at}"
+                            ),
+                            observed_at=observed_at,
+                            process_id=cursor.process_id,
+                            command=cursor.command,
+                            cwd=cursor.cwd,
+                            status="running",
+                            capability=TerminalCapability.FILE_TAIL,
+                            terminal_candidate=True,
+                            upstream_truncated=upstream_truncated,
+                            source="file-tail",
+                            scope=scope,
+                        )
+                    )
+                    if size <= cursor.offset:
+                        continue
+                    try:
                         handle.seek(cursor.offset)
                         start = cursor.offset
                         payload = handle.read(self.max_read_bytes)
                         cursor.offset = handle.tell()
-                except OSError:
-                    continue
+                    except OSError:
+                        self._diagnose(
+                            session_key,
+                            observed_at,
+                            pid,
+                            start_time,
+                            fds,
+                            "read_failed",
+                        )
+                        continue
                 if not payload:
                     continue
                 decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                 decoded = decoder.decode(cursor.partial + payload, final=False)
                 cursor.partial = decoder.getstate()[0]
                 streams = {1: "stdout", 2: "stderr"}
-                stream = (
-                    streams[next(iter(fds))]
-                    if len(fds) == 1
-                    else "combined"
-                )
+                stream = streams[next(iter(fds))] if len(fds) == 1 else "combined"
                 updates.append(
                     TerminalUpdate(
-                        source_id=f"file:{device}:{inode}:{start}",
+                        source_id=f"file:{pid}:{start_time}:{device}:{inode}:{start}",
                         observed_at=observed_at,
                         process_id=cursor.process_id,
                         command=cursor.command,
@@ -2021,12 +2397,11 @@ class RegularFileTailCollector:
                         terminal_candidate=True,
                         upstream_truncated=upstream_truncated,
                         source="file-tail",
+                        scope=scope,
                     )
                 )
         closed_keys = {
-            key
-            for key in self.cursors
-            if key[0] == session_key and key not in active_keys
+            key for key in self.cursors if key[0] == session_key and key not in active_keys
         }
         for closed_key in closed_keys:
             cursor = self.cursors[closed_key]
@@ -2041,6 +2416,7 @@ class RegularFileTailCollector:
                     capability=TerminalCapability.FILE_TAIL,
                     terminal_candidate=True,
                     source="file-tail",
+                    scope=(f"file:{closed_key[1]}:{closed_key[2]}:{closed_key[3]}:{closed_key[4]}"),
                 )
             )
         self.cursors = {

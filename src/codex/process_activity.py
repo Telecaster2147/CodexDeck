@@ -49,8 +49,7 @@ class ProcessActivityCollector:
         created = len(current_keys - before_keys - {identity.key}) if has_before else 0
         exited = len(before_keys - current_keys - {identity.key}) if has_before else 0
         state_changes = sum(
-            key in before and before[key].state != sample.state
-            for key, sample in samples.items()
+            key in before and before[key].state != sample.state for key, sample in samples.items()
         )
         cpu_ticks = 0
         io_bytes = 0
@@ -62,14 +61,10 @@ class ProcessActivityCollector:
             cpu_delta_ticks = max(0, sample.cpu_ticks - previous.cpu_ticks) if previous else 0
             io_delta = max(0, sample.io_bytes - previous.io_bytes) if previous else 0
             io_operations_delta = (
-                max(0, sample.io_operations - previous.io_operations)
-                if previous
-                else 0
+                max(0, sample.io_operations - previous.io_operations) if previous else 0
             )
             switch_delta = (
-                max(0, sample.context_switches - previous.context_switches)
-                if previous
-                else 0
+                max(0, sample.context_switches - previous.context_switches) if previous else 0
             )
             cpu_ticks += cpu_delta_ticks
             io_bytes += io_delta
@@ -88,22 +83,11 @@ class ProcessActivityCollector:
                     io_bytes_delta=io_delta,
                     io_operations_delta=io_operations_delta,
                     context_switches_delta=switch_delta,
-                    active=bool(
-                        cpu_delta_ticks
-                        or io_delta
-                        or io_operations_delta
-                        or switch_delta
-                    ),
+                    active=bool(cpu_delta_ticks or io_delta or io_operations_delta or switch_delta),
                 )
             )
         active = bool(
-            cpu_ticks
-            or io_bytes
-            or io_operations
-            or switches
-            or created
-            or exited
-            or state_changes
+            cpu_ticks or io_bytes or io_operations or switches or created or exited or state_changes
         )
         parts = []
         if cpu_ticks:
@@ -167,8 +151,7 @@ class ProcessActivityCollector:
         for task_directory in task_directories:
             try:
                 children.update(
-                    int(value)
-                    for value in (task_directory / "children").read_text().split()
+                    int(value) for value in (task_directory / "children").read_text().split()
                 )
             except (OSError, ValueError):
                 continue
@@ -191,8 +174,7 @@ class ProcessActivityCollector:
         io_values = self._key_values(directory / "io")
         status_values = self._key_values(directory / "status")
         io_bytes = sum(
-            io_values.get(name, 0)
-            for name in ("rchar", "wchar", "read_bytes", "write_bytes")
+            io_values.get(name, 0) for name in ("rchar", "wchar", "read_bytes", "write_bytes")
         )
         io_operations = sum(io_values.get(name, 0) for name in ("syscr", "syscw"))
         switches = sum(
