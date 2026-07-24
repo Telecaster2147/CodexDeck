@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "adjudication_protocol": {
+    "authority_order": [
+      "codex_ui_direct_observation",
+      "rollout_structured_protocol",
+      "process_liveness",
+      "terminal_durable_records",
+      "socket_and_packet_supporting_evidence"
+    ],
+    "conflict_rule": "Preserve the higher-authority fact, mark the affected axis incomplete, and retain the conflict as a bounded diagnostic.",
+    "counterexample_rule": "Add or update an anonymous case before changing recognition; reproducible false positives remove or downgrade the old inference unless stronger structured evidence exists."
+  },
+  "cases": [
+    {
+      "id": "GT-LIFECYCLE-TP-001",
+      "domain": "lifecycle",
+      "classification": "true_positive",
+      "runner": "replay",
+      "evidence": {"fixture": "replay_lifecycle_terminal.jsonl", "sources": ["rollout"]},
+      "codex_ui_observation": "Turn completed after one durable exec operation.",
+      "codexdeck_expected": {"lifecycle": "COMPLETED", "protocol_uncertain": false},
+      "adjudication": {
+        "semantic": "completed",
+        "basis": "Structured turn terminal record is authoritative for lifecycle.",
+        "invalidates": "Socket closure or terminal completion alone must not invent turn completion."
+      },
+      "support": {"replay": true, "state_machine": true, "terminal_store": true, "tui": true}
+    },
+    {
+      "id": "GT-LIFECYCLE-FP-001",
+      "domain": "lifecycle",
+      "classification": "false_positive",
+      "runner": "replay",
+      "evidence": {"fixture": "replay_unknown_phase.jsonl", "sources": ["rollout"]},
+      "codex_ui_observation": "The upstream UI showed a phase that this version does not recognize.",
+      "codexdeck_expected": {"protocol_uncertain": true, "protocol_uncertainty_scope": "lifecycle"},
+      "adjudication": {
+        "semantic": "unknown",
+        "basis": "An unknown semantic shape cannot be mapped to a known lifecycle by text similarity.",
+        "invalidates": "Remove any fallback that guesses lifecycle from unknown payload text."
+      },
+      "support": {"replay": true, "state_machine": true, "terminal_store": false, "tui": true}
+    },
+    {
+      "id": "GT-ATTENTION-TP-001",
+      "domain": "attention",
+      "classification": "true_positive",
+      "runner": "replay",
+      "evidence": {"fixture": "ground_truth_attention.jsonl", "sources": ["rollout"]},
+      "codex_ui_observation": "The UI displayed an execution approval prompt.",
+      "codexdeck_expected": {"attention": "APPROVAL"},
+      "adjudication": {
+        "semantic": "approval_required",
+        "basis": "Typed approval request is direct attention evidence.",
+        "invalidates": "Generic tool-running records do not imply an approval prompt."
+      },
+      "support": {"replay": true, "state_machine": true, "terminal_store": false, "tui": true}
+    },
+    {
+      "id": "GT-ATTENTION-FN-001",
+      "domain": "attention",
+      "classification": "false_negative",
+      "runner": "coverage",
+      "evidence": {
+        "sources": ["rollout"],
+        "coverage": {"bootstrap_truncated": true, "source_epoch": "ROLLOUT_EPOCH"}
+      },
+      "codex_ui_observation": "An unresolved prompt existed before the retained rollout tail.",
+      "codexdeck_expected": {"attention": "NONE", "attention_complete": false},
+      "adjudication": {
+        "semantic": "possibly_unresolved",
+        "basis": "Missing pre-tail history cannot prove that attention is absent.",
+        "invalidates": "Do not publish attention NONE as complete after a cold-start gap without a clear baseline."
+      },
+      "support": {"replay": true, "state_machine": true, "terminal_store": false, "tui": true}
+    },
+    {
+      "id": "GT-TERMINAL-TP-001",
+      "domain": "terminal_association",
+      "classification": "true_positive",
+      "runner": "terminal",
+      "evidence": {
+        "sources": ["rollout"],
+        "updates": [
+          {"source_id": "SOURCE_ID", "observed_at": 1, "call_id": "CALL_ID", "process_id": "PROCESS_ID", "terminal_candidate": true, "status": "running"}
+        ]
+      },
+      "codex_ui_observation": "One background process was shown for the matching invocation.",
+      "codexdeck_expected": {"confirmed": 1, "ambiguous": 0},
+      "adjudication": {
+        "semantic": "owned_terminal",
+        "basis": "Protocol process identity confirms the association.",
+        "invalidates": "Display call IDs are not sufficient when process identity conflicts."
+      },
+      "support": {"replay": false, "state_machine": false, "terminal_store": true, "tui": true}
+    },
+    {
+      "id": "GT-TERMINAL-AMB-001",
+      "domain": "terminal_association",
+      "classification": "ambiguous",
+      "runner": "terminal",
+      "evidence": {
+        "sources": ["rollout"],
+        "updates": [
+          {"source_id": "SOURCE_ID", "observed_at": 1, "call_id": "CALL_ID", "terminal_candidate": true, "status": "running"}
+        ]
+      },
+      "codex_ui_observation": "The durable record had a call ID but no rollout generation or process identity.",
+      "codexdeck_expected": {"confirmed": 0, "ambiguous": 1},
+      "adjudication": {
+        "semantic": "ambiguous_owner",
+        "basis": "A reused call ID without process or rollout scope cannot prove ownership.",
+        "invalidates": "Never upgrade call-id-only correlation to confirmed association."
+      },
+      "support": {"replay": false, "state_machine": false, "terminal_store": true, "tui": true}
+    },
+    {
+      "id": "GT-OBSERVER-TP-001",
+      "domain": "observer_degradation",
+      "classification": "true_positive",
+      "runner": "coverage",
+      "evidence": {
+        "sources": ["process", "socket"],
+        "coverage": {"network_probe_complete": false, "silence_probe_complete": false}
+      },
+      "codex_ui_observation": "Codex remained visible while current observer probes failed.",
+      "codexdeck_expected": {"network_complete": false, "silence_complete": false},
+      "adjudication": {
+        "semantic": "observer_degraded",
+        "basis": "A failed current probe is direct evidence about observer quality.",
+        "invalidates": "Do not hide probe failure behind an unchanged workload lifecycle."
+      },
+      "support": {"replay": false, "state_machine": true, "terminal_store": false, "tui": true}
+    },
+    {
+      "id": "GT-OBSERVER-FP-001",
+      "domain": "observer_degradation",
+      "classification": "false_positive",
+      "runner": "coverage",
+      "evidence": {
+        "sources": ["process", "socket"],
+        "coverage": {"network_probe_complete": true, "silence_probe_complete": true}
+      },
+      "codex_ui_observation": "Codex produced no new semantic event, but all observer probes completed.",
+      "codexdeck_expected": {"network_complete": true, "silence_complete": true},
+      "adjudication": {
+        "semantic": "observer_healthy_workload_quiet",
+        "basis": "Workload silence is distinct from observer scheduling or collector failure.",
+        "invalidates": "Do not infer observer degradation solely from lack of Codex events."
+      },
+      "support": {"replay": false, "state_machine": true, "terminal_store": false, "tui": true}
+    },
+    {
+      "id": "GT-OBSERVER-UNRESOLVED-001",
+      "domain": "observer_degradation",
+      "classification": "unresolved",
+      "runner": "coverage",
+      "evidence": {
+        "sources": ["process", "socket", "rollout"],
+        "coverage": {"network_probe_complete": false, "silence_probe_complete": false}
+      },
+      "codex_ui_observation": "Codex was still visible, while observer probes were stale or unavailable.",
+      "codexdeck_expected": {"network_complete": false, "silence_complete": false},
+      "adjudication": {
+        "semantic": "observer_degraded",
+        "basis": "Probe failure is observer state and does not prove workload silence or network health.",
+        "invalidates": "Do not convert missing socket/process evidence into IDLE, CLOSED, or healthy conclusions."
+      },
+      "support": {"replay": false, "state_machine": true, "terminal_store": false, "tui": true}
+    }
+  ]
+}
