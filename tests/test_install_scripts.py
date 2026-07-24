@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -9,13 +10,28 @@ import tempfile
 import unittest
 import zipfile
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
+
 from config import VERSION
+from presentation.doctor import DOCTOR_SCHEMA_VERSION
+from presentation.export import EXPORT_SCHEMA_VERSION
+from presentation.json_output import SCHEMA_VERSION
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallScriptTests(unittest.TestCase):
+    def test_package_manifest_includes_runtime_top_level_modules(self) -> None:
+        pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        modules = set(pyproject["tool"]["setuptools"]["py-modules"])
+
+        self.assertIn("temporal", modules)
+        self.assertTrue((PROJECT_ROOT / "src" / "temporal.py").is_file())
+
     def test_scripts_are_executable_and_valid_posix_shell(self) -> None:
         for name in ("install.sh", "uninstall.sh"):
             path = PROJECT_ROOT / name
@@ -61,6 +77,24 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("## 开发与验证", readme)
         self.assertIn('license = "MIT"', pyproject)
         self.assertIn('license-files = ["LICENSE"]', pyproject)
+
+    def test_readme_schema_versions_follow_implementation_contract(self) -> None:
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        replay_manifest = json.loads(
+            (PROJECT_ROOT / "tests" / "fixtures" / "replay_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertIn(f"`schema_version: {SCHEMA_VERSION}`", readme)
+        self.assertIn(f"`doctor_schema_version: {DOCTOR_SCHEMA_VERSION}`", readme)
+        self.assertIn(f"`export_schema_version: {EXPORT_SCHEMA_VERSION}`", readme)
+        self.assertIn(
+            f"replay fixture manifest `schema_version: {replay_manifest['schema_version']}`",
+            readme,
+        )
+        self.assertIn("history 数据库\n内部 schema 当前为 `5`", readme)
+        self.assertNotIn("输出使用 `export_schema_version: 1`", readme)
 
     def test_relative_install_paths_keep_venv_entrypoint_and_uninstall(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
