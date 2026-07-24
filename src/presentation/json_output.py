@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 
-from models import MonitorSnapshot, json_value
-from utils import strip_transcript_bodies
+from diagnostics import snapshot_diagnostics
+from models import MonitorSnapshot
+from presentation.privacy import public_value
 
 
 SCHEMA_VERSION = 1
@@ -58,7 +59,7 @@ def _normalize_nulls(value: object, field: str = "") -> object:
 
 
 def snapshot_dict(snapshot: MonitorSnapshot, *, show_auxiliary: bool = False) -> dict[str, object]:
-    instances = _normalize_nulls(strip_transcript_bodies(json_value(snapshot.instances)))
+    instances = _normalize_nulls(public_value(snapshot.instances))
     if not show_auxiliary:
         for instance in instances:
             instance["processes"] = [
@@ -70,7 +71,11 @@ def snapshot_dict(snapshot: MonitorSnapshot, *, show_auxiliary: bool = False) ->
         "interval_seconds": snapshot.interval_seconds,
         "collection_duration_seconds": snapshot.collection_duration_seconds,
         "summary": snapshot.summary(),
-        "diagnostics": snapshot.diagnostics,
+        "diagnostics": public_value(snapshot_diagnostics(snapshot)),
+        "collector_health": public_value(snapshot.collector_health),
+        "observer": public_value(snapshot.observer),
+        "temporal": public_value(snapshot.temporal),
+        "history": public_value(snapshot.history),
         "instances": instances,
     }
 

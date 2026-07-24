@@ -170,9 +170,7 @@ class ExportTests(unittest.TestCase):
 
         self.assertEqual(payload["incident_count"], 1)
         self.assertEqual(payload["incidents"][0]["attention"], "APPROVAL")
-        self.assertEqual(
-            payload["incidents"][0]["attention_request"]["call_id"], "call-1"
-        )
+        self.assertEqual(payload["incidents"][0]["attention_request"]["call_id"], "call-1")
 
     def test_session_export_uses_full_retention_and_redacts_nested_secrets(self) -> None:
         machine = SessionStateMachine(10)
@@ -252,13 +250,11 @@ class ExportTests(unittest.TestCase):
             payload["incident_summary"]["last_reliable_evidence"]["event"],
             "TURN_FAILED",
         )
-        self.assertEqual(
-            payload["incident_summary"]["current_axes"]["network"], "STALLED"
-        )
+        self.assertEqual(payload["incident_summary"]["current_axes"]["network"], "STALLED")
         self.assertEqual(payload["retention"]["event_count"], 3)
         self.assertEqual(len(payload["events"]), 3)
         self.assertEqual(payload["events"][0]["provenance"]["source"], "test")
-        self.assertEqual(payload["events"][0]["metadata"]["api_key"], "[REDACTED]")
+        self.assertNotIn("api_key", payload["events"][0]["metadata"])
         self.assertEqual(payload["session"]["token_usage"]["total_tokens"], 123)
         self.assertEqual(payload["session"]["token_usage"]["context_tokens"], 100)
         self.assertEqual(payload["retry_recovery"][0]["kind"], "RECONNECTING")
@@ -277,9 +273,7 @@ class ExportTests(unittest.TestCase):
         active = machine.derive("active", process(), NetworkEvidence(), 161)
         quiet = machine.derive("quiet", process(), NetworkEvidence(), 161)
 
-        payload = current_incidents_export(
-            [active, quiet], generated_at="2026-07-16T00:00:00Z"
-        )
+        payload = current_incidents_export([active, quiet], generated_at="2026-07-16T00:00:00Z")
         self.assertEqual(payload["incident_count"], 1)
         self.assertEqual(payload["incidents"][0]["alerts"][0]["status"], "OPENED")
         self.assertIn("incident_summary", payload["incidents"][0])

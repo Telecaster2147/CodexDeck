@@ -64,15 +64,16 @@ class AttentionQueueTests(unittest.TestCase):
             silence_started_at=12.0,
         )
 
-        queue = attention_queue(
-            (generating, approval, background, recovered, stalled, blind)
-        )
+        queue = attention_queue((generating, approval, background, recovered, stalled, blind))
 
-        self.assertEqual([item.category for item in queue], [
-            "approval",
-            "network_stall",
-            "observer_blind",
-        ])
+        self.assertEqual(
+            [item.category for item in queue],
+            [
+                "approval",
+                "network_stall",
+                "observer_blind",
+            ],
+        )
         self.assertEqual(queue[0].detail, "Approve command")
         self.assertEqual(queue[0].session.session_id, "approval")
 

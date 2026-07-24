@@ -7,7 +7,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
+from diagnostics import diagnostic_text
 from models import InstanceSnapshot
+from presentation.privacy import public_value
 
 
 def primitive_value(value: Any) -> Any:
@@ -18,9 +20,7 @@ def primitive_value(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if is_dataclass(value):
-        return {
-            field.name: primitive_value(getattr(value, field.name)) for field in fields(value)
-        }
+        return {field.name: primitive_value(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, dict):
         return {str(key): primitive_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -39,7 +39,7 @@ def collector_items(owner: object) -> list[dict[str, Any]]:
         ]
     result: list[dict[str, Any]] = []
     for item in raw:
-        data = primitive_value(item)
+        data = public_value(item)
         if isinstance(data, dict):
             result.append(data)
     return result
@@ -80,7 +80,12 @@ def instance_quality_issues(instance: InstanceSnapshot) -> list[str]:
             continue
         detail = collector.error or f"陈旧 {collector.stale_age_seconds:.1f}s"
         issues.append(f"{collector.name}: {detail}")
-    issues.extend(instance.diagnostics)
+    issues.extend(diagnostic_text(item) for item in instance.diagnostics)
+    issues.extend(
+        f"{result.source}: {result.status.value} ({result.error_code or 'partial_result'})"
+        for result in instance.adapter_results
+        if result.status.value in {"failed", "incomplete"}
+    )
     if instance.rollout_context_truncated:
         issues.append("rollout 初始读取已截断")
     if instance.process_data_stale_age_seconds is not None:
@@ -91,4 +96,10 @@ def instance_quality_issues(instance: InstanceSnapshot) -> list[str]:
         f"未解析 {event_type} × {count}"
         for event_type, count in instance.unknown_event_types.items()
     )
+    family_counters = instance.protocol_family_counters
+    dropped = family_counters.get("unknown_dropped_family_count", 0) + family_counters.get(
+        "shape_dropped_family_count", 0
+    )
+    if dropped:
+        issues.append(f"协议族计数已截断 × {dropped}")
     return issues

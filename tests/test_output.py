@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -10,9 +11,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from models import (  # noqa: E402
     AgentNode,
+    AxisCompleteness,
     AttentionRequest,
     AttentionState,
     CodexPaths,
+    CollectorHealth,
+    CommandExecutionSummary,
     Confidence,
     InstanceSnapshot,
     LifecycleState,
@@ -25,6 +29,8 @@ from models import (  # noqa: E402
     RateLimitSummary,
     RateLimitWindow,
     SessionHealth,
+    SessionCompleteness,
+    TerminalAssociationSummary,
     TerminalCapability,
     TerminalChunk,
     TerminalSessionSummary,
@@ -34,7 +40,9 @@ from models import (  # noqa: E402
 )
 from presentation.json_output import render_json  # noqa: E402
 from presentation.export import session_export  # noqa: E402
+from presentation.doctor import render_doctor_json  # noqa: E402
 from presentation.metrics import METRIC_FAMILIES, render_prometheus  # noqa: E402
+from presentation.privacy import public_value  # noqa: E402
 from presentation.text import render_text  # noqa: E402
 
 
@@ -49,11 +57,30 @@ def snapshot() -> MonitorSnapshot:
         home / "sessions",
     )
     session_process = ProcessInfo(
-        ProcessIdentity(42, 10), 1, "codex", 1, 0.0, "S", "futex", "codex", "session",
-        instance_id="i1", session_id="s1", session_title="Active session", model="gpt-test",
+        ProcessIdentity(42, 10),
+        1,
+        "codex",
+        1,
+        0.0,
+        "S",
+        "futex",
+        "codex",
+        "session",
+        instance_id="i1",
+        session_id="s1",
+        session_title="Active session",
+        model="gpt-test",
     )
     auxiliary = ProcessInfo(
-        ProcessIdentity(43, 11), 1, "node", 1, 0.0, "S", "futex", "node codex", "launcher",
+        ProcessIdentity(43, 11),
+        1,
+        "node",
+        1,
+        0.0,
+        "S",
+        "futex",
+        "node codex",
+        "launcher",
         instance_id="i1",
     )
     health = SessionHealth(
@@ -125,6 +152,83 @@ def snapshot_with_metrics() -> MonitorSnapshot:
 
 
 class OutputTests(unittest.TestCase):
+    def test_command_collector_budget_stats_are_machine_readable(self) -> None:
+        result = snapshot()
+        result.instances[0].collector_health = [
+            CollectorHealth(
+                "process",
+                error="ps: stdout_byte_budget",
+                command=CommandExecutionSummary(
+                    command_name="ps",
+                    reason="stdout_byte_budget",
+                    stdout_bytes_read=1025,
+                    stdout_bytes_retained=100,
+                    stdout_bytes_filtered=900,
+                    records_retained=2,
+                    records_filtered=20,
+                    records_dropped=1,
+                ),
+            )
+        ]
+        result.collector_health = list(result.instances[0].collector_health)
+
+        payload = json.loads(render_json(result, pretty=False))
+        command = payload["instances"][0]["collector_health"][0]["command"]
+        metrics = render_prometheus(result)
+
+        self.assertEqual(command["reason"], "stdout_byte_budget")
+        self.assertEqual(command["stdout_bytes_filtered"], 900)
+        self.assertIn(
+            'codexdeck_command_bytes{category="process",disposition="filtered",'
+            'stream="stdout"} 900',
+            metrics,
+        )
+        self.assertIn(
+            'codexdeck_command_complete{category="process"} 0',
+            metrics,
+        )
+
+    def test_public_projection_denies_unknown_dataclass_and_dynamic_fields(self) -> None:
+        @dataclass
+        class Canary:
+            secret: str
+
+        self.assertEqual(public_value(Canary("NESTED_CANARY_SECRET")), {})
+        result = snapshot()
+        result.sessions[0].events = [
+            NormalizedEvent(
+                1.0,
+                "MODEL_PROGRESS",
+                "progress",
+                metadata={
+                    "phase": "generating",
+                    "future_private_field": "NESTED_CANARY_SECRET",
+                },
+            )
+        ]
+        result.instances[0].rollout_activity = [
+            {
+                "backlog_bytes": 10,
+                "future_private_field": "NESTED_CANARY_SECRET",
+            }
+        ]
+
+        payload = json.loads(render_json(result, pretty=False))
+        event = payload["instances"][0]["sessions"][0]["events"][0]
+        activity = payload["instances"][0]["rollout_activity"][0]
+        self.assertEqual(event["metadata"], {"phase": "generating"})
+        self.assertEqual(activity, {"backlog_bytes": 10})
+        rendered = "\n".join(
+            (
+                json.dumps(payload),
+                json.dumps(session_export(result.sessions[0], result.sessions[0].events)),
+                render_doctor_json(result),
+                render_text(result),
+                render_prometheus(result),
+            )
+        )
+        self.assertNotIn("NESTED_CANARY_SECRET", rendered)
+
     def test_json_exposes_terminal_summary_without_transcript_body(self) -> None:
         result = snapshot()
         transcript = "TRANSCRIPT_SENTINEL_84721"
@@ -163,9 +267,7 @@ class OutputTests(unittest.TestCase):
         ]
 
         rendered_json = render_json(result, pretty=False)
-        terminal = json.loads(rendered_json)["instances"][0]["sessions"][0][
-            "terminal_sessions"
-        ][0]
+        terminal = json.loads(rendered_json)["instances"][0]["sessions"][0]["terminal_sessions"][0]
         rendered_text = render_text(result)
         metrics = render_prometheus(result)
         exported = json.dumps(session_export(result.sessions[0], result.sessions[0].events))
@@ -183,9 +285,7 @@ class OutputTests(unittest.TestCase):
         public_session = json.loads(rendered_json)["instances"][0]["sessions"][0]
         self.assertIsNone(public_session["tool_executions"][0]["output"])
         self.assertIsNone(public_session["turns"][0]["tools"][0]["output"])
-        self.assertIsNone(public_session["events"][0]["metadata"]["output"])
-        self.assertEqual(public_session["events"][0]["metadata"]["diagnostic_payload"], "")
-        self.assertIsNone(public_session["events"][0]["metadata"]["nested"]["stderr"])
+        self.assertEqual(public_session["events"][0]["metadata"], {})
         self.assertNotIn("terminal_sessions", exported)
         self.assertNotIn(transcript, exported)
 
@@ -205,15 +305,62 @@ class OutputTests(unittest.TestCase):
         metrics = render_prometheus(result)
 
         self.assertEqual(payload["summary"]["action_required"], 1)
-        self.assertEqual(
-            payload["instances"][0]["sessions"][0]["attention"], "APPROVAL"
-        )
+        self.assertEqual(payload["instances"][0]["sessions"][0]["attention"], "APPROVAL")
         self.assertIn("待操作 1", rendered_text)
         self.assertIn("Approve command", rendered_text)
         self.assertIn(
             'codexdeck_attention_sessions{instance="i1",state="APPROVAL"} 1',
             metrics,
         )
+
+    def test_protocol_uncertainty_is_shared_by_text_and_machine_output(self) -> None:
+        result = snapshot()
+        session = result.sessions[0]
+        session.protocol_uncertain = True
+        session.protocol_uncertainty_scope = "attention"
+        session.protocol_uncertainty_reason = "future approval shape"
+        session.lifecycle_confidence = Confidence.LOW
+        session.attention_confidence = Confidence.LOW
+        session.phase = "协议不确定（可能等待交互）"
+
+        payload = json.loads(render_json(result, pretty=False))
+        public_session = payload["instances"][0]["sessions"][0]
+
+        self.assertTrue(public_session["protocol_uncertain"])
+        self.assertEqual(public_session["protocol_uncertainty_scope"], "attention")
+        self.assertEqual(public_session["lifecycle_confidence"], "low")
+        self.assertIn("协议不确定（可能等待交互）", render_text(result))
+
+    def test_terminal_association_counts_and_coverage_are_machine_readable(self) -> None:
+        result = snapshot()
+        result.sessions[0].terminal_association = TerminalAssociationSummary(
+            eligible_operations=4,
+            associated_operations=3,
+            confirmed=2,
+            ambiguous=1,
+            unresolved=1,
+            reasons=(("missing_process_and_call_id", 1),),
+            association_coverage=0.75,
+            unresolved_rate=0.25,
+        )
+
+        payload = json.loads(render_json(result, pretty=False))
+        association = payload["instances"][0]["sessions"][0]["terminal_association"]
+
+        self.assertEqual(association["eligible_operations"], 4)
+        self.assertEqual(association["association_coverage"], 0.75)
+        self.assertIsNone(association["precision"])
+        self.assertIn("coverage 75.0%", render_text(result))
+        metrics = render_prometheus(result)
+        self.assertIn(
+            'codexdeck_terminal_association_operations{instance="i1",status="unresolved"} 1',
+            metrics,
+        )
+        self.assertIn(
+            'codexdeck_terminal_association_coverage{instance="i1"} 0.75',
+            metrics,
+        )
+        self.assertNotIn('codexdeck_terminal_association_precision{instance="i1"}', metrics)
 
     def test_json_has_versioned_instance_shape(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=True))
@@ -227,6 +374,10 @@ class OutputTests(unittest.TestCase):
                 "collection_duration_seconds",
                 "summary",
                 "diagnostics",
+                "collector_health",
+                "observer",
+                "temporal",
+                "history",
                 "instances",
             },
         )
@@ -239,6 +390,21 @@ class OutputTests(unittest.TestCase):
             payload["instances"][0]["sessions"][0]["silence"]["state"],
             "NORMAL",
         )
+
+    def test_structured_diagnostics_are_private_and_shared_with_metrics(self) -> None:
+        value = snapshot()
+        value.diagnostics = ["failed at /home/USER/private.sqlite TOKEN=SECRET_VALUE"]
+        value.instances[0].unknown_event_types = {"future_shape": 2}
+
+        payload = json.loads(render_json(value, pretty=False))
+        rendered = json.dumps(payload["diagnostics"], ensure_ascii=False)
+        self.assertNotIn("/home/USER", rendered)
+        self.assertNotIn("SECRET_VALUE", rendered)
+        codes = {item["code"] for item in payload["diagnostics"]}
+        self.assertIn("SOURCE_REPORTED_DEGRADED", codes)
+        self.assertIn("PROTOCOL_UNKNOWN", codes)
+        metrics = render_prometheus(value)
+        self.assertIn('codexdeck_diagnostics{code="PROTOCOL_UNKNOWN"', metrics)
         self.assertIn("last_semantic_at", payload["instances"][0]["sessions"][0]["observation"])
         self.assertNotIn("identity", payload["instances"][0])
         self.assertNotIn("identity", payload["instances"][0]["sessions"][0])
@@ -253,6 +419,73 @@ class OutputTests(unittest.TestCase):
             line.split()[2] for line in output.splitlines() if line.startswith("# HELP ")
         )
         self.assertEqual(families, METRIC_FAMILIES)
+
+    def test_axis_completeness_is_shared_by_json_text_doctor_and_metrics(self) -> None:
+        value = snapshot()
+        session = value.sessions[0]
+        session.completeness = SessionCompleteness(
+            lifecycle=AxisCompleteness(
+                "lifecycle",
+                complete=False,
+                confidence=Confidence.LOW,
+                reason="bootstrap gap",
+                baseline_kind="missing_after_gap",
+                evidence=("bootstrap_tail_truncated",),
+            )
+        )
+
+        payload = json.loads(render_json(value, pretty=False))
+        doctor = json.loads(render_doctor_json(value))
+        text = render_text(value)
+        metrics = render_prometheus(value)
+
+        lifecycle = payload["instances"][0]["sessions"][0]["completeness"]["lifecycle"]
+        self.assertFalse(lifecycle["complete"])
+        self.assertEqual(
+            doctor["instances"][0]["state_completeness"][0]["incomplete_axes"],
+            ["lifecycle"],
+        )
+        self.assertIn("证据不完整(lifecycle)", text)
+        self.assertIn(
+            'codexdeck_state_axis_completeness{axis="lifecycle",instance="i1",status="incomplete"} 1',
+            metrics,
+        )
+
+    def test_ingress_backlog_gap_and_budget_are_shared_by_json_and_metrics(self) -> None:
+        value = snapshot()
+        instance = value.instances[0]
+        instance.rollout_activity = [
+            {
+                "path": "/workspace-a/rollout.jsonl",
+                "backlog_bytes": 2048,
+                "backlog_records_lower_bound": 3,
+                "backlog_age_seconds": 1.5,
+                "budget_exceeded": True,
+                "gap_count": 1,
+                "skipped_bytes": 300000,
+                "gap_reason": "oversize_jsonl_record",
+            }
+        ]
+
+        payload = json.loads(render_json(value, pretty=False))
+        metrics = render_prometheus(value)
+
+        activity = payload["instances"][0]["rollout_activity"][0]
+        self.assertEqual(activity["backlog_bytes"], 2048)
+        self.assertEqual(activity["backlog_records_lower_bound"], 3)
+        self.assertEqual(activity["gap_reason"], "oversize_jsonl_record")
+        self.assertIn(
+            'codexdeck_ingress_backlog_bytes{instance="i1",source="rollout"} 2048',
+            metrics,
+        )
+        self.assertIn(
+            'codexdeck_ingress_backlog_records_lower_bound{instance="i1",source="rollout"} 3',
+            metrics,
+        )
+        self.assertIn(
+            'codexdeck_ingress_gap_total{instance="i1",source="rollout"} 1',
+            metrics,
+        )
 
     def test_all_includes_auxiliary_processes_in_json_and_text(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=False, show_auxiliary=True))
@@ -288,6 +521,7 @@ class OutputTests(unittest.TestCase):
         output = render_json(snapshot(), pretty=False)
         self.assertNotIn("\n", output)
         json.loads(output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,8 +8,9 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from models import AlertStatus, NormalizedEvent, SessionHealth, json_value
-from utils import redact_sensitive, strip_transcript_bodies
+from models import AlertStatus, NormalizedEvent, SessionHealth
+from presentation.privacy import public_value
+from utils import redact_sensitive
 
 
 EXPORT_SCHEMA_VERSION = 2
@@ -67,8 +68,8 @@ def _redact(value: Any, field: str = "") -> Any:
 
 
 def _event_value(event: NormalizedEvent) -> dict[str, Any]:
-    value = json_value(event)
-    value["provenance"] = json_value(event.provenance)
+    value = public_value(event)
+    value["provenance"] = public_value(event.provenance)
     return value
 
 
@@ -80,11 +81,7 @@ def incident_summary(
 
     events = sorted(retained_events, key=lambda event: event.timestamp)
     abnormal = [event for event in events if event.kind.upper() in _ABNORMAL_KINDS]
-    reliable = [
-        event
-        for event in events
-        if event.provenance.complete and event.provenance.source
-    ]
+    reliable = [event for event in events if event.provenance.complete and event.provenance.source]
     last_problem_at = abnormal[-1].timestamp if abnormal else None
     recovered_events = [
         event
@@ -120,7 +117,8 @@ def incident_summary(
 
     axis_changes = [
         {
-            "timestamp": event.timestamp,
+            "timestamp": event.presentation_timestamp,
+            "adjudicated_at": event.decision_timestamp,
             "axis": _AXIS_BY_EVENT[event.kind.upper()],
             "event": event.kind,
             "summary": event.summary,
@@ -132,10 +130,11 @@ def incident_summary(
 
     return {
         "what_happened": what_happened,
-        "first_abnormal_at": abnormal[0].timestamp if abnormal else None,
+        "first_abnormal_at": abnormal[0].presentation_timestamp if abnormal else None,
         "last_reliable_evidence": (
             {
-                "timestamp": last_reliable.timestamp,
+                "timestamp": last_reliable.presentation_timestamp,
+                "adjudicated_at": last_reliable.decision_timestamp,
                 "event": last_reliable.kind,
                 "summary": last_reliable.summary,
                 "source": last_reliable.source,
@@ -217,7 +216,7 @@ def session_export(
             "source": "SessionStateMachine.retained_events",
         },
     }
-    return _redact(strip_transcript_bodies(json_value(payload)))
+    return _redact(public_value(payload))
 
 
 def current_incidents_export(
@@ -229,17 +228,14 @@ def current_incidents_export(
 
     incidents: list[dict[str, Any]] = []
     for session in sessions:
-        active_alerts = [
-            item for item in session.alerts if item.status != AlertStatus.RESOLVED
-        ]
+        active_alerts = [item for item in session.alerts if item.status != AlertStatus.RESOLVED]
         if (
             not active_alerts
             and session.current_failure is None
             and session.attention_request is None
             and not session.alert
             and session.network.state.value not in {"SUSPECT", "STALLED"}
-            and session.silence.state.value
-            not in {"STALL_SUSPECT", "OBSERVER_BLIND"}
+            and session.silence.state.value not in {"STALL_SUSPECT", "OBSERVER_BLIND"}
         ):
             continue
         incidents.append(
@@ -267,7 +263,7 @@ def current_incidents_export(
         "incident_count": len(incidents),
         "incidents": incidents,
     }
-    return _redact(strip_transcript_bodies(json_value(payload)))
+    return _redact(public_value(payload))
 
 
 def render_export_json(payload: dict[str, Any], *, pretty: bool = True) -> str:

@@ -13,11 +13,17 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from app import AppOptions, _run_application  # noqa: E402
 from cli import build_parser  # noqa: E402
 from models import (  # noqa: E402
+    AdapterResult,
+    AdapterStatus,
     CapabilityMode,
     CapabilityStatus,
+    ClockAssessment,
     CodexPaths,
     CollectorHealth,
+    CompactSourceStatus,
     Confidence,
+    DiscoveryCandidateDiagnostic,
+    DiscoverySummary,
     InstanceSnapshot,
     MonitorSnapshot,
     ProcessIdentity,
@@ -61,6 +67,7 @@ def make_instance() -> InstanceSnapshot:
         token_usage=CapabilityStatus(CapabilityMode.DERIVED, "event_msg", Confidence.MEDIUM),
     )
     instance.sessions.append(session)
+    instance.processes.append(process)
     return instance
 
 
@@ -95,6 +102,49 @@ class FakeEngine:
 
 
 class DoctorTests(unittest.TestCase):
+    def test_adapter_failure_is_shared_by_doctor_diagnostics_and_strict_exit(self) -> None:
+        instance = make_instance()
+        instance.adapter_results = (
+            AdapterResult(
+                AdapterStatus.FAILED,
+                "sqlite.state.threads",
+                10.0,
+                error_code="sqlite_schema_drift",
+                complete=False,
+            ),
+        )
+        snapshot = MonitorSnapshot("now", 2.0, [instance])
+
+        report = doctor_dict(snapshot)
+
+        self.assertEqual(report["instances"][0]["adapter_results"][0]["status"], "failed")
+        self.assertEqual(report["instances"][0]["adapter_results"][0]["error_code"], "sqlite_schema_drift")
+        self.assertTrue(any(item["code"] == "ADAPTER_FAILED" for item in report["diagnostics"]))
+        self.assertEqual(doctor_exit_code(snapshot), 2)
+
+    def test_unverified_hook_trust_is_machine_readable_and_degraded(self) -> None:
+        instance = make_instance()
+        instance.hook_events = CompactSourceStatus(
+            configured=True,
+            readable=True,
+            source="compact_hook",
+            parse_validity=Confidence.HIGH,
+            source_authenticity=Confidence.LOW,
+            identity_binding=Confidence.LOW,
+            semantic_confidence=Confidence.MEDIUM,
+            binding_evidence=("producer_not_authenticated",),
+        )
+        snapshot = MonitorSnapshot("now", 2.0, [instance])
+
+        report = doctor_dict(snapshot)
+        hook = report["instances"][0]["compact_sources"]["hook_events"]
+        self.assertEqual(hook["parse_validity"], "high")
+        self.assertEqual(hook["source_authenticity"], "low")
+        self.assertEqual(hook["identity_binding"], "low")
+        self.assertEqual(hook["semantic_confidence"], "medium")
+        self.assertEqual(report["status"], "degraded")
+        self.assertEqual(doctor_exit_code(snapshot), 2)
+
     def test_app_options_selects_doctor_command(self) -> None:
         options = make_options()
         self.assertEqual(options.command, "doctor")
@@ -140,7 +190,12 @@ class DoctorTests(unittest.TestCase):
                 "generated_at",
                 "status",
                 "collection",
+                "observer",
+                "temporal",
+                "discovery",
+                "packet_inspection",
                 "diagnostics",
+                "history",
                 "collector_health",
                 "instances",
             },
@@ -150,24 +205,37 @@ class DoctorTests(unittest.TestCase):
             {
                 "instance_id",
                 "discovery_method",
+                "process_discovery",
                 "paths",
                 "schema_capabilities",
+                "adapter_results",
                 "protocol_capabilities",
                 "diagnostics",
                 "unknown_events",
                 "protocol_compatibility",
+                "protocol_uncertainty",
+                "state_completeness",
+                "clock_uncertainty",
                 "rollout",
                 "compact_sources",
                 "collector_health",
             },
         )
         self.assertEqual(report["status"], "healthy")
+        self.assertEqual(report["instances"][0]["process_discovery"][0]["confidence"], "high")
+        self.assertFalse(report["packet_inspection"]["enabled"])
+        self.assertEqual(
+            report["packet_inspection"]["prefilter_stage"],
+            "before_tls_reassembly",
+        )
         self.assertEqual(
             report["instances"][0]["protocol_compatibility"]["status"],
             "unobserved",
         )
         self.assertIn("compact_sources", report["instances"][0])
-        self.assertEqual(report["instances"][0]["protocol_capabilities"]["turn_timing"]["mode"], "direct")
+        self.assertEqual(
+            report["instances"][0]["protocol_capabilities"]["turn_timing"]["mode"], "direct"
+        )
 
     def test_collector_error_and_budget_have_degraded_exit(self) -> None:
         snapshot = MonitorSnapshot("now", 2.0, [make_instance()], 2.1)
@@ -181,8 +249,106 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(report["collector_health"][0]["error"], "ss failed")
         self.assertEqual(doctor_exit_code(snapshot), 2)
 
+    def test_protocol_uncertainty_is_machine_readable(self) -> None:
+        instance = make_instance()
+        session = instance.sessions[0]
+        session.protocol_uncertain = True
+        session.protocol_uncertainty_scope = "lifecycle"
+        session.protocol_uncertainty_reason = "future phase shape"
+        session.lifecycle_confidence = Confidence.LOW
+
+        report = doctor_dict(MonitorSnapshot("now", 2.0, [instance]))
+
+        uncertainty = report["instances"][0]["protocol_uncertainty"][0]
+        self.assertEqual(uncertainty["scope"], "lifecycle")
+        self.assertEqual(uncertainty["lifecycle_confidence"], "low")
+        self.assertEqual(report["status"], "degraded")
+        self.assertIn(
+            "protocol uncertainty: session=session; scope=lifecycle",
+            render_doctor_text(MonitorSnapshot("now", 2.0, [instance])),
+        )
+
+    def test_clock_uncertainty_exposes_source_and_adjudication_time(self) -> None:
+        instance = make_instance()
+        session = instance.sessions[0]
+        session.clock_uncertain = True
+        session.clock_assessments = (
+            ClockAssessment(
+                "compact_hook",
+                "hook_producer_wall_clock",
+                1_100.0,
+                1_000.0,
+                1_000.0,
+                "future_source_timestamp_gt_30s",
+            ),
+        )
+
+        snapshot = MonitorSnapshot("now", 2.0, [instance])
+        report = doctor_dict(snapshot)
+        clock = report["instances"][0]["clock_uncertainty"][0]
+
+        self.assertEqual(clock["source"], "compact_hook")
+        self.assertEqual(clock["adjudicated_at"], 1_000.0)
+        self.assertEqual(report["status"], "degraded")
+        self.assertIn("clock uncertainty: session=session", render_doctor_text(snapshot))
+
     def test_no_instances_exit_one(self) -> None:
         self.assertEqual(doctor_exit_code(MonitorSnapshot("now", 2.0)), 1)
+
+    def test_discovery_summary_and_unresolved_candidates_are_visible(self) -> None:
+        snapshot = MonitorSnapshot(
+            "now",
+            2.0,
+            [make_instance()],
+            discovery=DiscoverySummary(
+                candidates=3,
+                confirmed=1,
+                rejected=1,
+                unresolved=1,
+                diagnostics=(
+                    DiscoveryCandidateDiagnostic(
+                        99,
+                        "codex",
+                        "session",
+                        "unresolved",
+                        "process_environment_unreadable",
+                    ),
+                ),
+            ),
+        )
+
+        report = doctor_dict(snapshot)
+
+        self.assertEqual(report["discovery"]["unresolved"], 1)
+        self.assertEqual(report["discovery"]["diagnostics"][0]["pid"], 99)
+        self.assertEqual(report["status"], "degraded")
+        self.assertIn(
+            "candidates=3; confirmed=1; rejected=1; unresolved=1", render_doctor_text(snapshot)
+        )
+
+    def test_ingress_backlog_and_explicit_gap_degrade_doctor(self) -> None:
+        instance = make_instance()
+        instance.rollout_activity = [
+            {
+                "path": "/tmp/rollout.jsonl",
+                "backlog_bytes": 4096,
+                "backlog_records_lower_bound": 2,
+                "backlog_age_seconds": 3.0,
+                "budget_exceeded": True,
+                "gap_count": 1,
+                "skipped_bytes": 300000,
+                "gap_reason": "oversize_jsonl_record",
+            }
+        ]
+        snapshot = MonitorSnapshot("now", 2.0, [instance])
+
+        report = doctor_dict(snapshot)
+        text = render_doctor_text(snapshot)
+
+        self.assertEqual(report["status"], "degraded")
+        self.assertEqual(report["instances"][0]["rollout"]["activity"][0]["backlog_bytes"], 4096)
+        self.assertIn("backlog_records>=2", text)
+        self.assertIn("reason=oversize_jsonl_record", text)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from config import LIFECYCLE_LABELS, NETWORK_LABELS, RECOVERY_LABELS
+from diagnostics import diagnostic_text, snapshot_diagnostics
 from models import (
     RUNNING_TERMINAL_STATUSES,
     AgentNode,
@@ -12,17 +13,25 @@ from models import (
     SessionHealth,
     TokenUsageSummary,
 )
-from utils import format_duration
+from utils import format_duration, redact_sensitive
 
 
 def _session_status(session: SessionHealth) -> str:
+    suffix = (
+        f" · 证据不完整({','.join(session.completeness.incomplete_axes)})"
+        if session.completeness.incomplete_axes
+        else ""
+    )
     if session.process_exited:
-        return "进程已退出"
+        return "进程已退出" + suffix
+    if session.protocol_uncertain:
+        return session.phase + suffix
     if session.attention_request:
-        return f"等待用户操作 / {session.attention.value}"
+        return f"等待用户操作 / {session.attention.value}" + suffix
     lifecycle = LIFECYCLE_LABELS[session.lifecycle.value]
     recovery = RECOVERY_LABELS[session.recovery.value]
-    return f"{lifecycle} / {recovery}" if recovery else lifecycle
+    status = f"{lifecycle} / {recovery}" if recovery else lifecycle
+    return status + suffix
 
 
 def _number(value: int | float | None) -> str:
@@ -82,8 +91,7 @@ def _session_metrics(session: SessionHealth) -> list[str]:
 
     if session.terminal_sessions:
         running_terminals = sum(
-            terminal.status in RUNNING_TERMINAL_STATUSES
-            for terminal in session.terminal_sessions
+            terminal.status in RUNNING_TERMINAL_STATUSES for terminal in session.terminal_sessions
         )
         capabilities = ", ".join(
             sorted({terminal.capability.value for terminal in session.terminal_sessions})
@@ -96,6 +104,26 @@ def _session_metrics(session: SessionHealth) -> list[str]:
         if dropped:
             detail += f" | dropped {dropped} B"
         lines.append(detail)
+
+    association = session.terminal_association
+    if association.eligible_operations:
+        coverage = (
+            f"{association.association_coverage:.1%}"
+            if association.association_coverage is not None
+            else "?"
+        )
+        precision = (
+            f"{association.precision:.1%}" if association.precision is not None else "unlabeled"
+        )
+        lines.append(
+            "    Terminal 关联："
+            f"eligible {association.eligible_operations} | associated "
+            f"{association.associated_operations} | coverage {coverage} | "
+            f"unresolved {association.unresolved} | conflicting {association.conflicting} | "
+            f"dropped {association.dropped} | private entries "
+            f"{association.private_state_entries} | private dropped "
+            f"{association.private_state_dropped} | precision {precision}"
+        )
 
     token_parts = _token_parts("本 Turn", session.token_usage)
     token_parts.extend(_token_parts("累计", session.cumulative_token_usage))
@@ -142,8 +170,23 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
             f"阻塞 {summary['network_stalls']}"
         ),
     ]
-    if snapshot.diagnostics:
-        lines.extend(f"[采集] {message}" for message in snapshot.diagnostics)
+    observer = snapshot.observer
+    lines.append(
+        "Observer "
+        f"{observer.sample_kind}  lag {observer.scheduling_lag_seconds:.3f}s  "
+        f"age {observer.snapshot_age_seconds:.3f}s  "
+        f"skipped {observer.skipped_ticks}  "
+        f"{'DEGRADED ' + observer.reason if observer.degraded else 'healthy'}"
+    )
+    lines.append(
+        "Observation window "
+        f"{snapshot.temporal.observed_from}..{snapshot.temporal.observed_to}  "
+        f"skew {snapshot.temporal.actual_source_skew_seconds:.3f}s  "
+        f"{'coherent' if snapshot.temporal.coherent else 'MIXED/STALE'}"
+    )
+    diagnostics = snapshot_diagnostics(snapshot)
+    if diagnostics:
+        lines.extend(f"[采集:{item.code}] {diagnostic_text(item)}" for item in diagnostics)
     if not snapshot.instances:
         lines.append("当前没有运行中的 Codex 会话。")
         return "\n".join(lines)
@@ -155,7 +198,7 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
         )
         lines.append("")
         lines.append(f"[{instance.display_codex_home}]{suffix}")
-        lines.extend(f"  数据不完整：{message}" for message in instance.diagnostics)
+        lines.extend(f"  数据不完整：{diagnostic_text(message)}" for message in instance.diagnostics)
         if instance.unknown_event_types:
             total = sum(instance.unknown_event_types.values())
             lines.append(f"  未映射协议事件：{total} 条")
@@ -238,4 +281,4 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
                     f"    PID {process.pid:<6} {process.role:<10} {process.command}"
                     for process in auxiliaries
                 )
-    return "\n".join(lines)
+    return redact_sensitive("\n".join(lines))
