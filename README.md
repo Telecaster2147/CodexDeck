@@ -331,9 +331,10 @@ socket reopen 由 flow identity、rollout replace/truncate 由 generation 单调
 | network | 当前 socket/queue/counter 证据 | 新鲜且完整的 socket snapshot；不由 rollout baseline 代替 |
 | silence | 当前 observer-blind 正证据或静默分类 | 完整 observation probes 加完整 lifecycle baseline |
 
-冷启动只读尾部、超长记录 skip、copy-truncate、generation 变化和 500-event retention 都会为受影响轴
-建立显式 gap。后续证据只恢复它实际覆盖的轴；例如 `ACTION_RESOLVED` 不恢复 lifecycle，socket probe
-也不恢复 attention。纯 backlog 在 catch-up 前临时降级，积压清空且没有数据丢失时恢复连续覆盖。
+冷启动只读尾部会公开 context-truncated；缺少当前基线时保持保守，尾部或后续实时记录中的可信
+基线会逐轴恢复完整度。超长记录 skip、copy-truncate 和 generation 变化会建立显式 gap。500-event
+retention 只限制公开时间线，状态机用有界轴基线保留当前 lifecycle/attention 等结论。TUI 在首次公开
+快照前追平有界冷启动 backlog；运行中的新 backlog 仍临时降级，追平且没有数据丢失时恢复连续覆盖。
 
 协议或关联判定的独立反例集位于 `tests/fixtures/ground_truth_manifest.json`，裁决流程见
 `tests/fixtures/ground_truth_manifest.json`。反例分为 true positive、false positive、false negative、
