@@ -106,6 +106,29 @@ ATTENTION_CLEAR_KINDS = PROGRESS_KINDS | {
     "PROCESS_EXITED",
     "SESSION_CLOSED",
 }
+AXIS_BASELINE_KINDS = {
+    "lifecycle": set(LIFECYCLE_PHASE_KINDS)
+    | {"PROCESS_RESUMED", "PROCESS_EXITED", "SESSION_CLOSED"},
+    "attention": {"ACTION_REQUIRED"} | set(ATTENTION_CLEAR_KINDS),
+    "failure_recovery": {
+        "TURN_STARTED",
+        "TURN_FAILED",
+        "COMPACT_FAILED",
+        "RECONNECTING",
+        "TRANSPORT_FALLBACK",
+        "RECOVERED",
+        "PROCESS_RESUMED",
+        "PROCESS_EXITED",
+        "SESSION_CLOSED",
+    }
+    | set(PROGRESS_KINDS),
+    "terminal_ownership": {
+        "TOOL_COMPLETED",
+        *TERMINAL_KINDS,
+        "PROCESS_EXITED",
+        "SESSION_CLOSED",
+    },
+}
 NON_SEMANTIC_KINDS = {
     "KEEPALIVE",
     "TOKEN_USAGE",
@@ -212,7 +235,26 @@ class SessionStateMachine:
         self.network_probe_complete: dict[str | SessionIdentity, bool] = {}
         self.silence_probe_complete: dict[str | SessionIdentity, bool] = {}
         self.event_retention_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
+        self.axis_baselines: dict[
+            str | SessionIdentity, dict[str, NormalizedEvent]
+        ] = defaultdict(dict)
         self.clock_sequence = 0
+
+    def _remember_axis_baselines(
+        self,
+        key: str | SessionIdentity,
+        event: NormalizedEvent,
+    ) -> None:
+        baselines = self.axis_baselines[key]
+        for axis, kinds in AXIS_BASELINE_KINDS.items():
+            if event.kind not in kinds:
+                continue
+            previous = baselines.get(axis)
+            if previous is None or (event.timestamp, event.source_id) >= (
+                previous.timestamp,
+                previous.source_id,
+            ):
+                baselines[axis] = event
 
     @staticmethod
     def _storage_key(key: str | SessionIdentity) -> str:
@@ -768,6 +810,7 @@ class SessionStateMachine:
                 self.pending_recovery.pop(key, None)
             elif event.kind in TERMINAL_KINDS:
                 self.pending_recovery.pop(key, None)
+            self._remember_axis_baselines(key, event)
             bucket.append(event)
         bucket.sort(key=lambda item: (item.timestamp, item.source_id))
         if len(bucket) > MAX_EVENTS_PER_SESSION:
@@ -775,13 +818,6 @@ class SessionStateMachine:
             retained = bucket[-MAX_EVENTS_PER_SESSION:]
             self.events[key] = retained
             self.event_retention_dropped[key] += dropped
-            oldest = retained[0]
-            gap_at = (oldest.observed_at or oldest.timestamp) - 0.000001
-            self.coverage_gap_at[key] = max(self.coverage_gap_at.get(key, 0.0), gap_at)
-            reasons = self.coverage_gap_reasons.get(key, ())
-            self.coverage_gap_reasons[key] = tuple(
-                dict.fromkeys((*reasons, "event_retention_500"))
-            )[-8:]
 
     @staticmethod
     def _latest(events: list[NormalizedEvent], *kinds: str) -> NormalizedEvent | None:
@@ -1858,33 +1894,13 @@ class SessionStateMachine:
         events: list[NormalizedEvent],
     ) -> SessionCompleteness:
         lifecycle = self._axis_after_gap(
-            key,
-            "lifecycle",
-            events,
-            set(LIFECYCLE_PHASE_KINDS) | {"PROCESS_RESUMED", "PROCESS_EXITED", "SESSION_CLOSED"},
+            key, "lifecycle", events, AXIS_BASELINE_KINDS["lifecycle"]
         )
         attention = self._axis_after_gap(
-            key,
-            "attention",
-            events,
-            {"ACTION_REQUIRED"} | set(ATTENTION_CLEAR_KINDS),
+            key, "attention", events, AXIS_BASELINE_KINDS["attention"]
         )
         failure_recovery = self._axis_after_gap(
-            key,
-            "failure_recovery",
-            events,
-            {
-                "TURN_STARTED",
-                "TURN_FAILED",
-                "COMPACT_FAILED",
-                "RECONNECTING",
-                "TRANSPORT_FALLBACK",
-                "RECOVERED",
-                "PROCESS_RESUMED",
-                "PROCESS_EXITED",
-                "SESSION_CLOSED",
-            }
-            | set(PROGRESS_KINDS),
+            key, "failure_recovery", events, AXIS_BASELINE_KINDS["failure_recovery"]
         )
         terminal_probe_at = self.terminal_probe_complete_at.get(key)
         terminal_probe_complete = self.terminal_probe_complete.get(key)
@@ -1911,10 +1927,7 @@ class SessionStateMachine:
             )
         else:
             terminal_ownership = self._axis_after_gap(
-                key,
-                "terminal_ownership",
-                events,
-                {"TOOL_COMPLETED", *TERMINAL_KINDS, "PROCESS_EXITED", "SESSION_CLOSED"},
+                key, "terminal_ownership", events, AXIS_BASELINE_KINDS["terminal_ownership"]
             )
         network_complete = self.network_probe_complete.get(key, True)
         network = AxisCompleteness(
@@ -2013,9 +2026,16 @@ class SessionStateMachine:
     ) -> SessionHealth:
         now = time.time() if now is None else now
         all_events = self.events.get(key, [])
+        decision_events = {
+            event.source_id: event
+            for event in (*all_events, *self.axis_baselines.get(key, {}).values())
+        }
+        decision_context = sorted(
+            decision_events.values(), key=lambda event: (event.timestamp, event.source_id)
+        )
         authoritative_events = [
             event
-            for event in all_events
+            for event in decision_context
             if not (
                 event.source == "compact_hook"
                 and (
@@ -2571,3 +2591,4 @@ class SessionStateMachine:
                 self.network_probe_complete.pop(key, None)
                 self.silence_probe_complete.pop(key, None)
                 self.event_retention_dropped.pop(key, None)
+                self.axis_baselines.pop(key, None)

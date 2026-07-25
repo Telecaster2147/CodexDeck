@@ -748,7 +748,7 @@ class StateMachineTests(unittest.TestCase):
             metadata={"semantic_scope": scope},
         )
 
-    def test_evidence_gap_recovers_only_axes_with_trusted_baselines(self) -> None:
+    def test_explicit_evidence_gap_recovers_only_axes_with_trusted_baselines(self) -> None:
         machine = SessionStateMachine(3600)
         key = "coverage"
         observed_at = 1.0
@@ -757,7 +757,7 @@ class StateMachineTests(unittest.TestCase):
             EvidenceCoverage(
                 observed_at,
                 source_epoch="stream:1",
-                bootstrap_truncated=True,
+                gap_count=1,
                 terminal_probe_complete=False,
                 network_probe_complete=True,
                 silence_probe_complete=True,
@@ -820,7 +820,33 @@ class StateMachineTests(unittest.TestCase):
         self.assertTrue(terminal.completeness.terminal_ownership.complete)
         self.assertFalse(terminal.completeness.lifecycle.complete)
 
-    def test_backlog_is_temporary_but_retention_gap_requires_axis_clear(self) -> None:
+    def test_bootstrap_tail_recovers_axes_after_current_baselines(self) -> None:
+        machine = SessionStateMachine(3600)
+        key = "bootstrap-tail"
+        machine.update_coverage(
+            key,
+            EvidenceCoverage(
+                1.0,
+                source_epoch="stream:1",
+                bootstrap_truncated=True,
+                terminal_probe_complete=True,
+                network_probe_complete=True,
+                silence_probe_complete=True,
+            ),
+        )
+
+        initial = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE))
+        self.assertFalse(initial.completeness.lifecycle.complete)
+        self.assertFalse(initial.completeness.attention.complete)
+        self.assertFalse(initial.completeness.failure_recovery.complete)
+        self.assertTrue(initial.completeness.terminal_ownership.complete)
+
+        machine.ingest(key, [event(2.0, "MODEL_PROGRESS", "current-baseline")])
+        state = machine.derive(key, process(), NetworkEvidence(NetworkState.IDLE), now=3.0)
+
+        self.assertEqual(state.completeness.incomplete_axes, ())
+
+    def test_backlog_is_temporary_and_retention_preserves_axis_baselines(self) -> None:
         machine = SessionStateMachine(3600)
         key = "backlog"
         machine.update_coverage(
@@ -850,9 +876,23 @@ class StateMachineTests(unittest.TestCase):
             now=600,
         )
         self.assertEqual(len(retained.events), 500)
-        self.assertEqual(retained.attention, AttentionState.NONE)
-        self.assertFalse(retained.completeness.attention.complete)
-        self.assertIn("event_retention_500", retained.completeness.attention.evidence)
+        self.assertEqual(retained.attention, AttentionState.USER_INPUT)
+        self.assertTrue(retained.completeness.attention.complete)
+
+        lifecycle_key = "retained-lifecycle"
+        lifecycle_records = [event(1, "REQUEST_SENT", "request")]
+        lifecycle_records.extend(
+            event(index + 2, "KEEPALIVE", f"keepalive-{index}") for index in range(501)
+        )
+        machine.ingest(lifecycle_key, lifecycle_records)
+        lifecycle = machine.derive(
+            lifecycle_key,
+            process(),
+            NetworkEvidence(NetworkState.IDLE),
+            now=600,
+        )
+        self.assertEqual(lifecycle.lifecycle, LifecycleState.WAITING_RESPONSE)
+        self.assertTrue(lifecycle.completeness.lifecycle.complete)
 
         machine.ingest(retained_key, [event(604, "ACTION_RESOLVED", "retained-clear")])
         cleared = machine.derive(

@@ -139,7 +139,7 @@ class ProtocolReplayTests(unittest.TestCase):
         self.assertFalse(completeness["failure_recovery"])
         self.assertTrue(completeness["network"])
 
-    def test_replay_retention_gap_keeps_hidden_attention_unknown(self) -> None:
+    def test_replay_timeline_retention_preserves_current_attention(self) -> None:
         attention = (
             b'{"timestamp":1,"type":"event_msg","payload":'
             b'{"type":"exec_approval_request","turn_id":"TURN_ID"}}\n'
@@ -150,13 +150,13 @@ class ProtocolReplayTests(unittest.TestCase):
             ).encode()
             for index in range(501)
         )
-        summary = ProtocolReplayRunner().replay(
-            (ReplayOperation("append", attention + keepalives),)
-        )
+        operations = [ReplayOperation("append", attention + keepalives)]
+        operations.extend(ReplayOperation("append", b"") for _ in range(4))
+        summary = ProtocolReplayRunner().replay(operations)
         completeness = {axis: complete for axis, complete, _ in summary.completeness}
 
-        self.assertEqual(summary.attention, "NONE")
-        self.assertFalse(completeness["attention"])
+        self.assertEqual(summary.attention, "APPROVAL")
+        self.assertTrue(completeness["attention"])
 
 
 if __name__ == "__main__":

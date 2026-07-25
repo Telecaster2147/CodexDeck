@@ -110,23 +110,48 @@ class TemporalCutTests(unittest.TestCase):
         self.assertFalse(cut.coherent)
         self.assertEqual(
             set(updated[0].sessions[0].completeness.incomplete_axes),
-            {"lifecycle", "attention", "failure_recovery", "terminal_ownership", "network", "silence"},
+            {"silence"},
         )
-        self.assertTrue(
-            all(
-                axis.baseline_kind == "temporal_cut"
-                for axis in (
-                    updated[0].sessions[0].completeness.lifecycle,
-                    updated[0].sessions[0].completeness.attention,
-                    updated[0].sessions[0].completeness.failure_recovery,
-                    updated[0].sessions[0].completeness.terminal_ownership,
-                    updated[0].sessions[0].completeness.network,
-                    updated[0].sessions[0].completeness.silence,
-                )
-            )
+        self.assertEqual(updated[0].sessions[0].completeness.silence.baseline_kind, "temporal_cut")
+
+    def test_old_terminal_and_tls_data_do_not_make_a_fresh_sample_incoherent(self) -> None:
+        value = instance(100.3)
+        process = ProcessInfo(
+            ProcessIdentity(42, 100),
+            1,
+            "codex",
+            1,
+            0.0,
+            "S",
+            "wait",
+            "codex",
+            "session",
+            instance_id="INSTANCE",
+            session_id="SESSION",
+        )
+        value.sessions = [SessionHealth("INSTANCE", "SESSION", process)]
+        value.sessions[0].terminal_sessions = [
+            TerminalSessionSummary("TERMINAL", last_output_at=1.0)
+        ]
+        cut = build_temporal_cut(
+            [value],
+            [
+                CollectorHealth("process", last_success_at=100.0),
+                CollectorHealth("socket", last_success_at=100.1),
+                CollectorHealth("state_db:INSTANCE", last_success_at=100.2),
+                CollectorHealth("packet", last_success_at=100.25),
+            ],
+            now=100.4,
+            interval=2.0,
+            generation=1,
         )
 
-    def test_terminal_observation_is_independent_and_pid_reuse_identity_is_monotonic(self) -> None:
+        self.assertTrue(cut.coherent)
+        self.assertEqual(
+            {item.source: item.observed_to for item in cut.sources}["terminal"], 100.3
+        )
+
+    def test_terminal_window_uses_rollout_observation_and_pid_reuse_is_monotonic(self) -> None:
         value = instance(20.0)
         terminal = TerminalSessionSummary(
             "TERMINAL",
@@ -162,7 +187,7 @@ class TemporalCutTests(unittest.TestCase):
         )
         self.assertEqual(cut.kind, "composite_interval")
         terminal_source = next(item for item in cut.sources if item.source == "terminal")
-        self.assertEqual(terminal_source.observed_to, 21.0)
+        self.assertEqual(terminal_source.observed_to, 20.0)
 
 
 if __name__ == "__main__":

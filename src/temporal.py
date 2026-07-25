@@ -15,14 +15,40 @@ from models import (
 
 TEMPORAL_SOURCES = ("process", "rollout", "terminal", "sqlite", "hook", "socket", "packet")
 
+# A source window is about when CodexDeck observed a source, not when the source
+# last emitted application data. Terminal and TLS summaries retain their last
+# output/handshake time, which can legitimately be much older than a healthy
+# sample. Rollout owns durable terminal updates; socket owns packet attribution.
+COHERENCE_SOURCES = ("process", "rollout", "sqlite", "socket", "packet")
+AXIS_SOURCES = {
+    "lifecycle": ("rollout",),
+    "attention": ("rollout",),
+    "failure_recovery": ("rollout",),
+    "terminal_ownership": ("process", "terminal"),
+    "network": ("socket",),
+    "silence": ("process", "rollout", "socket"),
+}
+
 
 def apply_temporal_completeness(
     instances: list[InstanceSnapshot], cut: SnapshotTemporalCut
 ) -> list[InstanceSnapshot]:
-    """Mark cross-source conclusions incomplete when source windows are disjoint."""
+    """Downgrade only conclusions whose required source windows are disjoint."""
 
     if cut.coherent:
         return instances
+
+    sources = {item.source: item for item in cut.sources}
+
+    def axis_has_disjoint_windows(axis_name: str) -> bool:
+        windows = [
+            sources[source].observed_to
+            for source in AXIS_SOURCES[axis_name]
+            if source in sources
+            and sources[source].complete
+            and sources[source].observed_to is not None
+        ]
+        return len(windows) >= 2 and max(windows) - min(windows) > cut.max_source_skew_seconds
 
     def downgrade(axis: object) -> object:
         if not getattr(axis, "complete", False):
@@ -49,12 +75,36 @@ def apply_temporal_completeness(
                     session,
                     completeness=replace(
                         completeness,
-                        lifecycle=downgrade(completeness.lifecycle),
-                        attention=downgrade(completeness.attention),
-                        failure_recovery=downgrade(completeness.failure_recovery),
-                        terminal_ownership=downgrade(completeness.terminal_ownership),
-                        network=downgrade(completeness.network),
-                        silence=downgrade(completeness.silence),
+                        lifecycle=(
+                            downgrade(completeness.lifecycle)
+                            if axis_has_disjoint_windows("lifecycle")
+                            else completeness.lifecycle
+                        ),
+                        attention=(
+                            downgrade(completeness.attention)
+                            if axis_has_disjoint_windows("attention")
+                            else completeness.attention
+                        ),
+                        failure_recovery=(
+                            downgrade(completeness.failure_recovery)
+                            if axis_has_disjoint_windows("failure_recovery")
+                            else completeness.failure_recovery
+                        ),
+                        terminal_ownership=(
+                            downgrade(completeness.terminal_ownership)
+                            if axis_has_disjoint_windows("terminal_ownership")
+                            else completeness.terminal_ownership
+                        ),
+                        network=(
+                            downgrade(completeness.network)
+                            if axis_has_disjoint_windows("network")
+                            else completeness.network
+                        ),
+                        silence=(
+                            downgrade(completeness.silence)
+                            if axis_has_disjoint_windows("silence")
+                            else completeness.silence
+                        ),
                     ),
                 )
             )
@@ -92,27 +142,22 @@ def _source_times(
         for activity in instance.rollout_activity
         if activity.get("observed_at") is not None
     ]
-    terminal_values = [
-        terminal.last_output_at or terminal.started_at
-        for instance in instances
-        for session in instance.sessions
-        for terminal in session.terminal_sessions
-    ]
+    rollout_observed = _latest(rollout_values)
+    terminal_present = any(
+        session.terminal_sessions for instance in instances for session in instance.sessions
+    )
     hook_values = [instance.hook_events.last_probe_at for instance in instances]
-    packet_values = [
-        connection.tls_observed_at
-        for instance in instances
-        for session in instance.sessions
-        for connection in session.network.connections
-    ]
     return {
         "process": process,
-        "rollout": (_latest(rollout_values), bool(rollout_values)),
-        "terminal": (_latest(terminal_values), bool(terminal_values)),
+        "rollout": (rollout_observed, bool(rollout_values)),
+        "terminal": (
+            rollout_observed if terminal_present else None,
+            terminal_present and rollout_observed is not None,
+        ),
         "sqlite": sqlite,
         "hook": (_latest(hook_values), any(value is not None for value in hook_values)),
         "socket": socket,
-        "packet": (_latest(packet_values), bool(packet_values)),
+        "packet": _collector_time(collectors, "packet"),
     }
 
 
@@ -155,7 +200,11 @@ def build_temporal_cut(
                 complete=complete,
             )
         )
-    present = [item.observed_to for item in observations if item.observed_to is not None]
+    present = [
+        item.observed_to
+        for item in observations
+        if item.source in COHERENCE_SOURCES and item.complete and item.observed_to is not None
+    ]
     observed_from = min(present) if present else None
     observed_to = max(present) if present else None
     skew = (observed_to - observed_from) if observed_from is not None and observed_to is not None else 0.0
