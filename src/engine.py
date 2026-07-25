@@ -76,6 +76,8 @@ class _SocketStage:
 
 
 class MonitorEngine:
+    INITIAL_BACKLOG_DRAIN_PASSES = 128
+
     def __init__(
         self,
         interval: float,
@@ -152,6 +154,29 @@ class MonitorEngine:
         """Run the full collector pipeline and publish one coherent snapshot."""
 
         return self._collect_full_sample()
+
+    def prepare_initial_snapshot(self) -> MonitorSnapshot:
+        """Collect and catch up the bounded rollout tail before first publication."""
+
+        self.baseline()
+        snapshot = self.sample()
+        for _ in range(self.INITIAL_BACKLOG_DRAIN_PASSES):
+            pending = any(
+                self.machine.coverage_backlog.get(session.session_identity, False)
+                for session in snapshot.sessions
+            )
+            if not pending:
+                break
+            previous_offsets = tuple(
+                sorted((path, cursor.offset) for path, cursor in self.rollouts.cursors.items())
+            )
+            snapshot = self.refresh_events(snapshot)
+            current_offsets = tuple(
+                sorted((path, cursor.offset) for path, cursor in self.rollouts.cursors.items())
+            )
+            if current_offsets == previous_offsets:
+                break
+        return snapshot
 
     def _collect_discovery_stage(
         self,
@@ -669,7 +694,6 @@ class MonitorEngine:
                         association.ambiguous,
                         association.conflicting,
                         association.unresolved,
-                        association.dropped,
                         association.private_state_dropped,
                     )
                 )
@@ -1360,11 +1384,16 @@ class MonitorEngine:
                     if item.inode
                 )
             )
+        gap_count = sum(item.gap_count for item in activities) if track_source else 0
+        if bootstrap_truncated and gap_count:
+            # Starting a bounded tail in the middle of the first retained JSONL
+            # record is an expected history boundary, not a runtime ingress gap.
+            gap_count -= 1
         return EvidenceCoverage(
             observed_at=observed_at,
             source_epoch=source_epoch,
-            bootstrap_truncated=bootstrap_truncated if track_source else False,
-            gap_count=sum(item.gap_count for item in activities) if track_source else 0,
+            bootstrap_truncated=(bootstrap_truncated if track_source and source_epoch else False),
+            gap_count=gap_count,
             generation_changed=track_source and any(item.replaced for item in activities),
             copy_truncated=track_source
             and any(item.copy_truncated or item.truncated for item in activities),
@@ -1814,7 +1843,6 @@ class MonitorEngine:
             association.ambiguous
             or association.conflicting
             or association.unresolved
-            or association.dropped
             or association.private_state_dropped
         ):
             diagnosis.append(
@@ -1845,7 +1873,7 @@ class MonitorEngine:
                     "terminal_ownership",
                     complete=False,
                     confidence=Confidence.LOW,
-                    reason="terminal 关联存在 ambiguous/conflicting/unresolved/drop",
+                    reason="terminal 关联存在 ambiguous/conflicting/unresolved/private-state drop",
                     baseline_kind="terminal_association_incomplete",
                     evidence=tuple(
                         f"{reason}={count}"

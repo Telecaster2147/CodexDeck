@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from codex.paths import ProcReader, ResolvedInstance  # noqa: E402
 from codex.processes import DiscoveryResult  # noqa: E402
+from codex.rollout import RolloutActivity  # noqa: E402
 from codex.terminal import TerminalUpdate  # noqa: E402
 from engine import MonitorEngine  # noqa: E402
 from history import AsyncHistoryWriter  # noqa: E402
@@ -367,6 +369,54 @@ def create_instance(
 
 
 class EngineTests(unittest.TestCase):
+    def test_prepare_initial_snapshot_drains_rollout_backlog_before_publication(self) -> None:
+        engine = MonitorEngine(2.0, 30, 900)
+        session = SessionHealth("instance", "session", ProcessInfo(
+            ProcessIdentity(1, 1),
+            0,
+            "codex",
+            0,
+            0.0,
+            "S",
+            "",
+            "codex",
+            "session",
+            instance_id="instance",
+            session_id="session",
+        ))
+        snapshot = SimpleNamespace(sessions=[session])
+        key = session.session_identity
+        cursor = SimpleNamespace(offset=0)
+        engine.rollouts.cursors["rollout"] = cursor
+        engine.machine.coverage_backlog[key] = True
+
+        def refresh(current: object) -> object:
+            cursor.offset += 1
+            if cursor.offset == 2:
+                engine.machine.coverage_backlog[key] = False
+            return current
+
+        with (
+            patch.object(engine, "baseline") as baseline,
+            patch.object(engine, "sample", return_value=snapshot) as sample,
+            patch.object(engine, "refresh_events", side_effect=refresh) as refresh_events,
+        ):
+            result = engine.prepare_initial_snapshot()
+
+        self.assertIs(result, snapshot)
+        baseline.assert_called_once_with()
+        sample.assert_called_once_with()
+        self.assertEqual(refresh_events.call_count, 2)
+
+    def test_source_less_rollout_activity_cannot_reopen_bootstrap_gap(self) -> None:
+        coverage = MonitorEngine._evidence_coverage(
+            [RolloutActivity("missing-rollout", 10.0)],
+            bootstrap_truncated=True,
+        )
+
+        self.assertEqual(coverage.source_epoch, "")
+        self.assertFalse(coverage.bootstrap_truncated)
+
     def test_discovery_summary_and_indirect_confidence_reach_snapshot_diagnosis(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             instance, process = create_instance(
@@ -439,6 +489,68 @@ class EngineTests(unittest.TestCase):
             self.assertFalse(attached.completeness.terminal_ownership.complete)
             self.assertEqual(attached.diagnosis[-1].conclusion, "Terminal 关联不完整")
             engine.close()
+
+    def test_terminal_retention_drops_do_not_degrade_current_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(
+                Path(temp) / "workspace-a", 305, "session-retention", False
+            )
+            engine = MonitorEngine(
+                2.0,
+                30,
+                900,
+                discovery=FakeDiscovery(
+                    DiscoveryResult([process], {instance.instance_id: instance})
+                ),
+                sockets=FakeSockets([{}]),
+                proc=FakeProc(),
+            )
+            session = SessionHealth(instance.instance_id, "session-retention", process)
+            key = session.session_identity
+            engine.terminals.apply(
+                key,
+                tuple(
+                    TerminalUpdate(
+                        f"source-{index}",
+                        float(index),
+                        process_id=f"PROCESS_{index}",
+                        status="completed",
+                        terminal_candidate=True,
+                    )
+                    for index in range(20)
+                ),
+            )
+
+            attached = engine._attach_terminal_snapshot(session, key)
+
+            self.assertGreater(attached.terminal_association.dropped, 0)
+            self.assertEqual(attached.terminal_association.ambiguous, 0)
+            self.assertEqual(attached.terminal_association.conflicting, 0)
+            self.assertEqual(attached.terminal_association.unresolved, 0)
+            self.assertTrue(attached.completeness.terminal_ownership.complete)
+            self.assertNotIn(
+                "Terminal 关联不完整", {item.conclusion for item in attached.diagnosis}
+            )
+            engine.close()
+
+    def test_bootstrap_mid_record_is_not_a_runtime_ingress_gap(self) -> None:
+        bootstrap = RolloutActivity(
+            "/workspace-a/rollout.jsonl",
+            10.0,
+            gap_count=1,
+            gap_reason="bootstrap_started_mid_record",
+        )
+        later_gap = replace(bootstrap, gap_count=2, gap_reason="oversize_jsonl_record")
+
+        initial = MonitorEngine._evidence_coverage(
+            [bootstrap], bootstrap_truncated=True
+        )
+        degraded = MonitorEngine._evidence_coverage(
+            [later_gap], bootstrap_truncated=True
+        )
+
+        self.assertEqual(initial.gap_count, 0)
+        self.assertEqual(degraded.gap_count, 1)
 
     def test_discovery_stage_groups_processes_and_reuses_cached_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -1328,8 +1328,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
 
     def _initial_sample_worker(self) -> None:
         try:
-            self.engine.baseline()
-            snapshot = self.engine.sample()
+            snapshot = self.engine.prepare_initial_snapshot()
         except Exception as error:
             self.post_message(SampleCompleted(None, str(error)))
             return
@@ -1461,8 +1460,7 @@ def run_textual_tui(
         snapshot = MonitorSnapshot("", engine.interval, [])
         prepare_on_start = True
     else:
-        engine.baseline()
-        snapshot = engine.sample()
+        snapshot = engine.prepare_initial_snapshot()
         prepare_on_start = False
     app = CodexDeckApp(
         engine,

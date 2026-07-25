@@ -213,6 +213,10 @@ class FakeEngine:
         self.full_samples += 1
         return self.snapshot
 
+    def prepare_initial_snapshot(self) -> MonitorSnapshot:
+        self.baseline()
+        return self.sample()
+
     def refresh_events(self, snapshot: MonitorSnapshot) -> MonitorSnapshot:
         self.event_samples += 1
         return snapshot
