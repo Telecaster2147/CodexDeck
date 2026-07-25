@@ -48,7 +48,6 @@ class AttentionState(StringEnum):
 class AlertStatus(StringEnum):
     OPENED = "OPENED"
     ESCALATED = "ESCALATED"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
     RESOLVED = "RESOLVED"
 
 
@@ -138,7 +137,6 @@ class CapabilityMode(StringEnum):
 
 
 class TerminalCapability(StringEnum):
-    STREAMING = "STREAMING"
     FILE_TAIL = "FILE_TAIL"
     POLL_TRANSCRIPT = "POLL_TRANSCRIPT"
     FINAL_TRANSCRIPT = "FINAL_TRANSCRIPT"
@@ -301,69 +299,6 @@ class SnapshotTemporalCut:
 
 
 @dataclass(frozen=True)
-class HistoryWindowStats:
-    label: str
-    window_seconds: int
-    sample_count: int = 0
-    turn_count: int = 0
-    failure_count: int = 0
-    failure_rate: float | None = None
-    ttft_samples: int = 0
-    ttft_p50_seconds: float | None = None
-    ttft_p95_seconds: float | None = None
-    tool_samples: int = 0
-    tool_p50_seconds: float | None = None
-    tool_p95_seconds: float | None = None
-    reconnect_count: int = 0
-    fallback_count: int = 0
-    recovery_samples: int = 0
-    recovery_average_seconds: float | None = None
-    compact_count: int = 0
-    compact_per_hour: float = 0.0
-    silence_samples: int = 0
-    silence_p50_seconds: float | None = None
-    silence_p95_seconds: float | None = None
-    compact_manual_count: int = 0
-    compact_auto_count: int = 0
-    compact_failure_count: int = 0
-    compact_retry_count: int = 0
-    compact_duration_samples: int = 0
-    compact_duration_p50_seconds: float | None = None
-    compact_duration_p95_seconds: float | None = None
-    compact_context_samples: int = 0
-    compact_context_before_average: float | None = None
-    compact_context_after_average: float | None = None
-    phase_duration_seconds: tuple[tuple[str, float], ...] = ()
-    waiting_upstream_seconds: float = 0.0
-    attention_wait_seconds: float = 0.0
-    observer_blind_samples: int = 0
-    observer_blind_frequency: float | None = None
-    protocol_degraded_samples: int = 0
-    protocol_degraded_frequency: float | None = None
-
-
-@dataclass(frozen=True)
-class HistoryPersistenceStatus:
-    enabled: bool = False
-    queue_depth: int = 0
-    queue_capacity: int = 0
-    enqueued_samples: int = 0
-    persisted_samples: int = 0
-    dropped_samples: int = 0
-    coalesced_samples: int = 0
-    last_persisted_sample_at: str = ""
-    last_success_at: float | None = None
-    stats_generated_at: float | None = None
-    stats_age_seconds: float | None = None
-    writer_lag_seconds: float | None = None
-    consecutive_failures: int = 0
-    error: str = ""
-    maintenance_error: str = ""
-    shutdown_timed_out: bool = False
-    shared_path_policy: str = "unsupported_for_low_latency_writes"
-
-
-@dataclass(frozen=True)
 class EventTelemetrySummary:
     total_events: int = 0
     observed_events: int = 0
@@ -383,41 +318,6 @@ class EventTelemetrySummary:
     stale_stream_generation_dropped: int = 0
     stream_identity_limit_dropped: int = 0
     stream_generation_advances: int = 0
-
-
-@dataclass(frozen=True)
-class CompactSourceStatus:
-    configured: bool = False
-    readable: bool = False
-    source: str = ""
-    last_probe_at: float | None = None
-    last_event_at: float | None = None
-    error: str = ""
-    bytes_read: int = 0
-    consumed_bytes: int = 0
-    record_count: int = 0
-    backlog_bytes: int = 0
-    backlog_records_lower_bound: int = 0
-    backlog_age_seconds: float | None = None
-    budget_exceeded: bool = False
-    oversize_record_count: int = 0
-    skipped_bytes: int = 0
-    gap_count: int = 0
-    gap_reason: str = ""
-    gap_hash: str = ""
-    parse_duration_seconds: float = 0.0
-    device: int = 0
-    inode: int = 0
-    generation: int = 0
-    anchor_hash: str = ""
-    stream_uncertain: bool = False
-    stream_uncertainty_count: int = 0
-    stream_uncertainty_reason: str = ""
-    parse_validity: Confidence = Confidence.HIGH
-    source_authenticity: Confidence = Confidence.HIGH
-    identity_binding: Confidence = Confidence.HIGH
-    semantic_confidence: Confidence = Confidence.HIGH
-    binding_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -737,10 +637,6 @@ class SocketInfo:
     lastrcv_ms: int | None = None
     rtt_ms: float | None = None
     route: str = "unknown"
-    tls_server_name: str = ""
-    tls_alpn_protocols: tuple[str, ...] = ()
-    tls_versions: tuple[str, ...] = ()
-    tls_observed_at: float | None = None
 
     @property
     def key(self) -> str:
@@ -767,10 +663,6 @@ class ConnectionAssessment:
     idle_seconds: float | None
     health: NetworkState
     reason: str
-    tls_server_name: str = ""
-    tls_alpn_protocols: tuple[str, ...] = ()
-    tls_versions: tuple[str, ...] = ()
-    tls_observed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -800,7 +692,6 @@ class AlertOccurrence:
     opened_at: float
     updated_at: float
     escalated_at: float | None = None
-    acknowledged_at: float | None = None
     resolved_at: float | None = None
     transitions: list[AlertTransition] = field(default_factory=list)
 
@@ -1266,9 +1157,6 @@ class InstanceSnapshot:
     auto_compact_token_limit_scope: str = ""
     compact_prompt_overridden: bool = False
     auto_compact_config_source: str = ""
-    history_windows: list[HistoryWindowStats] = field(default_factory=list)
-    tui_session_log: CompactSourceStatus = field(default_factory=CompactSourceStatus)
-    hook_events: CompactSourceStatus = field(default_factory=CompactSourceStatus)
     processes: list[ProcessInfo] = field(default_factory=list)
     sessions: list[SessionHealth] = field(default_factory=list)
     identity: InstanceIdentity | None = field(
@@ -1318,7 +1206,6 @@ class MonitorSnapshot:
     observer: ObserverHealth = field(default_factory=ObserverHealth)
     temporal: SnapshotTemporalCut = field(default_factory=SnapshotTemporalCut)
     discovery: DiscoverySummary = field(default_factory=lambda: DiscoverySummary())
-    history: HistoryPersistenceStatus = field(default_factory=HistoryPersistenceStatus)
 
     @property
     def sessions(self) -> list[SessionHealth]:

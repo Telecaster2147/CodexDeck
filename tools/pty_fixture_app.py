@@ -122,7 +122,6 @@ def fixture_snapshot() -> MonitorSnapshot:
 
 def main() -> int:
     preferences = CodexDeckPreferences(
-        startup_animation=False,
         show_hidden_sessions=True,
         follow_output=True,
     )
@@ -130,7 +129,6 @@ def main() -> int:
         FixtureEngine(),
         fixture_snapshot(),
         sampling=False,
-        startup_animation=False,
         preferences=preferences,
     )
     app.run()

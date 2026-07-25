@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -29,8 +28,16 @@ class InstallScriptTests(unittest.TestCase):
         pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         modules = set(pyproject["tool"]["setuptools"]["py-modules"])
 
-        self.assertIn("temporal", modules)
-        self.assertTrue((PROJECT_ROOT / "src" / "temporal.py").is_file())
+        for module in (
+            "engine_collectors",
+            "engine_refresh",
+            "sound_setup",
+            "state_axes",
+            "state_summaries",
+            "temporal",
+        ):
+            self.assertIn(module, modules)
+            self.assertTrue((PROJECT_ROOT / "src" / f"{module}.py").is_file())
 
     def test_scripts_are_executable_and_valid_posix_shell(self) -> None:
         for name in ("install.sh", "uninstall.sh"):
@@ -80,20 +87,11 @@ class InstallScriptTests(unittest.TestCase):
 
     def test_readme_schema_versions_follow_implementation_contract(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        replay_manifest = json.loads(
-            (PROJECT_ROOT / "tests" / "fixtures" / "replay_manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
 
         self.assertIn(f"`schema_version: {SCHEMA_VERSION}`", readme)
         self.assertIn(f"`doctor_schema_version: {DOCTOR_SCHEMA_VERSION}`", readme)
         self.assertIn(f"`export_schema_version: {EXPORT_SCHEMA_VERSION}`", readme)
-        self.assertIn(
-            f"replay fixture manifest `schema_version: {replay_manifest['schema_version']}`",
-            readme,
-        )
-        self.assertIn("history 数据库\n内部 schema 当前为 `5`", readme)
+        self.assertIn("replay manifest 与 fixtures 仅为仓库测试资产", readme)
         self.assertNotIn("输出使用 `export_schema_version: 1`", readme)
 
     def test_relative_install_paths_keep_venv_entrypoint_and_uninstall(self) -> None:

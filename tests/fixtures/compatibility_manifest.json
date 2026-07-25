@@ -12,8 +12,6 @@
     {"handler_id":"compaction.structured","source":"rollout:compaction records","fixture":"auto_compact_rollout.jsonl","last_observed_version":"unversioned-fixture-2026-07-24","semantics":"compaction lifecycle","diagnostic_only":false},
     {"handler_id":"tool.structured","source":"rollout:function and custom tool calls","fixture":"replay_lifecycle_terminal.jsonl","last_observed_version":"unversioned-fixture-2026-07-22","semantics":"tool lifecycle and terminal ownership","diagnostic_only":false},
     {"handler_id":"log.compaction","source":"sqlite:structured logs","fixture":"compact_structured_logs.jsonl","last_observed_version":"unversioned-fixture-2026-07-24","semantics":"supporting compaction diagnostics","diagnostic_only":true},
-    {"handler_id":"tui_session_log.compaction","source":"typed TUI session log","fixture":"compact_session_log.jsonl","last_observed_version":"unversioned-fixture-2026-07-24","semantics":"supporting compaction evidence","diagnostic_only":false},
-    {"handler_id":"hook.compaction","source":"optional private hook file","fixture":"compact_hooks.jsonl","last_observed_version":"unversioned-fixture-2026-07-24","semantics":"supporting compaction evidence","diagnostic_only":false},
     {"handler_id":"unknown.conservative","source":"rollout:unknown record family","fixture":"replay_unknown_phase.jsonl","last_observed_version":"unversioned-fixture-2026-07-22","semantics":"diagnostic and confidence degradation","diagnostic_only":true}
   ]
 }

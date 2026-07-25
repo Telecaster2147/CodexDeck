@@ -247,6 +247,31 @@ class PathTests(unittest.TestCase):
         self.assertFalse(caught.exception.result.complete)
         self.assertNotIn("Operation not permitted", str(caught.exception))
 
+    def test_socket_stderr_warning_preserves_verified_stdout(self) -> None:
+        output = (
+            'ESTAB 0 0 127.0.0.1:2 203.0.113.2:443 '
+            'users:(("codex",pid=42,fd=7))\n'
+        )
+        collector = SocketCollector(BoundedFakeRunner(output, "warning: partial namespace\n"))
+
+        sockets = collector.snapshot({42})
+
+        self.assertEqual(len(sockets[42]), 1)
+        self.assertIsNotNone(collector.last_command_result)
+        self.assertFalse(collector.last_command_result.complete)
+        self.assertEqual(collector.last_command_result.reason, "stderr_warning")
+
+    def test_process_stderr_warning_preserves_verified_stdout(self) -> None:
+        output = "11 1 1000 11 11 ? codex 9 0.0 S wait /opt/codex resume\n"
+        runner = BoundedFakeRunner(output, "warning: partial process metadata\n")
+
+        result = ProcessDiscovery(runner, FamilyProc(), user_id=1000).discover()
+
+        self.assertEqual([process.pid for process in result.processes], [11])
+        self.assertIsNotNone(result.command_result)
+        self.assertFalse(result.command_result.complete)
+        self.assertEqual(result.command_result.reason, "stderr_warning")
+
     def test_foreground_status_distinguishes_background_and_headless_sessions(self) -> None:
         output = (
             "21 1 1000 21 99 pts/3 codex 20 0.0 S futex codex resume background\n"

@@ -68,7 +68,7 @@ def _agent_counts(nodes: list[AgentNode]) -> tuple[int, dict[str, int]]:
     return total, counts
 
 
-def _session_metrics(session: SessionHealth) -> list[str]:
+def _session_summary_lines(session: SessionHealth) -> list[str]:
     lines: list[str] = []
     if session.turns:
         turn = session.turns[-1]
@@ -261,18 +261,7 @@ def render_text(snapshot: MonitorSnapshot, show_auxiliary: bool = False) -> str:
                 if compact.reconstructed:
                     compact_line += " | reconstructed"
                 lines.append(compact_line)
-            for connection in session.network.connections:
-                if not connection.tls_server_name and not connection.tls_alpn_protocols:
-                    continue
-                details = []
-                if connection.tls_server_name:
-                    details.append(f"SNI {connection.tls_server_name}")
-                if connection.tls_alpn_protocols:
-                    details.append(f"ALPN {', '.join(connection.tls_alpn_protocols)}")
-                if connection.tls_versions:
-                    details.append(f"TLS {', '.join(connection.tls_versions)}")
-                lines.append(f"    TLS：{'; '.join(details)}")
-            lines.extend(_session_metrics(session))
+            lines.extend(_session_summary_lines(session))
         if show_auxiliary:
             auxiliaries = [process for process in instance.processes if process.role != "session"]
             if auxiliaries:

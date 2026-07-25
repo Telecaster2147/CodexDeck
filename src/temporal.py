@@ -13,13 +13,13 @@ from models import (
 )
 
 
-TEMPORAL_SOURCES = ("process", "rollout", "terminal", "sqlite", "hook", "socket", "packet")
+TEMPORAL_SOURCES = ("process", "rollout", "terminal", "sqlite", "socket")
 
 # A source window is about when CodexDeck observed a source, not when the source
 # last emitted application data. Terminal and TLS summaries retain their last
 # output/handshake time, which can legitimately be much older than a healthy
-# sample. Rollout owns durable terminal updates; socket owns packet attribution.
-COHERENCE_SOURCES = ("process", "rollout", "sqlite", "socket", "packet")
+# sample. Rollout owns durable terminal updates.
+COHERENCE_SOURCES = ("process", "rollout", "sqlite", "socket")
 AXIS_SOURCES = {
     "lifecycle": ("rollout",),
     "attention": ("rollout",),
@@ -146,7 +146,6 @@ def _source_times(
     terminal_present = any(
         session.terminal_sessions for instance in instances for session in instance.sessions
     )
-    hook_values = [instance.hook_events.last_probe_at for instance in instances]
     return {
         "process": process,
         "rollout": (rollout_observed, bool(rollout_values)),
@@ -155,9 +154,7 @@ def _source_times(
             terminal_present and rollout_observed is not None,
         ),
         "sqlite": sqlite,
-        "hook": (_latest(hook_values), any(value is not None for value in hook_values)),
         "socket": socket,
-        "packet": _collector_time(collectors, "packet"),
     }
 
 
@@ -174,7 +171,7 @@ def build_temporal_cut(
     current = _source_times(instances, collectors)
     previous_by_source = {item.source: item for item in previous.sources} if previous else {}
     observations: list[EvidenceObservation] = []
-    fast_sources = {"rollout", "terminal", "hook"}
+    fast_sources = {"rollout", "terminal"}
     for source in TEMPORAL_SOURCES:
         observed_at, complete = current[source]
         inherited = previous_by_source.get(source)

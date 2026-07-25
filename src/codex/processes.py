@@ -181,9 +181,10 @@ class ProcessDiscovery:
                 command_result = replace(
                     command_result,
                     complete=False,
-                    reason="stderr_output",
+                    reason="stderr_warning" if command_result.stdout.strip() else "stderr_output",
                 )
-                raise CommandError("stderr_output", "ps", command_result)
+                if not command_result.stdout.strip():
+                    raise CommandError("stderr_output", "ps", command_result)
             output = command_result.stdout
         else:
             output = self.runner.run(ps_command)

@@ -23,7 +23,6 @@ from models import (  # noqa: E402
     CurrentOperationSummary,
     DiagnosisFinding,
     FailureInfo,
-    HistoryWindowStats,
     InstanceSnapshot,
     LifecycleState,
     MonitorSnapshot,
@@ -49,8 +48,6 @@ from presentation.tui.textual_app import (  # noqa: E402
     SessionInspector,
     SettingsScreen,
     ShortcutFooter,
-    StartupOverlay,
-    TerminalPanel,
     _diagnosis_details_renderable,
     _diagnosis_renderable,
     _timeline_line,
@@ -59,7 +56,6 @@ from presentation.tui.textual_app import (  # noqa: E402
     session_marker,
     session_hidden_label,
     session_status,
-    startup_renderable,
     timeline_entries,
 )
 from presentation.tui.sampling import SamplingCoordinator  # noqa: E402
@@ -188,9 +184,6 @@ def make_snapshot(count: int = 3) -> MonitorSnapshot:
 class FakeMachine:
     lookback_seconds = 900
 
-    def acknowledge_alert(self, *_: object) -> bool:
-        return True
-
 
 class FakeEngine:
     interval = 999.0
@@ -223,64 +216,17 @@ class FakeEngine:
 
 
 class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
-    async def test_classic_blue_is_the_default_palette_and_cycles_all_themes(self) -> None:
+    async def test_classic_blue_is_the_default_palette(self) -> None:
         snapshot = make_snapshot(1)
         app = CodexDeckApp(FakeEngine(snapshot), snapshot, sampling=False)
 
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(120, 30)):
             self.assertEqual(app.theme, "codexdeck-blue")
             variables = app.get_css_variables()
             self.assertEqual(variables["background"], "#0F172A")
             self.assertEqual(variables["surface"], "#111827")
             self.assertEqual(variables["panel"], "#1F2937")
             self.assertEqual(variables["primary"], "#38BDF8")
-
-            await pilot.press("t")
-            self.assertEqual(app.theme, "textual-dark")
-            await pilot.press("t")
-            self.assertEqual(app.theme, "textual-light")
-            await pilot.press("t")
-            self.assertEqual(app.theme, "codexdeck-blue")
-
-    def test_startup_renderable_has_wide_and_compact_brand_frames(self) -> None:
-        wide = render_plain(startup_renderable(0), width=120)
-        ready = render_plain(startup_renderable(99), width=120)
-        compact = render_plain(startup_renderable(2, compact=True), width=50)
-
-        self.assertIn("██████", wide)
-        self.assertIn("██████╗ ███████╗ ██████╗██╗  ██╗", wide)
-        self.assertIn("CORE", wide)
-        self.assertIn("CONSOLE READY", ready)
-        self.assertIn("CODEXDECK", compact)
-        self.assertNotIn("██████", compact)
-        self.assertLessEqual(max(map(len, compact.splitlines())), 50)
-
-    async def test_startup_overlay_plays_fully_while_initial_sample_prepares(self) -> None:
-        snapshot = make_snapshot(1)
-        engine = FakeEngine(snapshot)
-        empty = MonitorSnapshot("", 2.0, [])
-        app = CodexDeckApp(
-            engine,
-            empty,
-            sampling=False,
-            startup_animation=True,
-            prepare_on_start=True,
-        )
-        app.STARTUP_FRAME_INTERVAL = 0.01
-        app.STARTUP_DURATION = 1.0
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            overlay = app.query_one(StartupOverlay)
-            self.assertTrue(overlay.display)
-            await pilot.pause(0.03)
-            self.assertTrue(overlay.display)
-            self.assertEqual(engine.baselines, 1)
-            self.assertEqual(engine.full_samples, 1)
-            self.assertEqual(len(app.snapshot.sessions), 1)
-            await pilot.pause(1.05)
-            self.assertFalse(overlay.display)
-            await pilot.press("3")
-            self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "terminal-tab")
 
     async def test_settings_persists_and_applies_all_preferences(self) -> None:
         snapshot = make_snapshot(1)
@@ -290,27 +236,22 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 FakeEngine(snapshot),
                 snapshot,
                 sampling=False,
-                startup_animation=True,
                 preferences_file=preference_file,
             )
-            app.STARTUP_DURATION = 0.01
 
             async with app.run_test(size=(120, 30)) as pilot:
-                await pilot.pause(0.03)
-                self.assertFalse(app.query_one(StartupOverlay).display)
                 dark_background = app.query_one("#app-header").styles.background
                 await pilot.press("s")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, SettingsScreen)
-                switch = app.screen.query_one("#startup-animation-switch", Switch)
-                self.assertTrue(switch.value)
-                switch.value = False
                 app.screen.query_one("#group-sessions-switch", Switch).value = False
                 app.screen.query_one("#show-hidden-switch", Switch).value = True
                 app.screen.query_one("#follow-output-switch", Switch).value = False
                 app.screen.query_one("#notifications-switch", Switch).value = False
+                app.screen.query_one("#sound-enabled-switch", Switch).value = True
+                app.screen.query_one("#attention-sound-switch", Switch).value = True
+                app.screen.query_one("#completion-sound-switch", Switch).value = False
                 app.screen.query_one("#theme-select", Select).value = "textual-light"
-                app.screen.query_one("#default-tab-select", Select).value = "terminal"
                 await pilot.press("s")
                 await pilot.pause()
 
@@ -323,18 +264,19 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#app-header").styles.background,
                     dark_background,
                 )
-                self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "terminal-tab")
+                self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "activity-tab")
 
             self.assertEqual(
                 json.loads(preference_file.read_text()),
                 {
-                    "startup_animation": False,
                     "group_sessions": False,
                     "show_hidden_sessions": True,
                     "follow_output": False,
                     "notifications": False,
+                    "sound_enabled": True,
+                    "attention_sound": True,
+                    "completion_sound": False,
                     "theme": "textual-light",
-                    "default_tab": "terminal",
                 },
             )
 
@@ -350,9 +292,9 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             scroll = app.screen.query_one("#settings-scroll")
             self.assertLessEqual(dialog.size.width, 68)
             self.assertGreater(scroll.virtual_size.height, scroll.size.height)
-            self.assertEqual(len(app.screen.query(".setting-row")), 7)
-            self.assertEqual(len(app.screen.query(Switch)), 5)
-            self.assertEqual(len(app.screen.query(Select)), 2)
+            self.assertEqual(len(app.screen.query(".setting-row")), 8)
+            self.assertEqual(len(app.screen.query(Switch)), 7)
+            self.assertEqual(len(app.screen.query(Select)), 1)
 
             scroll.scroll_end(animate=False)
             await pilot.pause()
@@ -435,6 +377,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         notices: list[tuple[str, dict[str, object]]] = []
 
         async with app.run_test(size=(120, 24)) as pilot:
+            app.notifications_enabled = True
             app.notify = lambda message, **kwargs: notices.append((message, kwargs))  # type: ignore[method-assign]
             refreshed = make_snapshot(1)
             session = refreshed.sessions[0]
@@ -537,19 +480,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             context_tokens=216_402,
             context_window=353_400,
         )
-        instance.history_windows = [
-            HistoryWindowStats(
-                "15m",
-                900,
-                sample_count=12,
-                turn_count=2,
-                failure_count=1,
-                failure_rate=0.5,
-                ttft_samples=2,
-                ttft_p50_seconds=1.0,
-                ttft_p95_seconds=3.0,
-            )
-        ]
 
         output = io.StringIO()
         console = Console(width=120, file=output, color_system=None)
@@ -1415,11 +1345,9 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(len(app.screen_stack), 1)
 
-            initial_theme = app.theme
             await pilot.press("t")
             await pilot.pause()
-            self.assertNotEqual(app.theme, initial_theme)
-            self.assertIn("THEME", str(app.query_one("#status-line", Static).render()))
+            self.assertEqual(app.theme, "codexdeck-blue")
 
             session_list = app.query_one("#session-list", ListView)
             session_list.focus()
@@ -1574,10 +1502,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(log.scroll_y, first_match_scroll)
 
     async def test_terminal_tab_only_shows_current_background_processes(self) -> None:
-        self.assertEqual(
-            TerminalPanel.CAPABILITY_LABELS[TerminalCapability.STREAMING],
-            "RESERVED",
-        )
         snapshot = make_snapshot(1)
         running = TerminalSessionSummary(
             "running-terminal",

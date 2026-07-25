@@ -1,19 +1,19 @@
-"""Versioned, redacted incident and session-review exports."""
+"""Versioned, redacted bounded session reports."""
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from models import AlertStatus, NormalizedEvent, SessionHealth
+from models import NormalizedEvent, SessionHealth
 from presentation.privacy import public_value
 from utils import redact_sensitive
 
 
-EXPORT_SCHEMA_VERSION = 2
+EXPORT_SCHEMA_VERSION = 3
 _SENSITIVE_KEY = re.compile(
     r"(?i)(?:^|_)(?:authorization|cookie|api_?key|secret|password|passwd|"
     r"access_token|refresh_token|auth_token|bearer_token)(?:$|_)"
@@ -165,7 +165,7 @@ def session_export(
     *,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
-    """Build a review artifact from the state machine's complete retained history.
+    """Build a bounded current report from the state machine's retained events.
 
     ``retained_events`` is intentionally required: using ``session.events`` here
     would silently export only the UI lookback window.
@@ -176,7 +176,7 @@ def session_export(
     recovery = [event for event in events if event.kind in _RECOVERY_KINDS]
     payload = {
         "export_schema_version": EXPORT_SCHEMA_VERSION,
-        "export_type": "session_review",
+        "export_type": "bounded_session_report",
         "generated_at": _generated_at(generated_at),
         "incident_summary": incident_summary(session, events),
         "session": {
@@ -215,53 +215,6 @@ def session_export(
             "complete_within_retention_limit": True,
             "source": "SessionStateMachine.retained_events",
         },
-    }
-    return _redact(public_value(payload))
-
-
-def current_incidents_export(
-    sessions: Iterable[SessionHealth],
-    *,
-    generated_at: str | None = None,
-) -> dict[str, Any]:
-    """Build a compact inventory of unresolved incidents across sessions."""
-
-    incidents: list[dict[str, Any]] = []
-    for session in sessions:
-        active_alerts = [item for item in session.alerts if item.status != AlertStatus.RESOLVED]
-        if (
-            not active_alerts
-            and session.current_failure is None
-            and session.attention_request is None
-            and not session.alert
-            and session.network.state.value not in {"SUSPECT", "STALLED"}
-            and session.silence.state.value not in {"STALL_SUSPECT", "OBSERVER_BLIND"}
-        ):
-            continue
-        incidents.append(
-            {
-                "session_key": session.key,
-                "instance_id": session.instance_id,
-                "session_id": session.session_id,
-                "lifecycle": session.lifecycle,
-                "recovery": session.recovery,
-                "attention": session.attention,
-                "attention_request": session.attention_request,
-                "current_operation": session.current_operation,
-                "observation": session.observation,
-                "silence": session.silence,
-                "network": session.network,
-                "alerts": active_alerts,
-                "current_failure": session.current_failure,
-                "incident_summary": incident_summary(session, session.events),
-            }
-        )
-    payload = {
-        "export_schema_version": EXPORT_SCHEMA_VERSION,
-        "export_type": "current_incidents",
-        "generated_at": _generated_at(generated_at),
-        "incident_count": len(incidents),
-        "incidents": incidents,
     }
     return _redact(public_value(payload))
 

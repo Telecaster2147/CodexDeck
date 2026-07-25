@@ -21,17 +21,9 @@ classifiers = [
   "Topic :: System :: Monitoring",
 ]
 dependencies = [
-    "linkify-it-py==2.1.0",
-    "markdown-it-py[linkify]==4.2.0",
-    "mdit-py-plugins==0.6.1",
-    "mdurl==0.1.2",
-    "platformdirs==4.10.0",
-    "pygments==2.20.0",
     "rich==15.0.0",
     "textual==8.2.8",
     "tomli==2.4.1; python_version < '3.11'",
-    "typing-extensions==4.16.0",
-    "uc-micro-py==2.0.0",
 ]
 
 [project.scripts]
@@ -44,11 +36,15 @@ py-modules = [
   "config",
   "diagnostics",
   "engine",
-  "history",
+  "engine_collectors",
+  "engine_refresh",
   "models",
   "preferences",
   "snapshot_publisher",
+  "sound_setup",
   "state_machine",
+  "state_axes",
+  "state_summaries",
   "temporal",
   "utils",
 ]
@@ -67,6 +63,9 @@ version = {attr = "config.VERSION"}
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.mypy]
 python_version = "3.10"
 files = [
@@ -76,7 +75,10 @@ files = [
   "src/codex/paths.py",
   "src/codex/processes.py",
   "src/network/classifier.py",
+  "src/sound_setup.py",
   "src/state_machine.py",
+  "src/state_axes.py",
+  "src/state_summaries.py",
 ]
 mypy_path = "src"
 check_untyped_defs = true

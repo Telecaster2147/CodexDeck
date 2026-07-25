@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from codex.events import normalize_rollout_record  # noqa: E402
+from config import MAX_TURNS_PER_SESSION  # noqa: E402
 from models import (  # noqa: E402
     CapabilityMode,
     NetworkEvidence,
@@ -151,6 +152,32 @@ class ProtocolAggregationTests(unittest.TestCase):
         self.assertTrue(turn.tools[0].provenance.complete)
         self.assertEqual(state.protocol_capabilities.turn_timing.mode, CapabilityMode.DIRECT)
         self.assertEqual(state.protocol_capabilities.tool_timing.mode, CapabilityMode.DIRECT)
+
+    def test_turn_summaries_keep_only_the_latest_bounded_window(self) -> None:
+        events = []
+        count = MAX_TURNS_PER_SESSION + 8
+        for index in range(count):
+            turn_id = f"turn-{index:02d}"
+            events += normalized(
+                float(index * 2),
+                "turn_started",
+                f"{turn_id}:start",
+                turn_id=turn_id,
+            )
+            events += normalized(
+                float(index * 2 + 1),
+                "turn_complete",
+                f"{turn_id}:end",
+                turn_id=turn_id,
+            )
+
+        machine = SessionStateMachine(900)
+        machine.ingest("key", events)
+        turns = machine.derive("key", process(), NetworkEvidence(), 100.0).turns
+
+        self.assertEqual(len(turns), MAX_TURNS_PER_SESSION)
+        self.assertEqual(turns[0].turn_id, "turn-08")
+        self.assertEqual(turns[-1].turn_id, f"turn-{count - 1:02d}")
 
     def test_legacy_tool_boundaries_derive_duration_and_unmatched_stays_running(self) -> None:
         records = [

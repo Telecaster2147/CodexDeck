@@ -1,14 +1,12 @@
-"""Snapshot publication and optional history persistence."""
+"""Snapshot publication."""
 
 from __future__ import annotations
 
 import time
-from dataclasses import replace
 from datetime import datetime
 
 from diagnostics import CollectorTracker
-from history import AsyncHistoryWriter
-from models import CollectorHealth, DiscoverySummary, InstanceSnapshot, MonitorSnapshot, ObserverHealth
+from models import DiscoverySummary, InstanceSnapshot, MonitorSnapshot, ObserverHealth
 from temporal import apply_temporal_completeness, build_temporal_cut
 
 
@@ -19,11 +17,9 @@ class SnapshotPublisher:
         self,
         interval: float,
         collectors: CollectorTracker,
-        history: AsyncHistoryWriter | None,
     ) -> None:
         self.interval = interval
         self.collectors = collectors
-        self.history = history
         self.generation = 0
 
     def publish(
@@ -73,43 +69,4 @@ class SnapshotPublisher:
             ),
             temporal=temporal,
         )
-        return self._attach_history(snapshot)
-
-    def _attach_history(self, snapshot: MonitorSnapshot) -> MonitorSnapshot:
-        if self.history is None:
-            return snapshot
-        instances = [
-            replace(
-                instance,
-                history_windows=self.history.cached_windows(instance.instance_id),
-            )
-            for instance in snapshot.instances
-        ]
-        self.history.enqueue(snapshot)
-        status = self.history.status()
-        collector = CollectorHealth(
-            name="history",
-            duration_seconds=0.0,
-            last_success_at=status.last_success_at,
-            stale_age_seconds=status.stats_age_seconds if status.consecutive_failures else None,
-            consecutive_failures=status.consecutive_failures,
-            error=status.error,
-            budget_exceeded=False,
-        )
-        collector_health = [item for item in snapshot.collector_health if item.name != "history"]
-        collector_health.append(collector)
-        diagnostics = list(snapshot.diagnostics)
-        if status.error:
-            diagnostics.append(f"历史写入器降级：{status.error}")
-        if status.dropped_samples:
-            diagnostics.append(
-                "历史写入队列已丢弃样本："
-                f"dropped={status.dropped_samples}, coalesced={status.coalesced_samples}"
-            )
-        return replace(
-            snapshot,
-            instances=instances,
-            diagnostics=diagnostics,
-            collector_health=collector_health,
-            history=status,
-        )
+        return snapshot

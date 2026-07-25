@@ -29,7 +29,18 @@ from models import (  # noqa: E402
 
 
 def options(*, homes: set[Path] | None = None) -> AppOptions:
-    return AppOptions(2.0, 30.0, 900, None, homes, True, False, True, False, False)
+    return AppOptions(
+        idle_threshold=30.0,
+        event_lookback=900,
+        selected_pids=None,
+        selected_homes=homes,
+        once=True,
+        watch=False,
+        output_format="text",
+        no_color=True,
+        show_auxiliary=False,
+        flat=False,
+    )
 
 
 def instance(home: Path) -> InstanceSnapshot:
@@ -77,7 +88,7 @@ class AppTests(unittest.TestCase):
         snapshot.instances[0].sessions.append(health)
         self.assertEqual(exit_code(snapshot), 3)
 
-    def test_incomplete_state_axis_uses_degraded_exit(self) -> None:
+    def test_incomplete_state_axis_only_uses_strict_observation_exit(self) -> None:
         process = ProcessInfo(
             ProcessIdentity(10, 20),
             1,
@@ -101,7 +112,7 @@ class AppTests(unittest.TestCase):
         )
         snapshot = MonitorSnapshot("now", 2.0, [instance(Path("/tmp/home"))])
         snapshot.instances[0].sessions.append(health)
-        self.assertEqual(exit_code(snapshot), 2)
+        self.assertEqual(exit_code(snapshot), 0)
         self.assertEqual(exit_code(snapshot, strict_observation=True), 5)
 
     def test_strict_observation_has_distinct_code_and_workload_priority(self) -> None:

@@ -9,20 +9,30 @@ from codex.compatibility import compatibility_stats
 from diagnostics import (
     diagnostic_text,
     normalize_diagnostic,
-    observation_degraded,
     snapshot_diagnostics,
 )
-from models import MonitorSnapshot
+from models import LifecycleState, MonitorSnapshot, NetworkState, SilenceState
 from presentation.projection import (
-    collector_degraded,
     collector_items,
     instance_collector_items,
 )
 from presentation.privacy import public_rollout_activity, public_value
 
 
-DOCTOR_SCHEMA_VERSION = 1
+DOCTOR_SCHEMA_VERSION = 2
 COLLECTION_BUDGET_SECONDS = 2.0
+
+_CORE_DIAGNOSTIC_CODES = {
+    "ADAPTER_FAILED",
+    "EVIDENCE_INCOMPLETE",
+    "IDENTITY_COLLISION",
+    "INGRESS_GAP",
+    "OBSERVER_BLIND",
+    "OBSERVER_DEGRADED",
+    "TEMPORAL_SKEW",
+    "TERMINAL_ASSOCIATION_CONFLICT",
+}
+_OPTIONAL_COLLECTORS = {"socket"}
 
 
 def _capability_rank(value: object) -> int:
@@ -57,7 +67,6 @@ def _rollout_diagnostics(instance: object) -> dict[str, Any]:
 
 def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
     global_collectors = collector_items(snapshot)
-    packet_enabled = any(item.get("name") == "packet" for item in global_collectors)
     instances = []
     for instance in snapshot.instances:
         paths = instance.paths
@@ -151,20 +160,28 @@ def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
                     for assessment in session.clock_assessments
                 ],
                 "rollout": _rollout_diagnostics(instance),
-                "compact_sources": {
-                    "tui_session_log": public_value(instance.tui_session_log),
-                    "hook_events": public_value(instance.hook_events),
-                },
                 "collector_health": instance_collectors,
             }
         )
 
     duration = snapshot.collection_duration_seconds
+    diagnostics = snapshot_diagnostics(snapshot)
+    capability_warnings = [
+        item
+        for item in diagnostics
+        if item.code == "COLLECTOR_DEGRADED"
+        and item.source.split(":", 1)[0] in _OPTIONAL_COLLECTORS
+    ]
+    compatibility_signals = [
+        item for item in diagnostics if item.code in {"INGRESS_BACKLOG", "PROTOCOL_UNKNOWN"}
+    ]
     return public_value(
         {
             "doctor_schema_version": DOCTOR_SCHEMA_VERSION,
             "generated_at": snapshot.generated_at,
             "status": _status(snapshot),
+            "workload_status": _workload_status(snapshot),
+            "observer_status": _observer_status(snapshot),
             "collection": {
                 "duration_seconds": duration,
                 "budget_seconds": COLLECTION_BUDGET_SECONDS,
@@ -175,43 +192,45 @@ def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
             "observer": public_value(snapshot.observer),
             "temporal": public_value(snapshot.temporal),
             "discovery": public_value(snapshot.discovery),
-            "packet_inspection": {
-                "enabled": packet_enabled,
-                "capture_scope": "current_allowlisted_codex_socket_flows",
-                "prefilter_stage": "before_tls_reassembly",
-                "requires": "CAP_NET_RAW_or_root",
-                "namespace_visibility": "AF_PACKET_can_observe_namespace_frames",
-                "known_gap": "client_hello_before_first_fresh_socket_snapshot_may_be_missed",
-            },
-            "diagnostics": public_value(snapshot_diagnostics(snapshot)),
-            "history": public_value(snapshot.history),
+            "diagnostics": public_value(diagnostics),
+            "capability_warnings": public_value(capability_warnings),
+            "compatibility_signals": public_value(compatibility_signals),
             "collector_health": global_collectors,
             "instances": instances,
         }
     )
 
 
-def _is_degraded(snapshot: MonitorSnapshot) -> bool:
-    if observation_degraded(snapshot):
-        return True
+def _collector_is_degraded(item: dict[str, Any]) -> bool:
+    return bool(
+        item.get("error")
+        or int(item.get("consecutive_failures", 0) or 0) > 0
+        or item.get("budget_exceeded")
+        or item.get("stale_age_seconds") is not None
+    )
+
+
+def _collector_is_core(item: dict[str, Any]) -> bool:
+    name = str(item.get("name", ""))
+    prefix = name.split(":", 1)[0]
+    return prefix not in _OPTIONAL_COLLECTORS and prefix not in {
+    }
+
+
+def _observer_is_degraded(snapshot: MonitorSnapshot) -> bool:
     if snapshot.observer.degraded:
         return True
     if snapshot.collection_duration_seconds > COLLECTION_BUDGET_SECONDS:
         return True
-    if snapshot.diagnostics or collector_degraded(collector_items(snapshot)):
-        return True
-    if snapshot.discovery.unresolved:
+    if any(
+        _collector_is_core(item) and _collector_is_degraded(item)
+        for item in collector_items(snapshot)
+    ):
         return True
     for instance in snapshot.instances:
-        if (
-            instance.diagnostics
-            or getattr(instance, "unknown_event_types", {})
-            or getattr(instance, "protocol_family_counters", {}).get(
-                "unknown_dropped_family_count", 0
-            )
-            or getattr(instance, "protocol_family_counters", {}).get(
-                "shape_dropped_family_count", 0
-            )
+        if any(
+            result.status.value in {"failed", "incomplete"}
+            for result in instance.adapter_results
         ):
             return True
         if any(session.protocol_uncertain for session in instance.sessions):
@@ -229,24 +248,53 @@ def _is_degraded(snapshot: MonitorSnapshot) -> bool:
             for activity in instance.rollout_activity
         ):
             return True
-        if collector_degraded(collector_items(instance)):
+        if any(
+            _collector_is_core(item) and _collector_is_degraded(item)
+            for item in collector_items(instance)
+        ):
             return True
-        for source in (instance.tui_session_log, instance.hook_events):
-            if source.configured and (not source.readable or source.error):
-                return True
-            if source.backlog_bytes or source.gap_count:
-                return True
-            if source.stream_uncertain:
-                return True
-            if source.configured and source.source_authenticity.value != "high":
-                return True
-    return False
+    return any(
+        diagnostic.code in _CORE_DIAGNOSTIC_CODES
+        and diagnostic.recovery_state == "active"
+        for diagnostic in snapshot_diagnostics(snapshot)
+    )
+
+
+def _workload_status(snapshot: MonitorSnapshot) -> str:
+    if not snapshot.instances:
+        return "no_instances"
+    sessions = snapshot.sessions
+    if any(
+        session.lifecycle == LifecycleState.FAILED
+        or session.alert_level == "严重"
+        or session.silence.state == SilenceState.STALL_SUSPECT
+        or session.network.state == NetworkState.STALLED
+        for session in sessions
+    ):
+        return "incident"
+    if any(session.attention_request for session in sessions):
+        return "attention"
+    return "healthy"
+
+
+def _observer_status(snapshot: MonitorSnapshot) -> str:
+    if not snapshot.instances:
+        return "no_instances"
+    return "degraded" if _observer_is_degraded(snapshot) else "healthy"
+
+
+def _is_degraded(snapshot: MonitorSnapshot) -> bool:
+    return _observer_is_degraded(snapshot)
 
 
 def _status(snapshot: MonitorSnapshot) -> str:
     if not snapshot.instances:
         return "no_instances"
-    return "degraded" if _is_degraded(snapshot) else "healthy"
+    workload = _workload_status(snapshot)
+    observer = _observer_status(snapshot)
+    if workload in {"incident", "attention"}:
+        return workload
+    return observer
 
 
 def doctor_exit_code(snapshot: MonitorSnapshot) -> int:
@@ -295,16 +343,13 @@ def render_doctor_text(snapshot: MonitorSnapshot) -> str:
     lines = [
         f"codexdeck doctor: {report['status']}",
         (
+            f"状态: workload={report['workload_status']}; "
+            f"observer={report['observer_status']}"
+        ),
+        (
             f"采集: {collection['duration_seconds']:.3f}s / "
             f"{collection['budget_seconds']:.1f}s; "
             f"超时={'yes' if collection['budget_exceeded'] else 'no'}"
-        ),
-        (
-            "Packet inspection: "
-            f"enabled={'yes' if report['packet_inspection']['enabled'] else 'no'}; "
-            "scope=current allowlisted Codex socket flows; "
-            "prefilter=before TLS reassembly; requires=CAP_NET_RAW or root; "
-            "首次新鲜 socket 快照前的 ClientHello 可能缺失"
         ),
         (
             "进程发现: "
@@ -363,24 +408,6 @@ def render_doctor_text(snapshot: MonitorSnapshot) -> str:
                 f"gaps={activity.get('gap_count', 0)}; "
                 f"skipped={activity.get('skipped_bytes', 0)}; "
                 f"reason={activity.get('gap_reason') or '-'}"
-            )
-        for name, source in instance["compact_sources"].items():
-            if not source["configured"]:
-                continue
-            if (
-                source["readable"]
-                and not source["error"]
-                and not source["backlog_bytes"]
-                and not source["gap_count"]
-            ):
-                continue
-            lines.append(
-                f"  compact source {name}: readable={source['readable']}; "
-                f"error={source['error'] or '-'}; backlog={source['backlog_bytes']}; "
-                f"backlog_records>={source['backlog_records_lower_bound']}; "
-                f"age={source['backlog_age_seconds']}; "
-                f"budget_exceeded={source['budget_exceeded']}; gaps={source['gap_count']}; "
-                f"skipped={source['skipped_bytes']}; reason={source['gap_reason'] or '-'}"
             )
         unknown = instance["unknown_events"]
         if unknown["total"]:

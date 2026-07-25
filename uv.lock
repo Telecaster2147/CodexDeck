@@ -6,32 +6,16 @@ requires-python = ">=3.10"
 name = "codexdeck"
 source = { editable = "." }
 dependencies = [
-    { name = "linkify-it-py" },
-    { name = "markdown-it-py", extra = ["linkify"] },
-    { name = "mdit-py-plugins" },
-    { name = "mdurl" },
-    { name = "platformdirs" },
-    { name = "pygments" },
     { name = "rich" },
     { name = "textual" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions" },
-    { name = "uc-micro-py" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "linkify-it-py", specifier = "==2.1.0" },
-    { name = "markdown-it-py", extras = ["linkify"], specifier = "==4.2.0" },
-    { name = "mdit-py-plugins", specifier = "==0.6.1" },
-    { name = "mdurl", specifier = "==0.1.2" },
-    { name = "platformdirs", specifier = "==4.10.0" },
-    { name = "pygments", specifier = "==2.20.0" },
     { name = "rich", specifier = "==15.0.0" },
     { name = "textual", specifier = "==8.2.8" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = "==2.4.1" },
-    { name = "typing-extensions", specifier = "==4.16.0" },
-    { name = "uc-micro-py", specifier = "==2.0.0" },
 ]
 
 [[package]]

@@ -562,7 +562,7 @@ TRANSCRIPT_BODY_FIELDS = frozenset(
 
 
 def strip_transcript_bodies(value: Any) -> Any:
-    """Return a public/history projection with terminal body fields removed."""
+    """Return a public/export projection with terminal body fields removed."""
 
     if isinstance(value, dict):
         projected: dict[str, Any] = {}

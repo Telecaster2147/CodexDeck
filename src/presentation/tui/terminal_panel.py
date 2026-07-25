@@ -27,7 +27,6 @@ class TerminalPanel(Vertical):
     """Read-only view of currently running background processes."""
 
     CAPABILITY_LABELS = {
-        TerminalCapability.STREAMING: "RESERVED",
         TerminalCapability.FILE_TAIL: "FILE",
         TerminalCapability.POLL_TRANSCRIPT: "POLL",
         TerminalCapability.FINAL_TRANSCRIPT: "FINAL",

@@ -154,9 +154,14 @@ class SocketCollector:
                 self.last_command_result = replace(
                     self.last_command_result,
                     complete=False,
-                    reason="stderr_output",
+                    reason=(
+                        "stderr_warning"
+                        if self.last_command_result.stdout.strip()
+                        else "stderr_output"
+                    ),
                 )
-                raise CommandError("stderr_output", "ss", self.last_command_result)
+                if not self.last_command_result.stdout.strip():
+                    raise CommandError("stderr_output", "ss", self.last_command_result)
             output = self.last_command_result.stdout
         else:
             self.last_command_result = None

@@ -109,14 +109,8 @@ def _diagnosis_renderable(
                 for connection in session.network.connections
                 if connection.health.value not in {"IDLE", "ACTIVE"}
             ]
-            packet_evidence = any(
-                connection.tls_server_name
-                or connection.tls_alpn_protocols
-                or connection.tls_versions
-                for connection in session.network.connections
-            )
             network.append(
-                f"\n异常连接 {len(abnormal)} · packet 辅助证据 {'有' if packet_evidence else '无'}",
+                f"\n异常连接 {len(abnormal)}",
                 style="#94a3b8",
             )
         blocks.append(network)
@@ -255,37 +249,6 @@ def _diagnosis_details_renderable(
                     f"{'是' if rollout_activity.get('stream_uncertain') else '否'}"
                     f"\n流原因  "
                     f"{rollout_activity.get('stream_uncertainty_reason') or '-'}",
-                    style="#fbbf24",
-                )
-            )
-        for name, source in (
-            ("TUI session log", instance.tui_session_log),
-            ("Compact hook", instance.hook_events),
-        ):
-            if (
-                not source.backlog_bytes
-                and not source.gap_count
-                and not source.stream_uncertain
-                and source.source_authenticity.value == "high"
-            ):
-                continue
-            count += 1
-            blocks.append(
-                Text(
-                    f"{name} 入口"
-                    f"\n积压  {source.backlog_bytes} bytes"
-                    f"\n积压记录下界  {source.backlog_records_lower_bound}"
-                    f"\n积压年龄  {source.backlog_age_seconds}"
-                    f"\n预算耗尽  {'是' if source.budget_exceeded else '否'}"
-                    f"\n缺口  {source.gap_count}"
-                    f"\n跳过  {source.skipped_bytes} bytes"
-                    f"\n原因  {source.gap_reason or '-'}"
-                    f"\nGeneration  {source.generation}"
-                    f"\n流不确定  {'是' if source.stream_uncertain else '否'}"
-                    f"\n流原因  {source.stream_uncertainty_reason or '-'}"
-                    f"\n真实性  {source.source_authenticity.value}"
-                    f"\n身份绑定  {source.identity_binding.value}"
-                    f"\n语义置信  {source.semantic_confidence.value}",
                     style="#fbbf24",
                 )
             )

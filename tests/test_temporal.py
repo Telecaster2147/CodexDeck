@@ -114,7 +114,7 @@ class TemporalCutTests(unittest.TestCase):
         )
         self.assertEqual(updated[0].sessions[0].completeness.silence.baseline_kind, "temporal_cut")
 
-    def test_old_terminal_and_tls_data_do_not_make_a_fresh_sample_incoherent(self) -> None:
+    def test_old_terminal_data_does_not_make_a_fresh_sample_incoherent(self) -> None:
         value = instance(100.3)
         process = ProcessInfo(
             ProcessIdentity(42, 100),
@@ -139,7 +139,6 @@ class TemporalCutTests(unittest.TestCase):
                 CollectorHealth("process", last_success_at=100.0),
                 CollectorHealth("socket", last_success_at=100.1),
                 CollectorHealth("state_db:INSTANCE", last_success_at=100.2),
-                CollectorHealth("packet", last_success_at=100.25),
             ],
             now=100.4,
             interval=2.0,

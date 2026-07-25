@@ -1,4 +1,0 @@
-{"timestamp":1767240000.0,"event":"PreCompact","session_id":"SESSION_AUTO","turn_id":"TURN_AUTO","trigger":"auto","outcome":"success"}
-{"timestamp":1767240005.0,"event":"PostCompact","session_id":"SESSION_AUTO","turn_id":"TURN_AUTO","trigger":"auto","outcome":"failed"}
-{"timestamp":1767243600.0,"event":"PreCompact","session_id":"SESSION_ABORT","turn_id":"TURN_ABORT","trigger":"manual","outcome":"success"}
-{"timestamp":1767243603.0,"event":"PostCompact","session_id":"SESSION_ABORT","turn_id":"TURN_ABORT","trigger":"manual","outcome":"aborted"}

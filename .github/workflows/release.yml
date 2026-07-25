@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  checks: read
 
 jobs:
   release-checks:
@@ -18,8 +19,21 @@ jobs:
           python-version: "3.11"
           enable-cache: true
       - run: uv sync --locked
-      - run: uvx ruff check src tests
-      - run: uv run python -m unittest discover -s tests -v
+      - name: Verify main CI for tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          verified=$(
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+              --jq '
+                [.check_runs[]
+                  | select(.name == "lint-types" or .name == "test")
+                  | .conclusion] as $required
+                | ($required | length) == 2
+                  and all($required[]; . == "success")
+              '
+          )
+          test "${verified}" = true
       - name: Verify release version
         run: |
           version=$(uv run python -c 'from config import VERSION; print(VERSION)')
@@ -30,6 +44,11 @@ jobs:
           cd dist
           sha256sum codexdeck-*-py3-none-any.whl > codexdeck-${GITHUB_REF_NAME#v}-py3-none-any.whl.sha256
           sha256sum -c codexdeck-${GITHUB_REF_NAME#v}-py3-none-any.whl.sha256
+      - name: Install smoke
+        run: |
+          uv venv --clear .release-smoke
+          uv pip install --python .release-smoke/bin/python dist/codexdeck-*-py3-none-any.whl
+          .release-smoke/bin/codexdeck --version
       - name: Retain verified distributions
         uses: actions/upload-artifact@v4
         with:

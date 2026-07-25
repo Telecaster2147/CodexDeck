@@ -75,7 +75,6 @@ def snapshot_dict(snapshot: MonitorSnapshot, *, show_auxiliary: bool = False) ->
         "collector_health": public_value(snapshot.collector_health),
         "observer": public_value(snapshot.observer),
         "temporal": public_value(snapshot.temporal),
-        "history": public_value(snapshot.history),
         "instances": instances,
     }
 

@@ -61,10 +61,6 @@ def assess_connection(
         idle_seconds=idle,
         health=health,
         reason=reason,
-        tls_server_name=after.tls_server_name,
-        tls_alpn_protocols=after.tls_alpn_protocols,
-        tls_versions=after.tls_versions,
-        tls_observed_at=after.tls_observed_at,
     )
 
 

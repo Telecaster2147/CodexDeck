@@ -9,8 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app import AppOptions, run_application
-from codex.hook_events import receive_hook_event
-from config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, DEFAULT_INTERVAL, VERSION
+from config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, VERSION
 
 
 def positive_float(value: str) -> float:
@@ -33,263 +32,145 @@ def pid_value(value: str) -> int:
     return pid
 
 
-def positive_int(value: str) -> int:
-    try:
-        number = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("必须是整数") from exc
-    if number <= 0:
-        raise argparse.ArgumentTypeError("必须大于 0")
-    return number
-
-
-def _default(value: object, *, suppress: bool) -> object:
-    return argparse.SUPPRESS if suppress else value
-
-
-def _add_source_arguments(
-    parser: argparse.ArgumentParser,
-    *,
-    suppress_defaults: bool,
-) -> None:
-    parser.add_argument(
-        "--interval",
-        type=positive_float,
-        default=_default(DEFAULT_INTERVAL, suppress=suppress_defaults),
-        help=f"刷新间隔秒数，默认 {DEFAULT_INTERVAL:g}",
-    )
-    parser.add_argument(
-        "--idle-threshold",
-        type=positive_float,
-        default=_default(DEFAULT_IDLE_THRESHOLD, suppress=suppress_defaults),
-        help=f"连接空闲显示阈值秒数，默认 {DEFAULT_IDLE_THRESHOLD:g}",
-    )
-    parser.add_argument(
-        "--event-lookback",
-        type=positive_float,
-        default=_default(float(DEFAULT_EVENT_LOOKBACK), suppress=suppress_defaults),
-        help=f"时间线可见窗口秒数，默认 {DEFAULT_EVENT_LOOKBACK:g}",
-    )
-    parser.add_argument(
-        "--pid",
-        type=pid_value,
-        action="append",
-        default=_default([], suppress=suppress_defaults),
-        help="只观察指定 PID，可重复",
-    )
+def _add_filters(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--pid", type=pid_value, action="append", default=[], help="只观察指定 PID，可重复")
     parser.add_argument(
         "--codex-home",
         type=Path,
         action="append",
-        default=_default([], suppress=suppress_defaults),
+        default=[],
         help="只观察指定 CODEX_HOME，可重复",
     )
-    parser.add_argument(
-        "--packet-inspection",
-        action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="被动解析 TLS ClientHello 元数据（需要 CAP_NET_RAW 或 root）",
-    )
-    parser.add_argument(
-        "--history",
-        type=Path,
-        default=_default(None, suppress=suppress_defaults),
-        help="把关键事件和聚合指标写入独立 SQLite 历史库",
-    )
-    parser.add_argument(
-        "--hook-events",
-        type=Path,
-        default=_default(None, suppress=suppress_defaults),
-        help="读取 compact hook NDJSON；hook-event 命令将最小事件写入此路径",
-    )
-    parser.add_argument(
-        "--history-days",
-        type=positive_int,
-        default=_default(7, suppress=suppress_defaults),
-        help="历史保留天数，默认 7",
-    )
-    parser.add_argument(
-        "--history-max-mib",
+
+
+def _add_advanced_monitor_options(parser: argparse.ArgumentParser) -> None:
+    advanced = parser.add_argument_group("advanced")
+    advanced.add_argument(
+        "--idle-threshold",
         type=positive_float,
-        default=_default(128.0, suppress=suppress_defaults),
-        help="历史库空间上限 MiB，默认 128",
+        default=DEFAULT_IDLE_THRESHOLD,
+        help=f"连接空闲显示阈值秒数，默认 {DEFAULT_IDLE_THRESHOLD:g}",
+    )
+    advanced.add_argument(
+        "--event-lookback",
+        type=positive_float,
+        default=float(DEFAULT_EVENT_LOOKBACK),
+        help=f"时间线可见窗口秒数，默认 {DEFAULT_EVENT_LOOKBACK:g}",
     )
 
 
-def _add_monitor_arguments(
-    parser: argparse.ArgumentParser,
-    *,
-    suppress_defaults: bool,
-) -> None:
+def _add_monitor_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_filters(parser)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="采样一次后退出")
+    mode.add_argument("--watch", action="store_true", help="持续输出 NDJSON")
     parser.add_argument(
-        "--once",
-        action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="完成一个采样窗口后退出",
-    )
-    parser.add_argument(
-        "--flat",
-        action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="启动时使用扁平会话视图",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="显示启动器、app-server 和辅助进程",
+        "--format",
+        choices=("text", "json", "ndjson"),
+        default="text",
+        dest="output_format",
+        help="非交互输出格式，默认 text",
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="输出 JSON，持续监控模式使用 NDJSON",
+        dest="json_alias",
+        help="兼容别名，等同 --format json",
     )
-    parser.add_argument(
-        "--no-color",
-        action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="关闭终端颜色",
-    )
+    parser.add_argument("--flat", action="store_true", help="TUI 启动时使用扁平会话视图")
+    parser.add_argument("--all", action="store_true", help="显示已结束会话与辅助进程")
+    parser.add_argument("--no-color", action="store_true", help="关闭 TUI 与文本颜色")
     parser.add_argument(
         "--strict-observation",
         action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="observer blind/stale/unknown/budget/conflict 时使用独立退出码 5",
+        help="one-shot observer 降级时使用退出码 5",
     )
-
-
-def _add_export_arguments(
-    parser: argparse.ArgumentParser,
-    *,
-    suppress_defaults: bool,
-) -> None:
-    selectors = parser.add_mutually_exclusive_group()
-    selectors.add_argument(
-        "--session",
-        default=_default(None, suppress=suppress_defaults),
-        metavar="SESSION_ID",
-        help="按会话 ID 或完整会话 key 导出复盘",
-    )
-    selectors.add_argument(
-        "--current-incidents",
-        action="store_true",
-        default=_default(False, suppress=suppress_defaults),
-        help="导出当前未解决事件清单",
-    )
+    _add_advanced_monitor_options(parser)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codexdeck",
-        description="按 Codex 实例观察会话生命周期、重连恢复与 TCP 证据。",
-        epilog="不指定子命令时启动监控；交互终端进入 TUI，管道环境输出文本。",
+        description="只读观察当前用户的 Codex 会话。",
+        epilog="直接运行进入 TUI；脚本请使用 monitor --once --format json。",
     )
-    _add_source_arguments(parser, suppress_defaults=False)
-    _add_monitor_arguments(parser, suppress_defaults=False)
-    _add_export_arguments(parser, suppress_defaults=False)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--json", action="store_true", dest="legacy_json_alias", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    monitor = subparsers.add_parser(
+        "monitor",
+        help="交互观察或输出一次当前快照",
+        description="TTY 默认进入 TUI；非 TTY 默认 one-shot。持续机器输出仅支持 --watch --format ndjson。",
+    )
+    _add_monitor_arguments(monitor)
 
     doctor = subparsers.add_parser(
         "doctor",
         help="立即检查 discovery、数据源与采集能力",
-        description=(
-            "立即执行一次只读完整采样并报告 discovery、路径、SQLite、rollout、socket "
-            "和可选采集器状态；不等待普通监控的基线窗口。"
-        ),
-        epilog="默认输出人类可读诊断；--json 输出 doctor_schema_version 1。退出码反映采集健康度。",
+        description="立即执行一次只读完整采样；不等待普通监控的基线窗口。",
+        epilog="text 为默认格式；json 输出 doctor_schema_version 2。",
     )
-    _add_source_arguments(doctor, suppress_defaults=True)
-    doctor.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="输出 versioned doctor JSON",
-    )
+    _add_filters(doctor)
+    doctor.add_argument("--format", choices=("text", "json"), default="text", dest="output_format")
+    doctor.add_argument("--json", action="store_true", dest="json_alias", help="等同 --format json")
 
     export = subparsers.add_parser(
         "export",
-        help="导出当前事件或单个会话复盘",
-        description=(
-            "立即执行一次只读完整采样并输出 JSON。必须且只能指定 --session SESSION_ID "
-            "或 --current-incidents。"
-        ),
-        epilog=(
-            "会话导出包含保留的 normalized events、工具/turn 摘要和网络证据；"
-            "terminal transcript 正文不会进入导出。"
-        ),
+        help="导出单会话的有界当前报告",
+        description="立即采样并输出 versioned JSON；必须指定 --session SESSION_ID。",
+        epilog="包含 rollout lookback 与最多 500 条 retained events；terminal transcript 正文不会进入导出。",
     )
-    _add_source_arguments(export, suppress_defaults=True)
-    _add_export_arguments(export, suppress_defaults=True)
-
-    metrics = subparsers.add_parser(
-        "metrics",
-        help="输出一次 Prometheus text format 快照",
-        description=(
-            "立即执行一次只读完整采样并输出 Prometheus text format；该命令不会启动 HTTP server。"
-        ),
-        epilog="指标只使用低基数标签，不包含 session ID、PID、errmsg 或网络 endpoint。",
-    )
-    _add_source_arguments(metrics, suppress_defaults=True)
-
-    hook_event = subparsers.add_parser(
-        "hook-event",
-        help="从 stdin 接收最小 compact hook 事件",
-        description=(
-            "读取 stdin 中的 PreCompact/PostCompact payload，筛选白名单字段后追加到指定 NDJSON。"
-        ),
-        epilog="必须指定 --hook-events PATH；目标文件以 0600 权限创建。",
-    )
-    hook_event.add_argument(
-        "--hook-events",
-        type=Path,
-        default=argparse.SUPPRESS,
-        metavar="PATH",
-        help="写入最小 compact hook NDJSON 的路径（必需）",
-    )
-
-    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    _add_filters(export)
+    export.add_argument("--session", required=True, metavar="SESSION_ID", help="会话 ID 或完整会话 key")
     return parser
 
 
 def required_commands_available() -> None:
-    missing = [command for command in ("ps", "ss") if shutil.which(command) is None]
-    if missing:
-        raise RuntimeError(f"缺少系统命令：{', '.join(missing)}")
+    if shutil.which("ps") is None:
+        raise RuntimeError("缺少系统命令：ps")
+
+
+def _normalize_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> argparse.Namespace:
+    command = args.command or "monitor"
+    if args.command is None:
+        # Bare invocation intentionally means the quiet interactive monitor.
+        legacy_json_alias = args.legacy_json_alias
+        defaults = build_parser().parse_args(["monitor"])
+        defaults.command = "monitor"
+        defaults.json_alias = legacy_json_alias
+        args = defaults
+    if command in {"monitor", "doctor"} and args.json_alias:
+        if args.output_format not in {"text", "json"}:
+            parser.error("--json 与非 JSON 的 --format 不能同时使用")
+        args.output_format = "json"
+    if command == "monitor":
+        if args.watch and args.output_format != "ndjson":
+            parser.error("--watch 只与 --format ndjson 一起使用")
+        if args.output_format == "ndjson" and not args.watch:
+            parser.error("--format ndjson 必须同时指定 --watch")
+    return args
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    args = build_parser().parse_args(list(argv) if argv is not None else None)
-    if args.command == "hook-event":
-        if args.hook_events is None:
-            raise RuntimeError("hook-event 必须指定 --hook-events PATH")
-        receive_hook_event(args.hook_events, sys.stdin)
-        return 0
-    if args.command == "export" and bool(args.session) == bool(args.current_incidents):
-        raise RuntimeError("export 必须且只能指定 --session 或 --current-incidents")
-    if args.command != "export" and (args.session or args.current_incidents):
-        raise RuntimeError("--session 和 --current-incidents 仅用于 export")
+    parser = build_parser()
+    args = _normalize_args(parser, parser.parse_args(list(argv) if argv is not None else None))
     required_commands_available()
+    command = args.command or "monitor"
     options = AppOptions(
-        interval=args.interval,
-        idle_threshold=args.idle_threshold,
-        event_lookback=int(args.event_lookback),
+        idle_threshold=getattr(args, "idle_threshold", DEFAULT_IDLE_THRESHOLD),
+        event_lookback=int(getattr(args, "event_lookback", DEFAULT_EVENT_LOOKBACK)),
         selected_pids=set(args.pid) or None,
         selected_homes=set(args.codex_home) or None,
-        once=args.once,
-        json=args.json,
-        no_color=args.no_color,
-        show_auxiliary=args.all,
-        flat=args.flat,
-        packet_inspection=args.packet_inspection,
-        command=args.command or "monitor",
-        export_session=args.session,
-        current_incidents=args.current_incidents,
-        history_path=args.history,
-        history_days=args.history_days,
-        history_max_bytes=int(args.history_max_mib * 1024 * 1024),
-        hook_events_path=args.hook_events,
-        strict_observation=args.strict_observation,
+        once=getattr(args, "once", False),
+        watch=getattr(args, "watch", False),
+        output_format=getattr(args, "output_format", "json" if command == "export" else "text"),
+        no_color=getattr(args, "no_color", False),
+        show_auxiliary=getattr(args, "all", False),
+        flat=getattr(args, "flat", False),
+        command=command,
+        export_session=getattr(args, "session", None),
+        strict_observation=getattr(args, "strict_observation", False),
     )
     return run_application(options)
 

@@ -41,7 +41,6 @@ from models import (  # noqa: E402
 from presentation.json_output import render_json  # noqa: E402
 from presentation.export import session_export  # noqa: E402
 from presentation.doctor import render_doctor_json  # noqa: E402
-from presentation.metrics import METRIC_FAMILIES, render_prometheus  # noqa: E402
 from presentation.privacy import public_value  # noqa: E402
 from presentation.text import render_text  # noqa: E402
 
@@ -102,7 +101,7 @@ def snapshot() -> MonitorSnapshot:
     return MonitorSnapshot("2026-07-15T00:00:00+08:00", 2.0, [instance])
 
 
-def snapshot_with_metrics() -> MonitorSnapshot:
+def snapshot_with_summaries() -> MonitorSnapshot:
     result = snapshot()
     session = result.sessions[0]
     usage = TokenUsageSummary(
@@ -174,19 +173,8 @@ class OutputTests(unittest.TestCase):
 
         payload = json.loads(render_json(result, pretty=False))
         command = payload["instances"][0]["collector_health"][0]["command"]
-        metrics = render_prometheus(result)
-
         self.assertEqual(command["reason"], "stdout_byte_budget")
         self.assertEqual(command["stdout_bytes_filtered"], 900)
-        self.assertIn(
-            'codexdeck_command_bytes{category="process",disposition="filtered",'
-            'stream="stdout"} 900',
-            metrics,
-        )
-        self.assertIn(
-            'codexdeck_command_complete{category="process"} 0',
-            metrics,
-        )
 
     def test_public_projection_denies_unknown_dataclass_and_dynamic_fields(self) -> None:
         @dataclass
@@ -224,7 +212,6 @@ class OutputTests(unittest.TestCase):
                 json.dumps(session_export(result.sessions[0], result.sessions[0].events)),
                 render_doctor_json(result),
                 render_text(result),
-                render_prometheus(result),
             )
         )
         self.assertNotIn("NESTED_CANARY_SECRET", rendered)
@@ -269,7 +256,6 @@ class OutputTests(unittest.TestCase):
         rendered_json = render_json(result, pretty=False)
         terminal = json.loads(rendered_json)["instances"][0]["sessions"][0]["terminal_sessions"][0]
         rendered_text = render_text(result)
-        metrics = render_prometheus(result)
         exported = json.dumps(session_export(result.sessions[0], result.sessions[0].events))
 
         self.assertEqual(terminal["process_id"], "321")
@@ -277,11 +263,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(terminal["capability"], "POLL_TRANSCRIPT")
         self.assertNotIn("chunks", terminal)
         self.assertIn("Terminal：1 个，运行中 1 个 | POLL_TRANSCRIPT", rendered_text)
-        self.assertIn(
-            'codexdeck_terminal_sessions{capability="POLL_TRANSCRIPT",instance="i1"} 1',
-            metrics,
-        )
-        self.assertNotIn(transcript, rendered_json + rendered_text + metrics)
+        self.assertNotIn(transcript, rendered_json + rendered_text)
         public_session = json.loads(rendered_json)["instances"][0]["sessions"][0]
         self.assertIsNone(public_session["tool_executions"][0]["output"])
         self.assertIsNone(public_session["turns"][0]["tools"][0]["output"])
@@ -289,7 +271,7 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn("terminal_sessions", exported)
         self.assertNotIn(transcript, exported)
 
-    def test_attention_is_present_in_json_text_and_metrics(self) -> None:
+    def test_attention_is_present_in_json_and_text(self) -> None:
         result = snapshot()
         session = result.sessions[0]
         session.attention = AttentionState.APPROVAL
@@ -302,16 +284,10 @@ class OutputTests(unittest.TestCase):
 
         payload = json.loads(render_json(result, pretty=False))
         rendered_text = render_text(result)
-        metrics = render_prometheus(result)
-
         self.assertEqual(payload["summary"]["action_required"], 1)
         self.assertEqual(payload["instances"][0]["sessions"][0]["attention"], "APPROVAL")
         self.assertIn("待操作 1", rendered_text)
         self.assertIn("Approve command", rendered_text)
-        self.assertIn(
-            'codexdeck_attention_sessions{instance="i1",state="APPROVAL"} 1',
-            metrics,
-        )
 
     def test_protocol_uncertainty_is_shared_by_text_and_machine_output(self) -> None:
         result = snapshot()
@@ -351,16 +327,6 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(association["association_coverage"], 0.75)
         self.assertIsNone(association["precision"])
         self.assertIn("coverage 75.0%", render_text(result))
-        metrics = render_prometheus(result)
-        self.assertIn(
-            'codexdeck_terminal_association_operations{instance="i1",status="unresolved"} 1',
-            metrics,
-        )
-        self.assertIn(
-            'codexdeck_terminal_association_coverage{instance="i1"} 0.75',
-            metrics,
-        )
-        self.assertNotIn('codexdeck_terminal_association_precision{instance="i1"}', metrics)
 
     def test_json_has_versioned_instance_shape(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=True))
@@ -377,7 +343,6 @@ class OutputTests(unittest.TestCase):
                 "collector_health",
                 "observer",
                 "temporal",
-                "history",
                 "instances",
             },
         )
@@ -391,7 +356,7 @@ class OutputTests(unittest.TestCase):
             "NORMAL",
         )
 
-    def test_structured_diagnostics_are_private_and_shared_with_metrics(self) -> None:
+    def test_structured_diagnostics_are_private_and_machine_readable(self) -> None:
         value = snapshot()
         value.diagnostics = ["failed at /home/USER/private.sqlite TOKEN=SECRET_VALUE"]
         value.instances[0].unknown_event_types = {"future_shape": 2}
@@ -403,8 +368,6 @@ class OutputTests(unittest.TestCase):
         codes = {item["code"] for item in payload["diagnostics"]}
         self.assertIn("SOURCE_REPORTED_DEGRADED", codes)
         self.assertIn("PROTOCOL_UNKNOWN", codes)
-        metrics = render_prometheus(value)
-        self.assertIn('codexdeck_diagnostics{code="PROTOCOL_UNKNOWN"', metrics)
         self.assertIn("last_semantic_at", payload["instances"][0]["sessions"][0]["observation"])
         self.assertNotIn("identity", payload["instances"][0])
         self.assertNotIn("identity", payload["instances"][0]["sessions"][0])
@@ -413,14 +376,7 @@ class OutputTests(unittest.TestCase):
             payload["instances"][0]["sessions"][0]["process"],
         )
 
-    def test_metrics_family_contract_is_frozen(self) -> None:
-        output = render_prometheus(snapshot_with_metrics())
-        families = tuple(
-            line.split()[2] for line in output.splitlines() if line.startswith("# HELP ")
-        )
-        self.assertEqual(families, METRIC_FAMILIES)
-
-    def test_axis_completeness_is_shared_by_json_text_doctor_and_metrics(self) -> None:
+    def test_axis_completeness_is_shared_by_json_text_and_doctor(self) -> None:
         value = snapshot()
         session = value.sessions[0]
         session.completeness = SessionCompleteness(
@@ -437,7 +393,6 @@ class OutputTests(unittest.TestCase):
         payload = json.loads(render_json(value, pretty=False))
         doctor = json.loads(render_doctor_json(value))
         text = render_text(value)
-        metrics = render_prometheus(value)
 
         lifecycle = payload["instances"][0]["sessions"][0]["completeness"]["lifecycle"]
         self.assertFalse(lifecycle["complete"])
@@ -446,12 +401,8 @@ class OutputTests(unittest.TestCase):
             ["lifecycle"],
         )
         self.assertIn("证据不完整(lifecycle)", text)
-        self.assertIn(
-            'codexdeck_state_axis_completeness{axis="lifecycle",instance="i1",status="incomplete"} 1',
-            metrics,
-        )
 
-    def test_ingress_backlog_gap_and_budget_are_shared_by_json_and_metrics(self) -> None:
+    def test_ingress_backlog_gap_and_budget_are_machine_readable(self) -> None:
         value = snapshot()
         instance = value.instances[0]
         instance.rollout_activity = [
@@ -468,32 +419,19 @@ class OutputTests(unittest.TestCase):
         ]
 
         payload = json.loads(render_json(value, pretty=False))
-        metrics = render_prometheus(value)
 
         activity = payload["instances"][0]["rollout_activity"][0]
         self.assertEqual(activity["backlog_bytes"], 2048)
         self.assertEqual(activity["backlog_records_lower_bound"], 3)
         self.assertEqual(activity["gap_reason"], "oversize_jsonl_record")
-        self.assertIn(
-            'codexdeck_ingress_backlog_bytes{instance="i1",source="rollout"} 2048',
-            metrics,
-        )
-        self.assertIn(
-            'codexdeck_ingress_backlog_records_lower_bound{instance="i1",source="rollout"} 3',
-            metrics,
-        )
-        self.assertIn(
-            'codexdeck_ingress_gap_total{instance="i1",source="rollout"} 1',
-            metrics,
-        )
 
     def test_all_includes_auxiliary_processes_in_json_and_text(self) -> None:
         payload = json.loads(render_json(snapshot(), pretty=False, show_auxiliary=True))
         self.assertEqual(len(payload["instances"][0]["processes"]), 2)
         self.assertIn("辅助进程", render_text(snapshot(), show_auxiliary=True))
 
-    def test_json_additive_metrics_keep_schema_one_and_nullable_strings(self) -> None:
-        payload = json.loads(render_json(snapshot_with_metrics(), pretty=False))
+    def test_json_additive_summaries_keep_schema_one_and_nullable_strings(self) -> None:
+        payload = json.loads(render_json(snapshot_with_summaries(), pretty=False))
         self.assertEqual(payload["schema_version"], 1)
         session = payload["instances"][0]["sessions"][0]
         self.assertEqual(session["turns"][0]["time_to_first_token_seconds"], 0.75)
@@ -510,7 +448,7 @@ class OutputTests(unittest.TestCase):
         self.assertIsNone(session["agents"][0]["provenance"]["source"])
 
     def test_text_summarizes_turn_tools_tokens_limits_and_subagents(self) -> None:
-        output = render_text(snapshot_with_metrics())
+        output = render_text(snapshot_with_summaries())
         self.assertIn("Turn turn-1 | completed | 耗时 4s | TTFT 0.75s | 工具 1 / 1s", output)
         self.assertIn("Token：本 Turn in 400 / cached 100 / out 80", output)
         self.assertIn("累计 total 1500；上下文 1200/4000 (30.0%)", output)

@@ -11,5 +11,6 @@ def run_tui(
     engine: MonitorEngine,
     use_color: bool,
     flat: bool,
+    show_all: bool = False,
 ) -> MonitorSnapshot:
-    return run_textual_tui(engine, use_color, flat)
+    return run_textual_tui(engine, use_color, flat, show_all)

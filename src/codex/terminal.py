@@ -1087,7 +1087,6 @@ class TerminalStore:
             TerminalCapability.FINAL_TRANSCRIPT: 1,
             TerminalCapability.POLL_TRANSCRIPT: 2,
             TerminalCapability.FILE_TAIL: 3,
-            TerminalCapability.STREAMING: 4,
         }[capability]
 
     def _record_private_degradation(

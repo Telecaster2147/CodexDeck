@@ -39,7 +39,6 @@ def event_severity(kind: str) -> tuple[str, str]:
         "TURN_ABORTED",
         "COMPACT_ABORTED",
         "ALERT_OPENED",
-        "ALERT_ACKNOWLEDGED",
         "ACTION_REQUIRED",
         "COMPACT_REQUESTED",
         "UNPARSED_PAYLOAD",

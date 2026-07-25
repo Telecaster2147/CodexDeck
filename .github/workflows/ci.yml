@@ -4,12 +4,58 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
 
 jobs:
+  lint-types:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uvx ruff check src tests tools
+      - run: uvx mypy
+
   test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python -m unittest discover -s tests -v
+
+  latest-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: >
+          uv run python -m unittest
+          tests.test_app
+          tests.test_adapters
+          tests.test_replay
+          tests.test_temporal
+          tests.test_terminal
+
+  nightly-matrix:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -22,10 +68,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --locked
-      - run: uvx ruff check src tests
       - run: uv run python -m unittest discover -s tests -v
 
   build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

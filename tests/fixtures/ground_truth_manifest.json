@@ -6,7 +6,7 @@
       "rollout_structured_protocol",
       "process_liveness",
       "terminal_durable_records",
-      "socket_and_packet_supporting_evidence"
+      "socket_supporting_evidence"
     ],
     "conflict_rule": "Preserve the higher-authority fact, mark the affected axis incomplete, and retain the conflict as a bounded diagnostic.",
     "counterexample_rule": "Add or update an anonymous case before changing recognition; reproducible false positives remove or downgrade the old inference unless stronger structured evidence exists."

@@ -11,17 +11,17 @@ from typing import Mapping
 
 @dataclass(frozen=True)
 class CodexDeckPreferences:
-    startup_animation: bool = True
     group_sessions: bool = True
     show_hidden_sessions: bool = False
     follow_output: bool = True
-    notifications: bool = True
+    notifications: bool = False
+    sound_enabled: bool = False
+    attention_sound: bool = False
+    completion_sound: bool = True
     theme: str = "codexdeck-blue"
-    default_tab: str = "activity"
 
 
 THEMES = {"codexdeck-blue", "textual-dark", "textual-light"}
-DEFAULT_TABS = {"activity", "diagnosis", "terminal"}
 
 
 def preferences_path(environment: Mapping[str, str] | None = None) -> Path:
@@ -46,9 +46,7 @@ def load_preferences(path: Path | None = None) -> CodexDeckPreferences:
         return value if isinstance(value, bool) else default
 
     theme = payload.get("theme")
-    default_tab = payload.get("default_tab")
     return CodexDeckPreferences(
-        startup_animation=boolean("startup_animation", defaults.startup_animation),
         group_sessions=boolean("group_sessions", defaults.group_sessions),
         show_hidden_sessions=boolean(
             "show_hidden_sessions",
@@ -56,8 +54,10 @@ def load_preferences(path: Path | None = None) -> CodexDeckPreferences:
         ),
         follow_output=boolean("follow_output", defaults.follow_output),
         notifications=boolean("notifications", defaults.notifications),
+        sound_enabled=boolean("sound_enabled", defaults.sound_enabled),
+        attention_sound=boolean("attention_sound", defaults.attention_sound),
+        completion_sound=boolean("completion_sound", defaults.completion_sound),
         theme=theme if theme in THEMES else defaults.theme,
-        default_tab=default_tab if default_tab in DEFAULT_TABS else defaults.default_tab,
     )
 
 

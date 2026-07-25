@@ -29,13 +29,14 @@ class PreferencesTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             path = Path(temp) / "nested" / "preferences.json"
             preferences = CodexDeckPreferences(
-                startup_animation=False,
                 group_sessions=False,
                 show_hidden_sessions=True,
                 follow_output=False,
                 notifications=False,
+                sound_enabled=True,
+                attention_sound=True,
+                completion_sound=False,
                 theme="textual-light",
-                default_tab="terminal",
             )
             saved = save_preferences(preferences, path)
             self.assertEqual(saved, path)
@@ -43,13 +44,14 @@ class PreferencesTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 {
-                    "startup_animation": False,
                     "group_sessions": False,
                     "show_hidden_sessions": True,
                     "follow_output": False,
                     "notifications": False,
+                    "sound_enabled": True,
+                    "attention_sound": True,
+                    "completion_sound": False,
                     "theme": "textual-light",
-                    "default_tab": "terminal",
                 },
             )
 
@@ -68,7 +70,7 @@ class PreferencesTests(unittest.TestCase):
                         "startup_animation": False,
                         "group_sessions": "no",
                         "theme": "unknown",
-                        "default_tab": "metrics",
+                        "default_tab": "legacy-pane",
                     }
                 ),
                 encoding="utf-8",
@@ -76,7 +78,5 @@ class PreferencesTests(unittest.TestCase):
 
             preferences = load_preferences(path)
 
-            self.assertFalse(preferences.startup_animation)
             self.assertTrue(preferences.group_sessions)
             self.assertEqual(preferences.theme, "codexdeck-blue")
-            self.assertEqual(preferences.default_tab, "activity")

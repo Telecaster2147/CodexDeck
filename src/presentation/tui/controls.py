@@ -58,7 +58,7 @@ SHORTCUTS = (
         "search",
         "/",
         "搜索与跟随",
-        "搜索当前区域：会话视图过滤会话，Terminal 中只搜索已保留的当前进程输出。",
+        "会话筛选；Terminal 内搜索已保留的当前进程输出。",
         True,
     ),
     ShortcutSpec(
@@ -126,14 +126,6 @@ SHORTCUTS = (
         "Esc",
         "导航",
         "取消搜索、退出放大、从终端输出返回任务列表，或在窄屏返回会话列表。",
-    ),
-    ShortcutSpec(
-        "t",
-        "cycle_theme",
-        "t",
-        "视图",
-        "在经典蓝色、深色和浅色主题之间临时切换。",
-        True,
     ),
     ShortcutSpec(
         "z",
@@ -316,7 +308,7 @@ REFERENCE_EXTRAS = (
 
 REFERENCE_ORDER = {
     "导航": ("↑ / ↓", "j", "k", "Enter", "Tab", "Esc", "]", "PgUp/PgDn"),
-    "视图": ("1", "2", "3", "g", "h", "z", "t"),
+    "视图": ("1", "2", "3", "g", "h", "z"),
     "搜索与跟随": ("/", "f", "n", "Shift+N"),
     "系统": ("r", "s", "?", "q"),
 }
@@ -423,14 +415,6 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                 id="settings-subtitle",
             )
             with VerticalScroll(id="settings-scroll"):
-                yield Static("启动体验", classes="setting-section")
-                yield self._switch_row(
-                    "启动动画",
-                    "下次启动时完整播放品牌动画，同时在后台准备首个快照",
-                    "startup-animation-switch",
-                    self.preferences.startup_animation,
-                )
-
                 yield Static("默认视图", classes="setting-section")
                 yield self._switch_row(
                     "按工作区分组",
@@ -444,21 +428,6 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                     "show-hidden-switch",
                     self.preferences.show_hidden_sessions,
                 )
-                with Horizontal(classes="setting-row"):
-                    with Vertical(classes="setting-copy"):
-                        yield Static("默认 Inspector 页面", classes="setting-label")
-                        yield Static("选择会话后优先显示的详情页面", classes="setting-detail")
-                    yield Select(
-                        (
-                            ("Activity", "activity"),
-                            ("Diagnosis", "diagnosis"),
-                            ("Terminal", "terminal"),
-                        ),
-                        value=self.preferences.default_tab,
-                        allow_blank=False,
-                        id="default-tab-select",
-                    )
-
                 yield Static("阅读与提醒", classes="setting-section")
                 yield self._switch_row(
                     "自动跟随新内容",
@@ -468,9 +437,27 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                 )
                 yield self._switch_row(
                     "状态通知",
-                    "显示等待操作、失败、停顿、compact 和恢复通知",
+                    "显示等待操作、失败和可信停顿通知",
                     "notifications-switch",
                     self.preferences.notifications,
+                )
+                yield self._switch_row(
+                    "终端提示音",
+                    "提示音总开关；由当前终端处理 BEL",
+                    "sound-enabled-switch",
+                    self.preferences.sound_enabled,
+                )
+                yield self._switch_row(
+                    "需要处理提示音",
+                    "请求持续 5 秒后提示，并每 60 秒重复",
+                    "attention-sound-switch",
+                    self.preferences.attention_sound,
+                )
+                yield self._switch_row(
+                    "长任务完成提示音",
+                    "运行至少 10 秒的 turn 完成时提示",
+                    "completion-sound-switch",
+                    self.preferences.completion_sound,
                 )
                 with Horizontal(classes="setting-row"):
                     with Vertical(classes="setting-copy"):
@@ -508,7 +495,7 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
 
     def on_mount(self) -> None:
         self.set_class(self.app.size.width < 64, "narrow")
-        self.query_one("#startup-animation-switch", Switch).focus()
+        self.query_one("#group-sessions-switch", Switch).focus()
 
     def on_resize(self, event: events.Resize) -> None:
         self.set_class(event.size.width < 64, "narrow")
@@ -518,15 +505,15 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
 
     def action_save(self) -> None:
         theme = self.query_one("#theme-select", Select).value
-        default_tab = self.query_one("#default-tab-select", Select).value
         self.dismiss(
             CodexDeckPreferences(
-                startup_animation=self.query_one("#startup-animation-switch", Switch).value,
                 group_sessions=self.query_one("#group-sessions-switch", Switch).value,
                 show_hidden_sessions=self.query_one("#show-hidden-switch", Switch).value,
                 follow_output=self.query_one("#follow-output-switch", Switch).value,
                 notifications=self.query_one("#notifications-switch", Switch).value,
+                sound_enabled=self.query_one("#sound-enabled-switch", Switch).value,
+                attention_sound=self.query_one("#attention-sound-switch", Switch).value,
+                completion_sound=self.query_one("#completion-sound-switch", Switch).value,
                 theme=str(theme),
-                default_tab=str(default_tab),
             )
         )

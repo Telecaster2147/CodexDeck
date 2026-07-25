@@ -1061,11 +1061,11 @@ class StateMachineTests(unittest.TestCase):
             "key",
             [
                 NormalizedEvent(
-                    1_100.0,
+                    1_300.0,
                     "ACTION_REQUIRED",
                     "等待用户操作",
-                    source="compact_hook",
-                    source_id="hook-action",
+                    source="log",
+                    source_id="log-action",
                     observed_at=1_000.0,
                     metadata={"attention_state": "USER_INPUT"},
                 )
@@ -1089,7 +1089,7 @@ class StateMachineTests(unittest.TestCase):
 
         self.assertIsNone(state.attention_request)
         self.assertTrue(state.clock_uncertain)
-        self.assertEqual(state.clock_assessments[0].source, "compact_hook")
+        self.assertEqual(state.clock_assessments[0].source, "log")
 
     def test_terminal_completion_and_process_exit_clear_future_attention(self) -> None:
         for clear_kind in ("TURN_COMPLETED", "PROCESS_EXITED"):
@@ -1684,7 +1684,7 @@ class StateMachineTests(unittest.TestCase):
                 timestamp,
                 kind,
                 kind,
-                source="compact_hook",
+                source="rollout",
                 source_id=source_id,
                 observed_at=timestamp + 0.1,
                 metadata={

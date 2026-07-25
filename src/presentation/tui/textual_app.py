@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
-from threading import Thread
 
 from rich.console import Console
 from rich.text import Text
@@ -66,6 +66,7 @@ from presentation.tui.navigation import (
     workspace_groups,
 )
 from presentation.tui.sampling import SamplingCoordinator
+from presentation.tui.sounds import SoundScheduler
 from presentation.tui.terminal_panel import TerminalLog, TerminalPanel
 from presentation.tui.theme import CODEXDECK_BLUE_THEME, STATE_COLORS
 from preferences import (
@@ -85,36 +86,6 @@ BINDING_KEY_LABELS = {
     "escape": "Esc",
 }
 
-STARTUP_FRAME_INTERVAL = 0.10
-STARTUP_DURATION = 3.0
-STARTUP_FRAMES_PER_STAGE = 6
-STARTUP_SYSTEMS = ("CORE", "EVENTS", "TERMINALS", "NETWORK")
-STARTUP_STAGES = (
-    "DISCOVERING ACTIVE SESSIONS",
-    "CORRELATING ROLLOUT EVENTS",
-    "VERIFYING TERMINAL PROCESSES",
-    "CONSOLE READY",
-)
-
-STARTUP_LOGO = (
-    " ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗",
-    "██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝",
-    "██║     ██║   ██║██║  ██║█████╗   ╚███╔╝ ",
-    "██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗ ",
-    "╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗",
-    " ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝",
-)
-
-STARTUP_DECK_LOGO = (
-    "██████╗ ███████╗ ██████╗██╗  ██╗",
-    "██╔══██╗██╔════╝██╔════╝██║ ██╔╝",
-    "██║  ██║█████╗  ██║     █████╔╝ ",
-    "██║  ██║██╔══╝  ██║     ██╔═██╗ ",
-    "██████╔╝███████╗╚██████╗██║  ██╗",
-    "╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝",
-)
-
-
 def binding_key_label(key: str) -> str:
     return BINDING_KEY_LABELS.get(key, key)
 
@@ -123,41 +94,6 @@ def keyboard_reference() -> str:
     """Compatibility export for the application shortcut reference."""
 
     return _keyboard_reference()
-
-
-def startup_renderable(frame: int, *, compact: bool = False) -> Text:
-    """Build one stable startup animation frame for wide or compact terminals."""
-
-    stage = min(frame // STARTUP_FRAMES_PER_STAGE, len(STARTUP_STAGES) - 1)
-    text = Text(justify="center")
-    if compact:
-        text.append("CODEXDECK\n", style="bold #67d8ff")
-    else:
-        for line in STARTUP_LOGO:
-            text.append(f"{line}\n", style="bold #67d8ff")
-        for line in STARTUP_DECK_LOGO:
-            text.append(f"{line}\n", style="bold #f8fafc")
-    text.append("\nREAD-ONLY PROCESS OBSERVATORY\n\n", style="bold #cbd5e1")
-
-    for index, system in enumerate(STARTUP_SYSTEMS):
-        active = index <= stage
-        text.append("◆ " if active else "◇ ", style="#67d8ff" if active else "#334155")
-        text.append(system, style="bold #e2e8f0" if active else "#64748b")
-        if index < len(STARTUP_SYSTEMS) - 1:
-            text.append("   " if compact else "    ")
-
-    rail_width = 24 if compact else 40
-    filled = max(1, round(rail_width * (stage + 1) / len(STARTUP_STAGES)))
-    text.append("\n\n")
-    text.append("━" * filled, style="#67d8ff")
-    text.append("━" * (rail_width - filled), style="#1e293b")
-    text.append(f"\n{STARTUP_STAGES[stage]}", style="bold #94a3b8")
-    text.append(f"\n\nv{VERSION}", style="#475569")
-    return text
-
-
-class StartupOverlay(Static):
-    """Short-lived, non-modal brand layer shown while the console mounts."""
 
 
 class SampleCompleted(Message):
@@ -438,8 +374,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
     CSS_PATH = "codexdeck.tcss"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = APP_BINDINGS
-    STARTUP_FRAME_INTERVAL = STARTUP_FRAME_INTERVAL
-    STARTUP_DURATION = STARTUP_DURATION
 
     def __init__(
         self,
@@ -449,16 +383,12 @@ class CodexDeckApp(App[MonitorSnapshot]):
         use_color: bool = True,
         flat: bool = False,
         sampling: bool = True,
-        startup_animation: bool = False,
         preferences: CodexDeckPreferences | None = None,
         preferences_file: Path | None = None,
-        prepare_on_start: bool = False,
     ) -> None:
         super().__init__(ansi_color=use_color)
         self.register_theme(CODEXDECK_BLUE_THEME)
-        preferences = preferences or CodexDeckPreferences(
-            startup_animation=startup_animation,
-        )
+        preferences = preferences or CodexDeckPreferences()
         self.engine = engine
         self.snapshot = snapshot
         self.preferences = preferences
@@ -466,11 +396,15 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self.grouped = preferences.group_sessions and not flat
         self.show_hidden = preferences.show_hidden_sessions
         self.sampling = sampling
-        self.startup_animation_enabled = preferences.startup_animation
         self.notifications_enabled = preferences.notifications
-        self.default_tab = preferences.default_tab
+        self.sound_scheduler = SoundScheduler(
+            self.bell,
+            enabled=preferences.sound_enabled,
+            attention_enabled=preferences.attention_sound,
+            completion_enabled=preferences.completion_sound,
+        )
+        self.sound_scheduler.observe(snapshot)
         self.preferences_file = preferences_file
-        self.prepare_on_start = prepare_on_start
         self.collapsed: set[str] = set()
         self.selected_key = ""
         self.selected_session: SessionHealth | None = None
@@ -496,13 +430,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self._status_message_until = 0.0
         self._header_signature: tuple[object, ...] | None = None
         self._status_line_value = ""
-        self._startup_frame = 0
-        self._startup_visible = self.startup_animation_enabled
-        self._startup_animation_complete = not self.startup_animation_enabled
-        self._startup_data_ready = not prepare_on_start
-        self._initial_preparing = prepare_on_start
-        self._startup_interval = None
-        self._startup_timer = None
         self.theme = preferences.theme
 
     def compose(self) -> ComposeResult:
@@ -515,78 +442,17 @@ class CodexDeckApp(App[MonitorSnapshot]):
             yield SessionInspector(id="inspector")
         yield Static("READY", id="status-line")
         yield ShortcutFooter(id="shortcut-footer")
-        yield StartupOverlay(id="startup-overlay")
 
     async def on_mount(self) -> None:
-        overlay = self.query_one(StartupOverlay)
-        if self._startup_visible:
-            self._render_startup()
-            self._startup_interval = self.set_interval(
-                self.STARTUP_FRAME_INTERVAL,
-                self._advance_startup,
-            )
-            self._startup_timer = self.set_timer(
-                self.STARTUP_DURATION,
-                self._complete_startup_animation,
-            )
-        else:
-            overlay.display = False
-        self._select_default_tab(self.default_tab)
         self._update_header()
         self._update_status_line()
         self._update_shortcut_footer()
         await self._rebuild_navigation()
         self.query_one("#session-list", ListView).focus()
         self.set_interval(TUI_CLOCK_INTERVAL, self._clock_tick)
+        self.set_interval(0.05, self._sound_tick)
         if self.sampling:
             self.set_interval(TUI_EVENT_POLL_INTERVAL, self._poll_live_events)
-        if self.prepare_on_start:
-            if self.sampling_coordinator.begin_initial():
-                Thread(
-                    target=self._initial_sample_worker,
-                    name="codexdeck-initial-sample",
-                    daemon=True,
-                ).start()
-
-    def _render_startup(self) -> None:
-        if not self._startup_visible:
-            return
-        compact = self.size.width < 96 or self.size.height < 28
-        try:
-            overlay = self.query_one(StartupOverlay)
-        except NoMatches:
-            self._stop_startup()
-            return
-        overlay.update(startup_renderable(self._startup_frame, compact=compact))
-
-    def _advance_startup(self) -> None:
-        if not self._startup_visible:
-            return
-        self._startup_frame += 1
-        self._render_startup()
-
-    def _complete_startup_animation(self) -> None:
-        self._startup_animation_complete = True
-        if self._startup_data_ready:
-            self._dismiss_startup()
-
-    def _dismiss_startup(self) -> None:
-        if not self._startup_visible:
-            return
-        self._stop_startup()
-        try:
-            self.query_one(StartupOverlay).display = False
-        except NoMatches:
-            return
-
-    def _stop_startup(self) -> None:
-        self._startup_visible = False
-        if self._startup_interval is not None:
-            self._startup_interval.stop()
-            self._startup_interval = None
-        if self._startup_timer is not None:
-            self._startup_timer.stop()
-            self._startup_timer = None
 
     async def _clock_tick(self) -> None:
         """Refresh display-only ages without invoking any collector."""
@@ -605,8 +471,10 @@ class CodexDeckApp(App[MonitorSnapshot]):
             except NoMatches:
                 return
 
+    def _sound_tick(self) -> None:
+        self.sound_scheduler.tick()
+
     def on_resize(self, event: events.Resize) -> None:
-        self._render_startup()
         if self.is_mounted and self.selected_session and self._resize_timer is None:
             try:
                 log = self.query_one("#activity-panel", RichLog)
@@ -1084,14 +952,16 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 self._set_status_message(f"SETTINGS ERROR · {error}")
                 return
         self.preferences = preferences
-        self.startup_animation_enabled = preferences.startup_animation
         self.notifications_enabled = preferences.notifications
+        self.sound_scheduler.configure(
+            enabled=preferences.sound_enabled,
+            attention_enabled=preferences.attention_sound,
+            completion_enabled=preferences.completion_sound,
+        )
         self.grouped = preferences.group_sessions and not self._flat_override
         self.show_hidden = preferences.show_hidden_sessions
         self.follow = preferences.follow_output
-        self.default_tab = preferences.default_tab
         self.theme = preferences.theme
-        self._select_default_tab(preferences.default_tab)
         self.query_one("#activity-panel", RichLog).auto_scroll = self.follow
         self.query_one("#terminal-output", TerminalLog).auto_scroll = self.follow
         self._update_header()
@@ -1099,12 +969,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self._show_selected_session()
         self.call_later(self._rebuild_navigation)
         self._set_status_message("SETTINGS SAVED")
-
-    def _select_default_tab(self, name: str) -> None:
-        if name not in {"activity", "diagnosis", "terminal"}:
-            name = "activity"
-        self.query_one("#detail-tabs", Tabs).active = f"{name}-tab"
-        self.query_one("#detail-content", ContentSwitcher).current = f"{name}-panel"
 
     def action_search(self) -> None:
         if self.query_one("#detail-tabs", Tabs).active == "terminal-tab":
@@ -1165,17 +1029,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
             self.compact_detail = True
             self.screen.add_class("detail-open")
         self._update_shortcut_footer()
-
-    def action_cycle_theme(self) -> None:
-        themes = ("codexdeck-blue", "textual-dark", "textual-light")
-        current = themes.index(self.theme) if self.theme in themes else 0
-        self.theme = themes[(current + 1) % len(themes)]
-        label = {
-            "codexdeck-blue": "CLASSIC BLUE",
-            "textual-dark": "DARK",
-            "textual-light": "LIGHT",
-        }[self.theme]
-        self._set_status_message(f"THEME · {label}")
 
     def _zoom_area(self) -> str:
         focused = self.focused
@@ -1326,14 +1179,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
             return
         self.post_message(SampleCompleted(snapshot))
 
-    def _initial_sample_worker(self) -> None:
-        try:
-            snapshot = self.engine.prepare_initial_snapshot()
-        except Exception as error:
-            self.post_message(SampleCompleted(None, str(error)))
-            return
-        self.post_message(SampleCompleted(snapshot))
-
     def on_sample_completed(self, event: SampleCompleted) -> None:
         self._finish_sample(event.snapshot, event.error)
 
@@ -1354,12 +1199,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
             self._collector_error = ""
             if had_error:
                 self._update_status_line()
-        if self._initial_preparing:
-            self._initial_preparing = False
-            self._startup_data_ready = True
-            if self._startup_animation_complete:
-                self._dismiss_startup()
-
     def _show_collector_error(self, message: str) -> None:
         if message == self._collector_error:
             return
@@ -1370,13 +1209,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
         if not self.notifications_enabled:
             return
         before = {session.key: session for session in previous.sessions}
-        active_states = {
-            LifecycleState.STARTING,
-            LifecycleState.WAITING_RESPONSE,
-            LifecycleState.GENERATING,
-            LifecycleState.RUNNING_TOOL,
-            LifecycleState.COMPACTING,
-        }
         for session in current.sessions:
             old = before.get(session.key)
             if old is None:
@@ -1405,36 +1237,10 @@ class CodexDeckApp(App[MonitorSnapshot]):
                     title=f"STALL SUSPECT · {title}",
                     severity="warning",
                 )
-            elif (
-                session.silence.state == SilenceState.OBSERVER_BLIND
-                and old.silence.state != SilenceState.OBSERVER_BLIND
-            ):
-                self.notify(
-                    session.silence.reason,
-                    title=f"OBSERVER BLIND · {title}",
-                    severity="warning",
-                )
-            elif (
-                session.compactions
-                and session.compactions[-1].status in {"completed", "failed", "aborted"}
-                and (
-                    not old.compactions
-                    or old.compactions[-1].status != session.compactions[-1].status
-                )
-            ):
-                compact = session.compactions[-1]
-                self.notify(
-                    f"compact {compact.status}",
-                    title=title,
-                    severity="error" if compact.status == "failed" else "information",
-                )
-            elif old.lifecycle in active_states and session.lifecycle == LifecycleState.COMPLETED:
-                self.notify("Turn completed", title=title, severity="information")
-            elif old.recovery.value != "RECOVERED" and session.recovery.value == "RECOVERED":
-                self.notify("Connection recovered", title=title, severity="information")
 
     def _apply_snapshot(self, snapshot: MonitorSnapshot) -> None:
         self._notify_transitions(self.snapshot, snapshot)
+        self.sound_scheduler.observe(snapshot)
         self.snapshot = snapshot
         active = {
             workspace_group_key(instance.instance_id, session_workspace(session))
@@ -1452,24 +1258,20 @@ def run_textual_tui(
     engine: MonitorEngine,
     use_color: bool,
     flat: bool,
+    show_all: bool = False,
 ) -> MonitorSnapshot:
-    """Start Textual and prepare the initial snapshot behind the optional startup layer."""
+    """Start Textual after preparing the first coherent snapshot."""
     preference_file = preferences_path()
     preferences = load_preferences(preference_file)
-    if preferences.startup_animation:
-        snapshot = MonitorSnapshot("", engine.interval, [])
-        prepare_on_start = True
-    else:
-        snapshot = engine.prepare_initial_snapshot()
-        prepare_on_start = False
+    if show_all:
+        preferences = replace(preferences, show_hidden_sessions=True)
+    snapshot = engine.prepare_initial_snapshot()
     app = CodexDeckApp(
         engine,
         snapshot,
         use_color=use_color,
         flat=flat,
-        startup_animation=preferences.startup_animation,
         preferences=preferences,
         preferences_file=preference_file,
-        prepare_on_start=prepare_on_start,
     )
     return app.run() or snapshot

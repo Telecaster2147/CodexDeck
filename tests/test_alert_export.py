@@ -22,7 +22,6 @@ from models import (  # noqa: E402
     TokenUsageSummary,
 )
 from presentation.export import (  # noqa: E402
-    current_incidents_export,
     render_export_json,
     session_export,
 )
@@ -69,7 +68,7 @@ def event(
 
 
 class AlertLifecycleTests(unittest.TestCase):
-    def test_occurrence_is_stable_escalates_acknowledges_and_resolves(self) -> None:
+    def test_occurrence_is_stable_escalates_and_resolves(self) -> None:
         machine = SessionStateMachine(900)
         machine.ingest("key", [event(100, "TURN_STARTED", "start")])
 
@@ -84,11 +83,6 @@ class AlertLifecycleTests(unittest.TestCase):
         escalated = machine.derive("key", process(), NetworkEvidence(), 281)
         self.assertEqual(escalated.alerts[0].status, AlertStatus.ESCALATED)
         self.assertEqual(escalated.alerts[0].escalated_at, 281)
-        self.assertTrue(machine.acknowledge_alert("key", alert_id, 282))
-        self.assertFalse(machine.acknowledge_alert("key", "missing", 282))
-
-        acknowledged = machine.derive("key", process(), NetworkEvidence(), 282.5)
-        self.assertEqual(acknowledged.alerts[0].status, AlertStatus.ACKNOWLEDGED)
         machine.ingest(
             "key",
             [
@@ -106,7 +100,6 @@ class AlertLifecycleTests(unittest.TestCase):
             [
                 AlertStatus.OPENED,
                 AlertStatus.ESCALATED,
-                AlertStatus.ACKNOWLEDGED,
                 AlertStatus.RESOLVED,
             ],
         )
@@ -139,39 +132,6 @@ class AlertLifecycleTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
-    def test_attention_is_exported_as_current_incident(self) -> None:
-        machine = SessionStateMachine(900)
-        machine.ingest(
-            "attention",
-            [
-                event(100, "TURN_STARTED", "start"),
-                event(
-                    101,
-                    "ACTION_REQUIRED",
-                    "approval",
-                    detail="Approve command",
-                    metadata={"attention_state": "APPROVAL", "call_id": "call-1"},
-                ),
-            ],
-        )
-        session = machine.derive("attention", process(), NetworkEvidence(), 102)
-
-        payload = current_incidents_export([session])
-        self.assertEqual(
-            set(payload),
-            {
-                "export_schema_version",
-                "export_type",
-                "generated_at",
-                "incident_count",
-                "incidents",
-            },
-        )
-
-        self.assertEqual(payload["incident_count"], 1)
-        self.assertEqual(payload["incidents"][0]["attention"], "APPROVAL")
-        self.assertEqual(payload["incidents"][0]["attention_request"]["call_id"], "call-1")
-
     def test_session_export_uses_full_retention_and_redacts_nested_secrets(self) -> None:
         machine = SessionStateMachine(10)
         failure = FailureInfo(
@@ -243,7 +203,7 @@ class ExportTests(unittest.TestCase):
         self.assertIn("observation", payload["session"])
         self.assertIn("silence", payload["session"])
         self.assertIn("compactions", payload)
-        self.assertEqual(payload["export_schema_version"], 2)
+        self.assertEqual(payload["export_schema_version"], 3)
         self.assertEqual(payload["incident_summary"]["first_abnormal_at"], 2)
         self.assertFalse(payload["incident_summary"]["recovered"])
         self.assertEqual(
@@ -265,19 +225,7 @@ class ExportTests(unittest.TestCase):
         self.assertNotIn("detail-secret", encoded)
         self.assertNotIn("metadata-secret", encoded)
         self.assertNotIn("process-secret", encoded)
-        self.assertEqual(json.loads(encoded)["export_type"], "session_review")
-
-    def test_current_incidents_contains_only_unresolved_sessions(self) -> None:
-        machine = SessionStateMachine(900)
-        machine.ingest("active", [event(100, "TURN_STARTED", "active-start")])
-        active = machine.derive("active", process(), NetworkEvidence(), 161)
-        quiet = machine.derive("quiet", process(), NetworkEvidence(), 161)
-
-        payload = current_incidents_export([active, quiet], generated_at="2026-07-16T00:00:00Z")
-        self.assertEqual(payload["incident_count"], 1)
-        self.assertEqual(payload["incidents"][0]["alerts"][0]["status"], "OPENED")
-        self.assertIn("incident_summary", payload["incidents"][0])
-
+        self.assertEqual(json.loads(encoded)["export_type"], "bounded_session_report")
 
 if __name__ == "__main__":
     unittest.main()

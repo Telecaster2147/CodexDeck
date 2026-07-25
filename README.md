@@ -18,10 +18,9 @@
 <br>
 
 > [!NOTE]
-> **项目状态：** 已交付 milestone 为 `0.2.0`；[`TODO.md`](TODO.md) 当前 P0/P1/P2 审计条目均已
-> 关闭。该状态表示实现清单已收口，不替代发布前的 Ruff、mypy、完整测试、真实 PTY、benchmark、
-> 构建与产物检查；发布证据分级、失效与撤回规则见
-> `TODO.md` 仅保留为本地审计工作材料。
+> **项目状态：** 当前公开版本为 `0.2.0`；项目正在按本地 `TODO.md` 执行产品表面收敛。核心
+> identity、lifecycle、attention、Terminal 与只读边界保持稳定，optional collector、持久化和
+> 输出适配器正在分阶段评估或退出。
 
 <img src="assets/screenshots/overview.png" alt="CodexDeck 六会话宽屏工作台，左侧按工作区组织会话，右侧显示待审批会话的 Diagnosis 证据" width="100%">
 
@@ -68,7 +67,7 @@ codexdeck
 
 安装器会完成以下工作：
 
-1. 检查 Linux、Python 3.10+、`ps` 与 `ss`
+1. 检查 Linux、Python 3.10+ 与 `ps`；缺少 `ss` 时只停用网络证据
 2. 解析最新 GitHub Release，下载对应 wheel 和 `.sha256`
 3. 强制校验 SHA-256
 4. 在 `~/.local/share/codexdeck` 中创建独立虚拟环境
@@ -125,14 +124,14 @@ codexdeck
   --checksum dist/codexdeck-0.2.0-py3-none-any.whl.sha256
 ```
 
-当 stdin 与 stdout 都连接到 TTY 时，CodexDeck 自动进入 Textual 界面；管道或文件环境自动输出文本。
+直接运行且 stdin/stdout 都连接到 TTY 时进入 Textual；管道或文件环境默认采样一次后退出。
 
 ```bash
 # 两秒采样窗口后输出一次文本
-codexdeck --once
+codexdeck monitor --once
 
 # 输出一次完整 JSON 快照
-codexdeck --once --json
+codexdeck monitor --once --format json
 
 # 检查 discovery、数据源和采集能力
 codexdeck doctor
@@ -166,13 +165,12 @@ Inspector 有三个固定页面：
 
 | 导航 | 视图 | 搜索与跟随 | 系统 |
 | --- | --- | --- | --- |
-| `j` / `k` 或 `↑` / `↓` 移动 | `1` Activity | `/` 搜索当前区域 | `r` 完整采样 |
+| `j` / `k` 或 `↑` / `↓` 移动 | `1` Activity | `/` 会话筛选；Terminal 内搜索输出 | `r` 完整采样 |
 | `Enter` 展开或进入详情 | `2` Diagnosis | `n` / `Shift+N` 切换匹配 | `s` 设置 |
 | `]` 下一个异常会话 | `3` Terminal | `f` 末尾自动跟随 | `?` 帮助 |
 | `Esc` 返回或取消 | `g` 分组/扁平 |  | `q` / `Ctrl+C` 退出 |
 | `Tab` / `Shift+Tab` 切换焦点 | `h` 活跃/全部会话 |  |  |
 |  | `z` 放大当前区域 |  |  |
-|  | `t` 循环主题 |  |  |
 
 ## 能力地图
 
@@ -186,8 +184,8 @@ Inspector 有三个固定页面：
 | **Terminal 关联** | 按 process ID 优先、call ID 次之，关联初始 exec、yield、poll/write 与完成记录 |
 | **静默判断** | 区分活跃但无协议事件、等待上游、证据不足、疑似停顿和观察器盲区 |
 | **网络证据** | 聚合进程全部连接的队列、收发/ACK 增量与重传；连续两个异常窗口后确认 stall |
-| **Compact 观测** | 合并 rollout、typed TUI session log 与最小 hook 证据，保留 requested/running/terminal 边界 |
-| **多种输出** | Textual TUI、文本、JSON/NDJSON、doctor、export、Prometheus 与可选独立历史库 |
+| **Compact 观测** | 从 rollout 与结构化 SQLite 日志保留 requested/running/terminal 边界 |
+| **多种输出** | Textual TUI、文本、JSON/NDJSON、doctor 与单会话 export |
 
 ## 工作原理
 
@@ -222,7 +220,6 @@ flowchart LR
         TUI[Textual TUI]
         JSON[JSON / NDJSON]
         DOC[Doctor / Export]
-        MET[Prometheus]
     end
 
     P --> DISC
@@ -237,13 +234,13 @@ flowchart LR
     LIFE & REC & ATTN & SIL --> SNAP
     TERM --> SNAP
     NET --> SNAP
-    SNAP --> TUI & JSON & DOC & MET
+    SNAP --> TUI & JSON & DOC
 
     class P,R,D,L,S,F source
     class DISC,EVENT,TERM,NET collection
     class LIFE,REC,ATTN,SIL model
     class SNAP snapshot
-    class TUI,JSON,DOC,MET view
+    class TUI,JSON,DOC view
 
     classDef source fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e,stroke-width:2px
     classDef collection fill:#dcfce7,stroke:#15803d,color:#14532d,stroke-width:2px
@@ -269,22 +266,22 @@ flowchart LR
 或显式 PID 选择，并在保留前逐行丢弃非 Codex candidate；`ss` 逐行只保留目标 Codex PID 的 socket
 header 与其 continuation。stdout/stderr 字节、行数、保留记录或 wall time 超限时会终止并回收子进程，
 本轮标记 incomplete，继续使用上一份完整 process/socket 集合；退出码为 0 但出现 stderr 也按
-incomplete 处理。Doctor、JSON 和 Prometheus 发布实际读取、保留、过滤、丢弃与完整性统计。
+incomplete 处理。Doctor 和 JSON 发布实际读取、保留、过滤、丢弃与完整性统计。
 Linux `ss` 没有本项目可依赖的 PID-only 源端查询合同，因此它仍读取全局 netlink 输出，但只在上述
 硬预算内逐行检查，非目标记录不会进入长期 buffer 或 snapshot；这是当前公开的能力边界。
 
 每条 JSONL 增量来源每 tick 最多读取 512 KiB、处理 512 条记录并使用 50 ms 解析量子；单条记录
-硬上限为 256 KiB。rollout、TUI session log 和 compact hook 都按一来源一个量子顺序获得服务，
+硬上限为 256 KiB。每个 rollout 按一来源一个量子顺序获得服务，
 因此热文件不会吞掉其他 session 的采样机会。cursor 只推进已消费字节；普通 incomplete line 留待
 下一轮，超长无换行记录进入有界 skip-to-delimiter，发布 generation 内累计 skipped bytes、摘要 hash
 和 explicit gap。达到预算时继续从当前 offset 追赶，不静默跳到文件尾，也不合并 lifecycle、attention、
 failure、terminal completion 或 semantic unknown；当前实现不对辅助事件做有损 coalesce。
 
-snapshot、doctor、TUI Diagnosis、JSON 和 Prometheus 统一公开 backlog bytes、已知 record 下界、age、
+snapshot、doctor、TUI Diagnosis、JSON 统一公开 backlog bytes、已知 record 下界、age、
 budget-exceeded、oversize/gap 与 skipped bytes。积压清空后恢复实时观察；若发生超长记录，显式 gap
 继续保留为该 generation 的协议质量事实，后续关键事件仍按顺序交付。
 
-三类可变 JSONL 流统一使用 `(path digest, device, inode, generation, offset, content anchor)` 身份。
+可变 rollout JSONL 流使用 `(path digest, device, inode, generation, offset, content anchor)` 身份。
 replace、truncate 或尾部锚点变化会开启新 generation，source ID 不依赖外部 timestamp；旧 generation
 延迟记录由状态机丢弃。若只观察到相同大小文件的 mtime 变化而尾部锚点未变，CodexDeck 不猜测纯
 append，也不重放相同内容，而是发布 `stream_uncertain`、generation、anchor hash 和原因。
@@ -294,11 +291,11 @@ append，也不重放相同内容，而是发布 `stream_uncertain`、generation
 observer 为 full/fast sample 记录 scheduled、started、completed、duration、scheduling/event-loop lag、
 skipped/coalesced tick、连续超期、worker in-flight age、最近成功时间和 snapshot age。单次抖动只保留
 证据；连续两次超期或 snapshot age 超过两个完整 cadence 才标记 `observer degraded`。该状态不覆盖
-Codex lifecycle，并在 persistent status、text、JSON、doctor 和 Prometheus 中使用同一摘要。
+Codex lifecycle，并在 persistent status、text、JSON 和 doctor 中使用同一摘要。
 
 `MonitorSnapshot` 不是所有字段同时发生的单点 cut，而是显式的 `composite_interval`。process、rollout、
-terminal、SQLite、hook、socket、packet 分别发布 observed window、source generation、valid-through、
-stale age 与 completeness。fast refresh 继承旧 full-sample process/socket/SQLite/packet 时间，不把新的
+terminal、SQLite 与 socket 分别发布 observed window、source generation、valid-through、
+stale age 与 completeness。fast refresh 继承旧 full-sample process/socket/SQLite 时间，不把新的
 `generated_at` 当作这些来源的新鲜时间。当前最大混合 skew 为两个 full cadence；超限发布
 `TEMPORAL_SKEW`，跨来源 ownership/health 结论按不完整证据解释。PID reuse 仍由 `(pid,start_time)`、
 socket reopen 由 flow identity、rollout replace/truncate 由 generation 单调区分。
@@ -319,7 +316,7 @@ socket reopen 由 flow identity、rollout replace/truncate 由 generation 单调
 
 每个会话同时发布 `lifecycle`、`attention`、`failure_recovery`、`terminal_ownership`、
 `network` 和 `silence` 的独立 completeness。`complete=false` 表示当前显示值可能是“未观察到”，
-不能解释为明确 absent/healthy。主导航、Inspector、text、JSON、doctor、Prometheus 和退出码使用同一
+不能解释为明确 absent/healthy。主导航、Inspector、text、JSON、doctor 和退出码使用同一
 `SessionCompleteness` 值。
 
 | 轴 | 正证据 | 权威 clear / baseline |
@@ -350,7 +347,6 @@ CodexDeck 不把 `NormalizedEvent.detail` 拼成伪终端，而是维护独立�
 | `POLL_TRANSCRIPT` | Codex 写入初始 yield 或后续 poll/write 结果时，持久化 transcript 随记录增长；不是字节级实时流 |
 | `FINAL_TRANSCRIPT` | 只有完成记录或聚合输出可用 |
 | `METADATA_ONLY` | 能看到命令/进程元数据，但没有可读输出 |
-| `STREAMING` | 为未来官方、外部可订阅的只读 delta 源预留 |
 
 普通 Codex TUI rollout 不公开其进程内瞬时 output delta。CodexDeck 只展示已经形成耐久证据的
 poll/final transcript，或符合边界检查的普通文件 tail，不附着或消费 Codex PTY。
@@ -377,24 +373,25 @@ default-ignorable 字符可视化为 `<U+XXXX>`，并按 display-cell width 截�
 codexdeck
 
 # 持续 NDJSON，每行一个 schema 1 snapshot
-codexdeck --json
+codexdeck monitor --watch --format ndjson
 
 # 指定 PID、Home 或扁平视图
-codexdeck --pid PID
-codexdeck --codex-home CODEX_HOME_A --codex-home CODEX_HOME_B
-codexdeck --flat
+codexdeck monitor --pid PID
+codexdeck monitor --codex-home CODEX_HOME_A --codex-home CODEX_HOME_B
+codexdeck monitor --flat
 
 # 文本/JSON 中同时显示 launcher、app-server 和辅助进程
-codexdeck --once --all
+codexdeck monitor --once --all
 
 # 将 observer blind/stale/unknown/budget/conflict 与 workload incident 分开用于自动化
-codexdeck --once --json --strict-observation
+codexdeck monitor --once --format json --strict-observation
 ```
 
-普通 one-shot 的退出 `0` 只表示当前 snapshot 未命中其 workload/axis incident 条件，不表示所有来源
-完整可信。`--strict-observation` 在没有更高优先级 workload failure/stall 时，以退出码 `5` 报告 active
-observer degradation；JSON 中仍同时保留全部结构化 diagnostic。稳定 code、隐私字段和组合优先级见
-公开诊断使用稳定 code、有限参数和固定消息模板。
+普通 one-shot 的退出 `0` 只表示当前 snapshot 未命中 workload incident，不表示所有来源完整可信。
+`--json` 暂时作为 `--format json` 的兼容别名；持续输出必须显式使用
+`--watch --format ndjson`，text 与 pretty JSON 始终 one-shot。
+`--strict-observation` 在没有更高优先级 workload failure/stall 时，以退出码 `5` 报告 active observer
+degradation；JSON 中仍同时保留全部结构化 diagnostic。稳定 code、隐私字段和组合优先级见公开诊断。
 
 <details>
 <summary><strong>Doctor：检查数据源与降级原因</strong></summary>
@@ -404,104 +401,27 @@ codexdeck doctor
 codexdeck doctor --json
 ```
 
-`doctor` 立即执行一次完整只读采样，不等待普通监控的基线窗口。JSON 使用独立的 `doctor_schema_version: 1`。
+`doctor` 立即执行一次完整只读采样，不等待普通监控的基线窗口。JSON 使用独立的
+`doctor_schema_version: 2`，并分别报告 `workload_status`、`observer_status`、可选能力 warning 和
+兼容性 info。
 
 </details>
 
 <details>
-<summary><strong>Export：导出当前事件或单会话复盘</strong></summary>
+<summary><strong>Export：导出单会话的有界当前报告</strong></summary>
 
 ```bash
-codexdeck export --current-incidents
 codexdeck export --session SESSION_ID
 ```
 
 会话导出包含最多 500 条保留事件、turn/tool/compact 摘要、恢复链、告警、失败信息和 TCP 证据。
-输出使用 `export_schema_version: 2`，并移除 terminal transcript 正文。
+输出使用 `export_schema_version: 3`，并移除 terminal transcript 正文。来源是一次新进程采样、
+rollout lookback 和状态机最多 500 条 retained events。
 
 </details>
 
-<details>
-<summary><strong>Metrics：输出一次 Prometheus text format</strong></summary>
 
-```bash
-codexdeck metrics
-```
 
-这是一次性输出，不启动 HTTP server。指标只使用低基数标签，不把 session ID、PID、errmsg 或网络 endpoint 放进 label。
-
-</details>
-
-<details>
-<summary><strong>History：启用 CodexDeck 自己的 SQLite 历史库</strong></summary>
-
-```bash
-codexdeck --history HISTORY.sqlite
-codexdeck --once --history HISTORY.sqlite --history-days 14 --history-max-mib 64
-```
-
-历史功能默认关闭。启用后保存 lifecycle、attention、failure/recovery、workspace、事件摘要与有限
-metadata，以及 10 秒/60 秒聚合桶；默认保留 7 天，可用 `--history-days` 进一步缩短，并受空间上限
-约束。历史写入、窗口统计和 silence baseline 查询由一个后台线程串行执行；实时 snapshot 只使用上一批
-缓存结果，并公开 queue depth、dropped/coalesced、writer lag、stats age 与最后成功时间。队列最多保留
-4 个不可变 snapshot，普通样本可合并，transition/incident 优先保留；退出最多等待 1 秒 flush。
-SQLite busy timeout 为 100 毫秒，长查询有短 deadline，prune/VACUUM 位于可跳过的维护周期。同一路径
-被多个 CodexDeck 进程同时写入不属于低延迟支持合同，锁竞争会降级 history writer 而不阻塞实时采样。
-
-数据库、现存 SQLite journal/WAL/SHM 和 hook 文件要求当前用户拥有的 `0600` regular file。
-父目录必须属于当前用户且不可由 group/world 写入，因此直接把文件放在 sticky `/tmp` 会被拒绝；可在
-`/tmp` 下先建立当前用户私有的 `0700` 子目录。symlink、FIFO、device、所有权异常和路径替换会形成
-明确错误。
-
-按时间或空间删除 SQLite 行只表示 CodexDeck 不再查询这些记录，不构成可靠擦除。旧数据库页、
-journal/WAL、备份和文件系统快照仍可能保留内容；敏感环境需要由用户管理加密文件系统、备份与最终
-删除策略。
-
-</details>
-
-<details>
-<summary><strong>Compact：接入可选 session log 与最小 hook 证据</strong></summary>
-
-```bash
-# 启动 Codex 时显式记录 typed TUI session log
-CODEX_TUI_RECORD_SESSION=1 \
-CODEX_TUI_SESSION_LOG_PATH=SESSION_LOG.jsonl \
-codex
-
-# 让 CodexDeck 读取最小 hook NDJSON
-codexdeck --hook-events CODEXDECK_HOOKS.jsonl
-
-# 作为 PreCompact/PostCompact hook 接收器
-codexdeck hook-event --hook-events CODEXDECK_HOOKS.jsonl
-```
-
-Session log 入口只保留 outbound typed `Compact` 所需字段；hook 文件以 `0600` 创建，只写白名单元数据。
-`0600`、owner 与 schema 校验只证明本地文件边界和解析有效性，不认证 producer。当前 hook 事件因此
-标记为 `source_authenticity: low`、初始 `identity_binding: low`、`semantic_confidence: medium`；唯一活动
-session/turn 路由只能把 binding 提升到 `medium`。未认证 hook 可作为 compaction 辅助 evidence 和诊断，
-但不单独改变 lifecycle、attention 或 failure，也不覆盖 rollout。未来若接入官方可验证 hook，必须同时
-提供 producer provenance、复合 session/process binding、generation 和防重放证据后才可使用 high。
-
-</details>
-
-<details>
-<summary><strong>Packet inspection：可选 TLS ClientHello 元数据</strong></summary>
-
-```bash
-codexdeck --packet-inspection
-codexdeck doctor --packet-inspection --json
-```
-
-该功能默认关闭，需要 `CAP_NET_RAW` 或 root。`AF_PACKET` 权限本身可看见当前 network namespace
-投递的主机级 frame；CodexDeck 仅在一次成功的 Codex process/socket 快照发布精确 flow allowlist 后
-启动采集，并在 TLS 重组与 metadata retention 之前丢弃 allowlist 外的 frame。allowlist 绑定
-`(pid, kernel start_time)`，快照过期、flow 移除或 PID 复用会立即清除对应半包与观察结果。
-
-严格预过滤意味着首次成功 socket 快照前已经完成的 ClientHello 可能缺失。保留下来的内容仅为当前
-allowlisted Codex flow 的 SNI、ALPN、offered TLS versions 与观察时间；请求体、响应、凭据和 TLS
-payload 不进入保留层。权限缺失会作为 packet collector 降级显示，其他采集器继续工作。
-
-</details>
 
 运行 `codexdeck --help` 或子命令的 `--help` 查看完整参数。
 
@@ -513,15 +433,13 @@ payload 不进入保留层。权限缺失会作为 packet collector 降级显示
 | Text | shell 管道与快速巡检 | 不输出 |
 | JSON / NDJSON | 自动化采集，`schema_version: 1` | 不输出，只包含 terminal summaries |
 | Doctor | 数据源、路径、schema 与 collector 健康诊断 | 不输出 |
-| Export | 当前 incident 或单会话复盘 | 不输出 |
-| Prometheus | 低基数监控指标 | 不输出 |
-| History | CodexDeck 自有长期事件与聚合数据 | 不写入 |
+| Export | 单会话有界当前报告 | 不输出 |
 
 ### 证据与发布合同
 
 - `MonitorSnapshot` 是一次已发布的观察结果。没有可见变化时复用原对象；有变化时替换受影响分支，
   已发布对象及其嵌套值不得被后续采样修改。
-- lifecycle 由已知的结构化 protocol phase 决定；process、terminal、socket、packet 与 SQLite 证据
+- lifecycle 由已知的结构化 protocol phase 决定；process、terminal、socket 与 SQLite 证据
   只能补充各自负责的事实，不替代 protocol lifecycle。
 - instance、session、process、rollout、terminal 与 socket 使用各自的复合身份。展示用短 ID 不作为
   跨来源归属的充分证据。
@@ -542,8 +460,8 @@ payload 不进入保留层。权限缺失会作为 packet collector 降级显示
   降为 `low`；更晚的已知 progress 会恢复结论，旧 unknown 和辅助 telemetry 不覆盖新证据。
 - 每个 normalized event 分开保存 producer `source_timestamp`、CodexDeck `observed_at` 和状态机
   `adjudicated_at`。来源时间用于展示与同来源正常区间，观察时间用于 freshness，裁决时间只用于
-  跨来源状态排序、retention 和单调 clear。rollout/TUI 允许 5 秒 future skew 与 2 秒回拨，hook
-  允许 30/5 秒，SQLite log/SSE 允许 120/120 秒，本地 process/detector 允许 2/1 秒；这些容差对应
+  跨来源状态排序、retention 和单调 clear。rollout 允许 5 秒 future skew 与 2 秒回拨，
+  SQLite log/SSE 允许 120/120 秒，本地 process/detector 允许 2/1 秒；这些容差对应
   各 producer 的写入与采样行为，不是一个全局阈值。超界、零时间戳和 observer wall-clock 回拨会
   降低 clock trust 并记录采用的裁决时间。future attention 不压住后来观察到的 resolution，旧 failure
   不因回拨复活，terminal completion 与 process exit 使用单调 clear 规则。最新同来源可信事件会
@@ -553,32 +471,32 @@ payload 不进入保留层。权限缺失会作为 packet collector 降级显示
   correlation source 与原因；会话聚合只对当前有界保留窗口报告 eligible、associated、ambiguous、
   conflicting、unresolved 和 dropped 原始计数。缺少标注样本时 `precision` 保持 null，不把零误归属
   宣传成全局 recall。
-- collector 保持只读。诊断、history 和公开输出只使用有界数据；terminal transcript 正文仅保留在
+- collector 保持只读。诊断和公开输出只使用有界数据；terminal transcript 正文仅保留在
   本地有界内存 TUI 中。
 
 ### Machine-readable schema 兼容政策
 
-当前公开版本为：JSON/NDJSON `schema_version: 1`、doctor `doctor_schema_version: 1`、export
-`export_schema_version: 2`、replay fixture manifest `schema_version: 1`。CodexDeck 自有 history 数据库
-内部 schema 当前为 `5`，它不属于跨版本稳定的公开导入 API。schema 5 的
-`instance_identities` 保存 canonical `(codex_home, sqlite_home)`、128-bit surrogate 与 legacy 64-bit
-key；同一 surrogate 对应不同 tuple 时拒绝写入。
+当前仍处于 Alpha。核心 JSON/NDJSON 是唯一稳定的 machine API，当前
+`schema_version: 1`。单会话报告使用 `export_schema_version: 3`，在 1.0 前只承诺同一 minor
+版本内兼容，breaking change 会记录在 release note。Doctor 是诊断面，可随 minor 提升
+`doctor_schema_version`，不逐字段承诺弃用周期。replay manifest 与 fixtures 仅为仓库测试资产。
 
 - 在现有对象中增加可忽略的 nullable 字段属于 additive change，可保持当前 schema version。
 - 删除或重命名字段、改变字段类型、改变枚举含义、改变 nullability，或改变同一字段的领域语义，
   属于 breaking change，必须提升对应 surface 的 schema version。
 - 新领域字段默认不进入公开 machine-readable surface。加入公开 schema 时需要同时声明隐私边界、
   长度上限、脱敏行为和兼容性影响。
-- 已发布 schema version 在当前 minor release line 内继续受支持；移除旧版本需要在发布说明中记录，
-  并至少经过一个 minor release 的弃用周期。
-- README、CLI help、实现常量、fixture manifest 与合同测试共同约束版本文案。任一处漂移均视为门禁失败。
+- 核心 JSON/NDJSON 的 breaking change 必须提升 schema version；同一 minor 内保持旧合同。
+- README、CLI help、实现常量与合同测试共同约束公开版本文案。
 
 新增 machine-readable 字段遵循 additive/breaking 语义，默认保持私有，公开前需同时具备
 长度边界、脱敏、投影和回归测试。
 
 ## 设置
 
-按 `s` 打开设置，可持久化启动动画、分组、隐藏会话、默认 Inspector 页面、自动跟随、通知和主题。
+按 `s` 打开设置，可持久化分组、隐藏会话、自动跟随、关键操作通知、终端提示音和主题。
+Activity 固定为默认页面；主题只通过设置页切换。提示音 master 默认关闭，长任务完成类别默认启用、
+attention 类别默认关闭；仅 TUI 使用终端 BEL，非交互输出保持静默。
 
 ```text
 $XDG_CONFIG_HOME/codexdeck/preferences.json
@@ -597,12 +515,10 @@ $XDG_CONFIG_HOME/codexdeck/preferences.json
   带凭据 URL/DSN、PEM private key 和 Cookie header 等已知格式执行 best-effort 脱敏；这不是任意秘密
   检测保证，自定义格式、无上下文字段和未知凭据仍可能保留。为避免破坏 session ID、hash、trace ID
   等正常诊断值，CodexDeck 不按“高熵”单一特征自动替换所有随机字符串
-- JSON、NDJSON、export、history、metrics 与默认文本输出都不包含 transcript 正文
+- JSON、NDJSON、export 与默认文本输出都不包含 transcript 正文
 - domain dataclass 不是公开 DTO；JSON/NDJSON、export 与 doctor 使用 deny-by-default 类型字段清单，
   event metadata 和 rollout activity 另有键 allowlist。新增内部字段或未知嵌套 metadata 默认不公开，
   公开字段通过显式 allowlist 投影，新增字段默认不公开
-- history 事件只保存结构化 allowlist 字段、类别、长度/hash 与 provenance；任意 event summary/detail、
-  unknown payload 和 tool/user output 不进入持久化事件文本
 - 当来源可包含任意 user/tool 输出、缺少稳定 schema、内容与 metadata 边界不清，或已知格式脱敏会让
   文本失去诊断价值时，持久化与默认公开投影停止保存该文本，改用类别、长度、hash 和 provenance
 
@@ -628,7 +544,7 @@ tracemalloc 的时间/峰值分开；`read_amplification` 显式显示 parse wal
 | --- | --- |
 | 操作系统 | Linux |
 | Python | 3.10+ |
-| 系统命令 | `ps`、`ss`（通常来自 `iproute2`） |
+| 系统命令 | 必需：`ps`；可选网络证据：`ss`（通常来自 `iproute2`） |
 | Python UI | Textual `>=8.2.8,<9` |
 | 权限 | 当前用户 Codex 进程、`/proc` 与对应 Codex 数据目录的读取权限 |
 
@@ -639,13 +555,16 @@ tracemalloc 的时间/峰值分开；`read_amplification` 显式显示 parse wal
 ```text
 src/
 ├── cli.py / app.py          # CLI、运行模式与退出码
-├── engine.py                # 完整采样与 100ms 快速刷新
-├── state_machine.py         # 生命周期、恢复、attention 与静默推导
+├── engine.py                # 采样编排、temporal cut 与 snapshot publication
+├── engine_collectors.py     # 有界进程与 socket collector stages
+├── engine_refresh.py        # 100ms rollout/terminal 快速刷新
+├── state_machine.py         # session ledger、事件时间与推导入口
+├── state_axes.py            # lifecycle/attention/failure/completeness axes
+├── state_summaries.py       # turn/tool/agent 与 capability 有界摘要
 ├── models.py                # 领域模型和 immutable snapshot
-├── history.py               # 可选 CodexDeck SQLite 历史库
 ├── codex/                   # 进程、路径、SQLite、rollout、事件与 terminal 读取器
-├── network/                 # ss、TCP 分类和可选 ClientHello 元数据
-└── presentation/            # text、JSON、doctor、export、metrics 与 Textual TUI
+├── network/                 # ss 与 TCP 状态分类
+└── presentation/            # text、JSON、doctor、export 与 Textual TUI
 
 tests/                       # unittest 与 Textual Pilot 行为测试
 assets/screenshots/          # 预渲染的匿名 Textual README 截图
