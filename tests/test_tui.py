@@ -248,9 +248,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 app.screen.query_one("#show-hidden-switch", Switch).value = True
                 app.screen.query_one("#follow-output-switch", Switch).value = False
                 app.screen.query_one("#notifications-switch", Switch).value = False
-                app.screen.query_one("#sound-enabled-switch", Switch).value = True
-                app.screen.query_one("#attention-sound-switch", Switch).value = True
-                app.screen.query_one("#completion-sound-switch", Switch).value = False
                 app.screen.query_one("#theme-select", Select).value = "textual-light"
                 await pilot.press("s")
                 await pilot.pause()
@@ -273,9 +270,6 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                     "show_hidden_sessions": True,
                     "follow_output": False,
                     "notifications": False,
-                    "sound_enabled": True,
-                    "attention_sound": True,
-                    "completion_sound": False,
                     "theme": "textual-light",
                 },
             )
@@ -292,8 +286,8 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             scroll = app.screen.query_one("#settings-scroll")
             self.assertLessEqual(dialog.size.width, 68)
             self.assertGreater(scroll.virtual_size.height, scroll.size.height)
-            self.assertEqual(len(app.screen.query(".setting-row")), 8)
-            self.assertEqual(len(app.screen.query(Switch)), 7)
+            self.assertEqual(len(app.screen.query(".setting-row")), 5)
+            self.assertEqual(len(app.screen.query(Switch)), 4)
             self.assertEqual(len(app.screen.query(Select)), 1)
 
             scroll.scroll_end(animate=False)

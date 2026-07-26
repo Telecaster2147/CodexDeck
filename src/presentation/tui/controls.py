@@ -441,24 +441,6 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                     "notifications-switch",
                     self.preferences.notifications,
                 )
-                yield self._switch_row(
-                    "终端提示音",
-                    "提示音总开关；由当前终端处理 BEL",
-                    "sound-enabled-switch",
-                    self.preferences.sound_enabled,
-                )
-                yield self._switch_row(
-                    "需要处理提示音",
-                    "请求持续 5 秒后提示，并每 60 秒重复",
-                    "attention-sound-switch",
-                    self.preferences.attention_sound,
-                )
-                yield self._switch_row(
-                    "长任务完成提示音",
-                    "运行至少 10 秒的 turn 完成时提示",
-                    "completion-sound-switch",
-                    self.preferences.completion_sound,
-                )
                 with Horizontal(classes="setting-row"):
                     with Vertical(classes="setting-copy"):
                         yield Static("界面主题", classes="setting-label")
@@ -511,9 +493,6 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                 show_hidden_sessions=self.query_one("#show-hidden-switch", Switch).value,
                 follow_output=self.query_one("#follow-output-switch", Switch).value,
                 notifications=self.query_one("#notifications-switch", Switch).value,
-                sound_enabled=self.query_one("#sound-enabled-switch", Switch).value,
-                attention_sound=self.query_one("#attention-sound-switch", Switch).value,
-                completion_sound=self.query_one("#completion-sound-switch", Switch).value,
                 theme=str(theme),
             )
         )

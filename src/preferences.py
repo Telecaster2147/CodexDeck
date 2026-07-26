@@ -15,9 +15,6 @@ class CodexDeckPreferences:
     show_hidden_sessions: bool = False
     follow_output: bool = True
     notifications: bool = False
-    sound_enabled: bool = False
-    attention_sound: bool = False
-    completion_sound: bool = True
     theme: str = "codexdeck-blue"
 
 
@@ -54,9 +51,6 @@ def load_preferences(path: Path | None = None) -> CodexDeckPreferences:
         ),
         follow_output=boolean("follow_output", defaults.follow_output),
         notifications=boolean("notifications", defaults.notifications),
-        sound_enabled=boolean("sound_enabled", defaults.sound_enabled),
-        attention_sound=boolean("attention_sound", defaults.attention_sound),
-        completion_sound=boolean("completion_sound", defaults.completion_sound),
         theme=theme if theme in THEMES else defaults.theme,
     )
 

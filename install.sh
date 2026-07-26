@@ -11,10 +11,7 @@ CHECKSUM_SOURCE=""
 TMP_DIR=""
 STAGING=""
 PREVIOUS_TARGET=""
-SOUND_SETUP="${CODEXDECK_SOUND_SETUP:-ask}"
-SOUND_OPTION_SEEN=0
 NO_COLOR_FLAG=0
-INTERACTIVE=0
 BOLD=""
 DIM=""
 CYAN=""
@@ -37,14 +34,12 @@ Options:
   --checksum PATH_OR_URL  SHA-256 file for --wheel; defaults to PATH_OR_URL.sha256.
   --install-root PATH     Installation data directory.
   --bin-dir PATH          Directory for the codexdeck command link.
-  --configure-sound       Enable CodexDeck sounds and configure the detected terminal.
-  --skip-sound-setup      Do not offer interactive sound configuration.
   --no-color              Disable installer colors.
   -h, --help              Show this help.
 
 Environment equivalents:
   CODEXDECK_VERSION, CODEXDECK_INSTALL_ROOT, CODEXDECK_BIN_DIR,
-  CODEXDECK_REPOSITORY, CODEXDECK_SOUND_SETUP=ask|enable|skip
+  CODEXDECK_REPOSITORY
 EOF
 }
 
@@ -54,9 +49,6 @@ fail() {
 }
 
 init_ui() {
-    if [ -t 1 ] && [ -r /dev/tty ]; then
-        INTERACTIVE=1
-    fi
     if [ "$NO_COLOR_FLAG" -eq 0 ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ] &&
         [ "${TERM:-}" != "dumb" ]; then
         BOLD=$(printf '\033[1m')
@@ -83,7 +75,7 @@ banner() {
 }
 
 step() {
-    printf '\n%s%s[%s/6]%s %s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET" "$BOLD" "$2" "$RESET"
+    printf '\n%s%s[%s/5]%s %s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET" "$BOLD" "$2" "$RESET"
 }
 
 ok() {
@@ -96,28 +88,6 @@ warn() {
 
 detail() {
     printf '     %s%s%s\n' "$DIM" "$*" "$RESET"
-}
-
-prompt_yes_no() {
-    question=$1
-    default=${2:-yes}
-    if [ "$INTERACTIVE" -ne 1 ]; then
-        [ "$default" = "yes" ]
-        return
-    fi
-    if [ "$default" = "yes" ]; then
-        suffix="[Y/n]"
-    else
-        suffix="[y/N]"
-    fi
-    printf '  %s%s%s %s ' "$BOLD" "$question" "$RESET" "$suffix" > /dev/tty
-    IFS= read -r answer < /dev/tty || answer=""
-    case "$answer" in
-        y|Y|yes|YES|Yes) return 0 ;;
-        n|N|no|NO|No) return 1 ;;
-        "") [ "$default" = "yes" ] ;;
-        *) return 1 ;;
-    esac
 }
 
 cleanup() {
@@ -165,18 +135,6 @@ while [ "$#" -gt 0 ]; do
             BIN_DIR=$2
             shift 2
             ;;
-        --configure-sound)
-            [ "$SOUND_OPTION_SEEN" -eq 0 ] || fail "sound setup options are mutually exclusive"
-            SOUND_SETUP=enable
-            SOUND_OPTION_SEEN=1
-            shift
-            ;;
-        --skip-sound-setup)
-            [ "$SOUND_OPTION_SEEN" -eq 0 ] || fail "sound setup options are mutually exclusive"
-            SOUND_SETUP=skip
-            SOUND_OPTION_SEEN=1
-            shift
-            ;;
         --no-color)
             NO_COLOR_FLAG=1
             shift
@@ -190,11 +148,6 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
-
-case "$SOUND_SETUP" in
-    ask|enable|skip) ;;
-    *) fail "CODEXDECK_SOUND_SETUP must be ask, enable, or skip" ;;
-esac
 
 init_ui
 banner
@@ -356,59 +309,6 @@ if [ -n "$PREVIOUS_TARGET" ] && [ "$PREVIOUS_TARGET" != "$TARGET" ]; then
     case "$PREVIOUS_TARGET" in
         "$VERSIONS_DIR"/*) rm -rf "$PREVIOUS_TARGET" ;;
     esac
-fi
-
-step 6 "Configuring notification sounds"
-if [ "$SOUND_SETUP" = "ask" ]; then
-    if [ "$INTERACTIVE" -eq 1 ]; then
-        if prompt_yes_no "Enable completion and attention sounds?" yes; then
-            SOUND_SETUP=enable
-        else
-            SOUND_SETUP=skip
-        fi
-    else
-        SOUND_SETUP=skip
-    fi
-fi
-
-if [ "$SOUND_SETUP" = "enable" ]; then
-    if SOUND_RESULT=$("$TARGET/bin/python" -m sound_setup 2>&1); then
-        SOUND_PREFERENCES=$(printf '%s\n' "$SOUND_RESULT" | sed -n 's/^preferences=//p')
-        SOUND_TERMINAL=$(printf '%s\n' "$SOUND_RESULT" | sed -n 's/^terminal=//p')
-        VSCODE_CONFIGURED=$(printf '%s\n' "$SOUND_RESULT" | sed -n 's/^vscode_configured=//p')
-        VSCODE_SETTINGS=$(printf '%s\n' "$SOUND_RESULT" | sed -n 's/^vscode_settings=//p')
-        ok "CodexDeck completion and attention sounds enabled"
-        detail "Preferences: $SOUND_PREFERENCES"
-        if [ "$VSCODE_CONFIGURED" = "yes" ]; then
-            ok "VS Code terminal-bell sound enabled"
-            detail "Settings: $VSCODE_SETTINGS"
-            detail "Existing settings are backed up once before the first change"
-        else
-            detail "Detected terminal: ${SOUND_TERMINAL:-unknown}; no frontend file needed"
-        fi
-        if [ "$INTERACTIVE" -eq 1 ]; then
-            printf '  Testing the completion pattern ... ' > /dev/tty
-            printf '\007' > /dev/tty
-            sleep 0.15
-            printf '\007\n' > /dev/tty
-            if prompt_yes_no "Did you hear the two-bell completion sound?" no; then
-                ok "Terminal sound check passed"
-            else
-                warn "The configuration was saved, but this terminal stayed silent"
-                if [ "$SOUND_TERMINAL" = "vscode" ]; then
-                    detail "Run “Developer: Reload Window” in VS Code, open a new terminal, and test again."
-                else
-                    detail "Check the terminal's audible-bell and operating-system volume settings."
-                fi
-            fi
-        fi
-    else
-        warn "Sound setup was skipped after a configuration error"
-        detail "$SOUND_RESULT"
-        detail "Open CodexDeck Settings later to enable sounds."
-    fi
-else
-    detail "Skipped. Sounds remain available from CodexDeck Settings."
 fi
 
 printf '\n%s%s┌──────────────────────────────────────────────────┐%s\n' "$BOLD" "$GREEN" "$RESET"

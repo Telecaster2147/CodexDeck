@@ -72,19 +72,11 @@ codexdeck
 3. 强制校验 SHA-256
 4. 在 `~/.local/share/codexdeck` 中创建独立虚拟环境
 5. 创建 `~/.local/bin/codexdeck` 命令链接
-6. 在交互式终端中询问是否启用提示音，并立即播放完成提示音供确认
 
-在 VS Code Remote / WSL 终端中选择启用提示音后，安装器会优先检查远端 Machine
-Settings（通常是 `~/.vscode-server/data/Machine/settings.json`），开启 terminal bell 的声音与
-视觉信号，并在首次修改前于同目录保留 `settings.json.codexdeck-backup`。CodexDeck 自身的
-completion 和 attention 提示音也会一并启用。若 VS Code 已经打开，按安装器提示 reload window
-后再测试。
-
-自动化安装可用 `--configure-sound` 直接配置，或用 `--skip-sound-setup` 跳过询问；
 `--no-color`（以及通用的 `NO_COLOR` 环境变量）可关闭安装器颜色：
 
 ```bash
-sh /tmp/codexdeck-install.sh --configure-sound
+sh /tmp/codexdeck-install.sh --no-color
 ```
 
 如 `~/.local/bin` 尚未位于 `PATH`，安装器会打印需要添加的目录。固定安装某个版本：
@@ -508,9 +500,8 @@ rollout lookback 和状态机最多 500 条 retained events。
 
 ## 设置
 
-按 `s` 打开设置，可持久化分组、隐藏会话、自动跟随、关键操作通知、终端提示音和主题。
-Activity 固定为默认页面；主题只通过设置页切换。提示音 master 默认关闭，长任务完成类别默认启用、
-attention 类别默认关闭；仅 TUI 使用终端 BEL，非交互输出保持静默。
+按 `s` 打开设置，可持久化分组、隐藏会话、自动跟随、关键操作通知和主题。
+Activity 固定为默认页面；主题只通过设置页切换。
 
 ```text
 $XDG_CONFIG_HOME/codexdeck/preferences.json

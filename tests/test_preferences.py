@@ -33,9 +33,6 @@ class PreferencesTests(unittest.TestCase):
                 show_hidden_sessions=True,
                 follow_output=False,
                 notifications=False,
-                sound_enabled=True,
-                attention_sound=True,
-                completion_sound=False,
                 theme="textual-light",
             )
             saved = save_preferences(preferences, path)
@@ -48,9 +45,6 @@ class PreferencesTests(unittest.TestCase):
                     "show_hidden_sessions": True,
                     "follow_output": False,
                     "notifications": False,
-                    "sound_enabled": True,
-                    "attention_sound": True,
-                    "completion_sound": False,
                     "theme": "textual-light",
                 },
             )

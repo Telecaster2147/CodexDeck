@@ -66,7 +66,6 @@ from presentation.tui.navigation import (
     workspace_groups,
 )
 from presentation.tui.sampling import SamplingCoordinator
-from presentation.tui.sounds import SoundScheduler
 from presentation.tui.terminal_panel import TerminalLog, TerminalPanel
 from presentation.tui.theme import CODEXDECK_BLUE_THEME, STATE_COLORS
 from preferences import (
@@ -397,13 +396,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self.show_hidden = preferences.show_hidden_sessions
         self.sampling = sampling
         self.notifications_enabled = preferences.notifications
-        self.sound_scheduler = SoundScheduler(
-            self.bell,
-            enabled=preferences.sound_enabled,
-            attention_enabled=preferences.attention_sound,
-            completion_enabled=preferences.completion_sound,
-        )
-        self.sound_scheduler.observe(snapshot)
         self.preferences_file = preferences_file
         self.collapsed: set[str] = set()
         self.selected_key = ""
@@ -450,7 +442,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
         await self._rebuild_navigation()
         self.query_one("#session-list", ListView).focus()
         self.set_interval(TUI_CLOCK_INTERVAL, self._clock_tick)
-        self.set_interval(0.05, self._sound_tick)
         if self.sampling:
             self.set_interval(TUI_EVENT_POLL_INTERVAL, self._poll_live_events)
 
@@ -470,9 +461,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 self.query_one(SessionInspector).refresh_session_header(self.selected_session)
             except NoMatches:
                 return
-
-    def _sound_tick(self) -> None:
-        self.sound_scheduler.tick()
 
     def on_resize(self, event: events.Resize) -> None:
         if self.is_mounted and self.selected_session and self._resize_timer is None:
@@ -953,11 +941,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 return
         self.preferences = preferences
         self.notifications_enabled = preferences.notifications
-        self.sound_scheduler.configure(
-            enabled=preferences.sound_enabled,
-            attention_enabled=preferences.attention_sound,
-            completion_enabled=preferences.completion_sound,
-        )
         self.grouped = preferences.group_sessions and not self._flat_override
         self.show_hidden = preferences.show_hidden_sessions
         self.follow = preferences.follow_output
@@ -1240,7 +1223,6 @@ class CodexDeckApp(App[MonitorSnapshot]):
 
     def _apply_snapshot(self, snapshot: MonitorSnapshot) -> None:
         self._notify_transitions(self.snapshot, snapshot)
-        self.sound_scheduler.observe(snapshot)
         self.snapshot = snapshot
         active = {
             workspace_group_key(instance.instance_id, session_workspace(session))

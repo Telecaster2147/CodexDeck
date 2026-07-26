@@ -31,7 +31,6 @@ class InstallScriptTests(unittest.TestCase):
         for module in (
             "engine_collectors",
             "engine_refresh",
-            "sound_setup",
             "state_axes",
             "state_summaries",
             "temporal",
@@ -67,13 +66,12 @@ class InstallScriptTests(unittest.TestCase):
 
         self.assertIn("--checksum", install)
         self.assertIn("--install-root", install)
-        self.assertIn("--configure-sound", install)
-        self.assertIn("--skip-sound-setup", install)
         self.assertIn("--no-color", install)
         self.assertIn("--purge-config", uninstall)
 
         script = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn('-m sound_setup', script)
+        self.assertNotIn("sound_setup", script)
+        self.assertNotIn("configure-sound", script)
         link_position = script.index('ln -sfn "$INSTALL_ROOT/current/bin/codexdeck"')
         final_check_position = script.index('"$BIN_DIR/codexdeck" --version')
         self.assertLess(link_position, final_check_position)
@@ -166,8 +164,8 @@ exit 1
                 cwd=root,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
-            self.assertIn("[1/6]", install.stdout)
-            self.assertIn("[6/6]", install.stdout)
+            self.assertIn("[1/5]", install.stdout)
+            self.assertIn("[5/5]", install.stdout)
             self.assertIn("INSTALLATION COMPLETE", install.stdout)
 
             command = root / "command-bin" / "codexdeck"
