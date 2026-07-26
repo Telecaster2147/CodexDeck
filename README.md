@@ -4,7 +4,7 @@
 
 ### 所有本地 Codex 会话，一块准确、只读的运行态观测控制台
 
-[![Version](https://img.shields.io/badge/version-0.2.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
+[![Version](https://img.shields.io/badge/version-0.3.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Textual](https://img.shields.io/badge/Textual-8.2.8-111827?style=flat-square)](https://textual.textualize.io/)
 [![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square&logo=linux&logoColor=111827)](#运行要求)
@@ -18,9 +18,8 @@
 <br>
 
 > [!NOTE]
-> **项目状态：** 当前公开版本为 `0.2.0`；项目正在按本地 `TODO.md` 执行产品表面收敛。核心
-> identity、lifecycle、attention、Terminal 与只读边界保持稳定，optional collector、持久化和
-> 输出适配器正在分阶段评估或退出。
+> **项目状态：** 当前版本为 `0.3.0`。本版本完成产品表面收敛，保留多会话观测、证据完整性、
+> Terminal、doctor 与单会话导出等核心能力。
 
 <img src="assets/screenshots/overview.png" alt="CodexDeck 六会话宽屏工作台，左侧按工作区组织会话，右侧显示待审批会话的 Diagnosis 证据" width="100%">
 
@@ -57,7 +56,7 @@ Codex CLI 擅长完成单个会话中的交互，但当多个工作区、后台�
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.2.0/install.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.3.0/install.sh \
   -o /tmp/codexdeck-install.sh
 
 less /tmp/codexdeck-install.sh
@@ -82,7 +81,7 @@ sh /tmp/codexdeck-install.sh --no-color
 如 `~/.local/bin` 尚未位于 `PATH`，安装器会打印需要添加的目录。固定安装某个版本：
 
 ```bash
-sh /tmp/codexdeck-install.sh --version 0.2.0
+sh /tmp/codexdeck-install.sh --version 0.3.0
 ```
 
 升级时重新运行安装器即可。旧版本只有在新环境安装并通过 `codexdeck --version` 验证后才会被替换。
@@ -91,7 +90,7 @@ sh /tmp/codexdeck-install.sh --version 0.2.0
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.2.0/uninstall.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.3.0/uninstall.sh \
   -o /tmp/codexdeck-uninstall.sh
 
 less /tmp/codexdeck-uninstall.sh
@@ -126,8 +125,8 @@ codexdeck
 
 ```bash
 ./install.sh \
-  --wheel dist/codexdeck-0.2.0-py3-none-any.whl \
-  --checksum dist/codexdeck-0.2.0-py3-none-any.whl.sha256
+  --wheel dist/codexdeck-0.3.0-py3-none-any.whl \
+  --checksum dist/codexdeck-0.3.0-py3-none-any.whl.sha256
 ```
 
 直接运行且 stdin/stdout 都连接到 TTY 时进入 Textual；管道或文件环境默认采样一次后退出。
