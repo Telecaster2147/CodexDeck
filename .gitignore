@@ -4,6 +4,7 @@ __pycache__/
 .env
 .agents/
 .codex/
+/codex/
 .coverage
 .pytest_cache/
 .mypy_cache/
