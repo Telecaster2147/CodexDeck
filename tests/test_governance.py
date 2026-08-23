@@ -10,6 +10,7 @@ from pathlib import Path
 from codexdeck.codex.compatibility import (
     COMPATIBILITY_HANDLERS,
     SUPPORTED_CODEX_RELEASES,
+    VALIDATED_CODEX_RELEASES,
     compatibility_stats,
 )
 from codexdeck.codex.events import normalize_log
@@ -32,6 +33,14 @@ class CompatibilityBudgetTests(unittest.TestCase):
             tuple(item["minor"] for item in manifest["supported_releases"]),
             SUPPORTED_CODEX_RELEASES,
         )
+        self.assertEqual(tuple(item["channel"] for item in manifest["supported_releases"]), ("previous", "current"))
+        for declared, release in zip(
+            manifest["supported_releases"], VALIDATED_CODEX_RELEASES, strict=True
+        ):
+            self.assertEqual(tuple(declared["observed_versions"]), release.observed_versions)
+            self.assertEqual(declared["last_observed_on"], release.last_observed_on)
+            self.assertEqual(tuple(declared["semantic_scope"]), release.semantic_scope)
+            self.assertEqual(declared["deletion_condition"], release.deletion_condition)
         self.assertEqual(set(by_id), {handler.handler_id for handler in COMPATIBILITY_HANDLERS})
         for handler in COMPATIBILITY_HANDLERS:
             with self.subTest(handler=handler.handler_id):

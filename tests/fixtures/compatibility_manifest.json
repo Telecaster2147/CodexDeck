@@ -7,16 +7,108 @@
     "text_heuristics": "diagnostic-only"
   },
   "supported_releases": [
-    {"minor":"0.144","observed_versions":["0.144.3","0.144.5","0.144.6"],"rollout":"compatibility/0.144/rollout.jsonl","sqlite":"compatibility/0.144/sqlite_schema.json","logs":"compatibility/0.144/structured_logs.jsonl"},
-    {"minor":"0.145","observed_versions":["0.145.0"],"rollout":"compatibility/0.145/rollout.jsonl","sqlite":"compatibility/0.145/sqlite_schema.json","logs":"compatibility/0.145/structured_logs.jsonl"}
+    {
+      "minor": "0.144",
+      "observed_versions": [
+        "0.144.3",
+        "0.144.5",
+        "0.144.6"
+      ],
+      "rollout": "compatibility/0.144/rollout.jsonl",
+      "sqlite": "compatibility/0.144/sqlite_schema.json",
+      "logs": "compatibility/0.144/structured_logs.jsonl",
+      "channel": "previous",
+      "last_observed_on": "2026-07-26",
+      "semantic_scope": [
+        "rollout",
+        "sqlite",
+        "structured_logs",
+        "terminal"
+      ],
+      "deletion_condition": "Remove when a newer validated current/previous pair replaces 0.144 fixtures."
+    },
+    {
+      "minor": "0.145",
+      "observed_versions": [
+        "0.145.0"
+      ],
+      "rollout": "compatibility/0.145/rollout.jsonl",
+      "sqlite": "compatibility/0.145/sqlite_schema.json",
+      "logs": "compatibility/0.145/structured_logs.jsonl",
+      "channel": "current",
+      "last_observed_on": "2026-07-26",
+      "semantic_scope": [
+        "rollout",
+        "sqlite",
+        "structured_logs",
+        "terminal"
+      ],
+      "deletion_condition": "Move to previous when the next minor has equivalent anonymous fixture coverage."
+    }
   ],
   "handlers": [
-    {"handler_id":"event_msg.lifecycle","source":"rollout:event_msg","fixture":"replay_lifecycle_terminal.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"lifecycle","diagnostic_only":false},
-    {"handler_id":"response_item.progress","source":"rollout:response_item","fixture":"replay_lifecycle_terminal.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"lifecycle and model progress","diagnostic_only":false},
-    {"handler_id":"attention.structured","source":"rollout:request_user_input/approval/elicitation","fixture":"ground_truth_attention.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"attention","diagnostic_only":false},
-    {"handler_id":"compaction.structured","source":"rollout:compaction records","fixture":"auto_compact_rollout.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"compaction lifecycle","diagnostic_only":false},
-    {"handler_id":"tool.structured","source":"rollout:function and custom tool calls","fixture":"replay_lifecycle_terminal.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"tool lifecycle and terminal ownership","diagnostic_only":false},
-    {"handler_id":"log.compaction","source":"sqlite:structured logs","fixture":"compact_structured_logs.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"supporting compaction diagnostics","diagnostic_only":true},
-    {"handler_id":"unknown.conservative","source":"rollout:unknown record family","fixture":"replay_unknown_phase.jsonl","last_observed_version":"0.145.0","last_observed_on":"2026-07-26","semantics":"diagnostic and confidence degradation","diagnostic_only":true}
+    {
+      "handler_id": "event_msg.lifecycle",
+      "source": "rollout:event_msg",
+      "fixture": "replay_lifecycle_terminal.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "lifecycle",
+      "diagnostic_only": false
+    },
+    {
+      "handler_id": "response_item.progress",
+      "source": "rollout:response_item",
+      "fixture": "replay_lifecycle_terminal.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "lifecycle and model progress",
+      "diagnostic_only": false
+    },
+    {
+      "handler_id": "attention.structured",
+      "source": "rollout:request_user_input/approval/elicitation",
+      "fixture": "ground_truth_attention.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "attention",
+      "diagnostic_only": false
+    },
+    {
+      "handler_id": "compaction.structured",
+      "source": "rollout:compaction records",
+      "fixture": "auto_compact_rollout.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "compaction lifecycle",
+      "diagnostic_only": false
+    },
+    {
+      "handler_id": "tool.structured",
+      "source": "rollout:function and custom tool calls",
+      "fixture": "replay_lifecycle_terminal.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "tool lifecycle and terminal ownership",
+      "diagnostic_only": false
+    },
+    {
+      "handler_id": "log.compaction",
+      "source": "sqlite:structured logs",
+      "fixture": "compact_structured_logs.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "supporting compaction diagnostics",
+      "diagnostic_only": true
+    },
+    {
+      "handler_id": "unknown.conservative",
+      "source": "rollout:unknown record family",
+      "fixture": "replay_unknown_phase.jsonl",
+      "last_observed_version": "0.145.0",
+      "last_observed_on": "2026-07-26",
+      "semantics": "diagnostic and confidence degradation",
+      "diagnostic_only": true
+    }
   ]
 }

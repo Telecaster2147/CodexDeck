@@ -6,7 +6,37 @@ from dataclasses import dataclass
 from datetime import date
 
 LONG_UNOBSERVED_DAYS = 180
-SUPPORTED_CODEX_RELEASES = ("0.144", "0.145")
+
+
+@dataclass(frozen=True)
+class CompatibilityRelease:
+    minor: str
+    channel: str
+    observed_versions: tuple[str, ...]
+    last_observed_on: str
+    semantic_scope: tuple[str, ...]
+    deletion_condition: str
+
+
+VALIDATED_CODEX_RELEASES = (
+    CompatibilityRelease(
+        "0.144",
+        "previous",
+        ("0.144.3", "0.144.5", "0.144.6"),
+        "2026-07-26",
+        ("rollout", "sqlite", "structured_logs", "terminal"),
+        "Remove when a newer validated current/previous pair replaces 0.144 fixtures.",
+    ),
+    CompatibilityRelease(
+        "0.145",
+        "current",
+        ("0.145.0",),
+        "2026-07-26",
+        ("rollout", "sqlite", "structured_logs", "terminal"),
+        "Move to previous when the next minor has equivalent anonymous fixture coverage.",
+    ),
+)
+SUPPORTED_CODEX_RELEASES = tuple(release.minor for release in VALIDATED_CODEX_RELEASES)
 
 
 @dataclass(frozen=True)
