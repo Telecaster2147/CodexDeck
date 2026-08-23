@@ -16,7 +16,6 @@
     "codexdeck.presentation.tui.activity.timeline_entries",
     "codexdeck.presentation.tui.activity._timeline_line",
     "codexdeck.presentation.tui.diagnosis._diagnosis_renderable",
-    "codexdeck.state_machine.SessionStateMachine.derive",
     "codexdeck.state_summaries.SummaryDerivationMixin._agent_tree",
     "codexdeck.utils.CommandRunner.run_result"
   ],

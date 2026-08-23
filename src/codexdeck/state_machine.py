@@ -7,7 +7,7 @@ import math
 import time
 from collections import defaultdict
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from codexdeck.config import (
@@ -137,6 +137,20 @@ DEDUPE_FILTER_BITS = 1 << 18
 DEDUPE_FILTER_HASHES = 4
 DEDUPE_FILTER_DEGRADED_RATIO = 0.90
 MAX_MUTABLE_STREAM_IDENTITIES_PER_SESSION = 32
+
+
+@dataclass
+class TurnDerivationContext:
+    task_start: NormalizedEvent | None
+    task_terminal: NormalizedEvent | None
+    current_turn: bool
+    relevant: list[NormalizedEvent]
+    lifecycle_event: NormalizedEvent | None
+    compact_start: NormalizedEvent | None
+    compacting: bool
+    failure_event: NormalizedEvent | None
+    compact_abort: NormalizedEvent | None
+    process_exit: NormalizedEvent | None
 
 
 class BoundedDedupeFilter:
@@ -971,26 +985,21 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             )
         return findings
 
-    def derive(
+    def _initial_derivation_state(
         self,
         key: str | SessionIdentity,
         process: ProcessInfo,
         network: NetworkEvidence,
-        now: float | None = None,
-        observation: ObservationPulse | None = None,
-    ) -> SessionHealth:
-        now = time.time() if now is None else now
+        now: float,
+    ) -> tuple[SessionHealth, list[NormalizedEvent], list[NormalizedEvent]]:
         all_events = self.events.get(key, [])
         decision_events = {
             event.source_id: event
             for event in (*all_events, *self.axis_baselines.get(key, {}).values())
         }
-        decision_context = sorted(
+        authoritative = sorted(
             decision_events.values(), key=lambda event: (event.timestamp, event.source_id)
         )
-        authoritative_events = decision_context
-        visible_cutoff = now - self.lookback_seconds
-        visible = [event for event in all_events if event.timestamp >= visible_cutoff]
         model_config = self._latest(all_events, "MODEL_CONFIG")
         if model_config:
             model = str(model_config.metadata.get("model") or "")
@@ -1001,57 +1010,42 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
                     model=model or process.model,
                     reasoning_effort=reasoning_effort or process.reasoning_effort,
                 )
+        visible_cutoff = now - self.lookback_seconds
         state = SessionHealth(
             process.instance_id,
             process.session_id,
             process,
             network=network,
-            events=visible,
+            events=[event for event in all_events if event.timestamp >= visible_cutoff],
             identity=key if isinstance(key, SessionIdentity) else None,
         )
         state.clock_assessments = self._clock_assessments(all_events)
         state.clock_uncertain = bool(state.clock_assessments)
-        if not all_events:
-            state.observation = self._finalize_observation(
-                state, all_events, observation or ObservationPulse(), now
-            )
-            self._apply_completeness(key, state, authoritative_events)
-            state.silence = self._silence_assessment(state, now)
-            state.current_operation = self._operation_summary(state, all_events)
-            state.reasons = derive_axis_reasons(state, all_events, now)
-            state.evidence_timeline = evidence_timeline(all_events, state)
-            state.diagnosis = [
-                *self._diagnosis_findings(state, all_events, now),
-                *reason_diagnosis(state.reasons),
-            ]
-            self._reconcile_alert(key, state, now)
-            return state
-
-        latest_failure = self._latest(authoritative_events, "TURN_FAILED", "COMPACT_FAILED")
+        latest_failure = self._latest(authoritative, "TURN_FAILED", "COMPACT_FAILED")
         state.latest_failure = latest_failure.failure if latest_failure else None
+        return state, all_events, authoritative
 
-        process_resume = self._latest(authoritative_events, "PROCESS_RESUMED")
+    def _turn_derivation_context(
+        self,
+        authoritative: list[NormalizedEvent],
+    ) -> TurnDerivationContext:
+        process_resume = self._latest(authoritative, "PROCESS_RESUMED")
         state_events = [
             event
-            for event in authoritative_events
+            for event in authoritative
             if not process_resume or event.timestamp >= process_resume.timestamp
         ]
         task_start = self._latest(state_events, "TURN_STARTED")
         task_terminal = self._latest(state_events, *TERMINAL_KINDS)
         latest_active = self._latest(state_events, *CURRENT_TURN_KINDS)
-        if task_start:
-            current_turn = not task_terminal or task_start.timestamp > task_terminal.timestamp
-        else:
-            current_turn = bool(
-                latest_active
-                and (not task_terminal or latest_active.timestamp > task_terminal.timestamp)
-            )
+        current_turn = (
+            not task_terminal or task_start.timestamp > task_terminal.timestamp
+            if task_start
+            else bool(latest_active and (not task_terminal or latest_active.timestamp > task_terminal.timestamp))
+        )
         relevant = [
-            event
-            for event in state_events
-            if not task_start or event.timestamp >= task_start.timestamp
+            event for event in state_events if not task_start or event.timestamp >= task_start.timestamp
         ]
-        lifecycle_event = self._latest(relevant, *LIFECYCLE_PHASE_KINDS)
         compact_start = self._latest(relevant, "COMPACTING")
         compact_end = self._latest(
             relevant,
@@ -1060,61 +1054,86 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             "COMPACT_ABORTED",
             *TERMINAL_KINDS,
         )
-        compacting = bool(
-            compact_start
-            and (compact_end is None or compact_start.timestamp > compact_end.timestamp)
+        return TurnDerivationContext(
+            task_start=task_start,
+            task_terminal=task_terminal,
+            current_turn=current_turn,
+            relevant=relevant,
+            lifecycle_event=self._latest(relevant, *LIFECYCLE_PHASE_KINDS),
+            compact_start=compact_start,
+            compacting=bool(
+                compact_start
+                and (compact_end is None or compact_start.timestamp > compact_end.timestamp)
+            ),
+            failure_event=self._latest(relevant, "TURN_FAILED", "COMPACT_FAILED"),
+            compact_abort=self._latest(relevant, "COMPACT_ABORTED"),
+            process_exit=self._latest(authoritative, "PROCESS_EXITED", "SESSION_CLOSED"),
         )
-        failure_event = self._latest(relevant, "TURN_FAILED", "COMPACT_FAILED")
-        compact_abort = self._latest(relevant, "COMPACT_ABORTED")
+
+    def _derive_attention_axis(
+        self,
+        state: SessionHealth,
+        relevant: list[NormalizedEvent],
+    ) -> None:
         attention_event = self._latest(relevant, "ACTION_REQUIRED")
         attention_clear = self._latest(relevant, *ATTENTION_CLEAR_KINDS)
-        if attention_event and (
-            attention_clear is None or attention_event.timestamp > attention_clear.timestamp
+        if not attention_event or (
+            attention_clear is not None and attention_event.timestamp <= attention_clear.timestamp
         ):
-            attention_name = str(attention_event.metadata.get("attention_state") or "USER_INPUT")
-            try:
-                state.attention = AttentionState(attention_name)
-            except ValueError:
-                state.attention = AttentionState.USER_INPUT
-            state.attention_request = AttentionRequest(
-                state=state.attention,
-                request_id=str(attention_event.metadata.get("request_id") or ""),
-                call_id=str(attention_event.metadata.get("call_id") or ""),
-                turn_id=attention_event.turn_id,
-                summary=attention_event.summary,
-                detail=attention_event.detail,
-                started_at=attention_event.timestamp,
-                observed_at=attention_event.observed_at,
-                provenance=attention_event.provenance,
-            )
-            state.attention_confidence = attention_event.confidence
-            state.attention_provenance = attention_event.provenance
-        process_exit = self._latest(authoritative_events, "PROCESS_EXITED", "SESSION_CLOSED")
-        if process_exit and process_exit is authoritative_events[-1]:
-            # Process termination is historical lifecycle evidence, not a turn failure.
+            return
+        attention_name = str(attention_event.metadata.get("attention_state") or "USER_INPUT")
+        try:
+            state.attention = AttentionState(attention_name)
+        except ValueError:
+            state.attention = AttentionState.USER_INPUT
+        state.attention_request = AttentionRequest(
+            state=state.attention,
+            request_id=str(attention_event.metadata.get("request_id") or ""),
+            call_id=str(attention_event.metadata.get("call_id") or ""),
+            turn_id=attention_event.turn_id,
+            summary=attention_event.summary,
+            detail=attention_event.detail,
+            started_at=attention_event.timestamp,
+            observed_at=attention_event.observed_at,
+            provenance=attention_event.provenance,
+        )
+        state.attention_confidence = attention_event.confidence
+        state.attention_provenance = attention_event.provenance
+
+    def _derive_lifecycle_axis(
+        self,
+        state: SessionHealth,
+        authoritative: list[NormalizedEvent],
+        context: TurnDerivationContext,
+    ) -> None:
+        task_start = context.task_start
+        task_terminal = context.task_terminal
+        current_turn = context.current_turn
+        relevant = context.relevant
+        lifecycle_event = context.lifecycle_event
+        process_exit = context.process_exit
+        if process_exit and process_exit is authoritative[-1]:
             current_turn = False
+            context.current_turn = False
             state.process_exited = True
             state.process_exited_at = process_exit.timestamp
-
+        failure_event = context.failure_event
+        compact_abort = context.compact_abort
         if not current_turn and task_terminal:
+            terminal_states = {
+                "TURN_FAILED": LifecycleState.FAILED,
+                "TURN_ABORTED": LifecycleState.ABORTED,
+            }
+            state.lifecycle = terminal_states.get(task_terminal.kind, LifecycleState.COMPLETED)
             if task_terminal.kind == "TURN_FAILED":
-                state.lifecycle = LifecycleState.FAILED
                 state.current_failure = task_terminal.failure
-            elif task_terminal.kind == "TURN_ABORTED":
-                state.lifecycle = LifecycleState.ABORTED
-            else:
-                state.lifecycle = LifecycleState.COMPLETED
         elif failure_event and (not task_start or failure_event.timestamp >= task_start.timestamp):
             state.lifecycle = LifecycleState.FAILED
             state.current_failure = failure_event.failure
         elif compact_abort and (not task_start or compact_abort.timestamp >= task_start.timestamp):
             state.lifecycle = LifecycleState.ABORTED
         elif current_turn and lifecycle_event:
-            if compacting:
-                state.lifecycle = LifecycleState.COMPACTING
-            elif lifecycle_event.kind == "TOOL_RUNNING":
-                state.lifecycle = LifecycleState.RUNNING_TOOL
-            elif lifecycle_event.kind in {
+            generating = {
                 "MODEL_PROGRESS",
                 "REASONING_SUMMARY",
                 "PLAN_UPDATED",
@@ -1123,51 +1142,67 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
                 "FILE_CHANGE_APPLIED",
                 "FILE_CHANGE_FAILED",
                 "COMPACT_COMPLETED",
-            }:
+            }
+            if context.compacting:
+                state.lifecycle = LifecycleState.COMPACTING
+            elif lifecycle_event.kind == "TOOL_RUNNING":
+                state.lifecycle = LifecycleState.RUNNING_TOOL
+            elif lifecycle_event.kind in generating:
                 state.lifecycle = LifecycleState.GENERATING
             elif lifecycle_event.kind == "REQUEST_SENT":
                 state.lifecycle = LifecycleState.WAITING_RESPONSE
             else:
                 state.lifecycle = LifecycleState.STARTING
-
         if state.process_exited:
             state.lifecycle = LifecycleState.IDLE
             state.current_failure = None
-
-        recovery_events = relevant
-        if task_terminal and not current_turn:
-            recovery_events = [
-                event for event in relevant if event.timestamp > task_terminal.timestamp
-            ]
-        reconnect = self._latest(recovery_events, "RECONNECTING")
-        fallback = self._latest(recovery_events, "TRANSPORT_FALLBACK")
-        recovered = self._latest(recovery_events, "RECOVERED")
-        recovery_candidates = [event for event in (reconnect, fallback, recovered) if event]
-        if recovery_candidates:
-            latest_recovery = max(recovery_candidates, key=lambda event: event.timestamp)
-            state.recovery = RecoveryState(latest_recovery.kind)
-        if network.state.value == "SUSPECT" and state.recovery == RecoveryState.NONE:
-            state.recovery = RecoveryState.SUSPECT
-
-        phase_event: NormalizedEvent | None
-        if state.process_exited and process_exit:
-            phase_event = process_exit
-        elif task_terminal and not current_turn:
-            phase_event = task_terminal
-        elif compacting:
-            phase_event = compact_start
-        else:
-            phase_event = self._latest(relevant, *DISPLAY_PHASE_KINDS)
+        phase_event = (
+            process_exit
+            if state.process_exited and process_exit
+            else task_terminal
+            if task_terminal and not current_turn
+            else context.compact_start
+            if context.compacting
+            else self._latest(relevant, *DISPLAY_PHASE_KINDS)
+        )
         if phase_event:
-            state.phase = EVENT_LABELS.get(
-                phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value]
-            )
+            state.phase = EVENT_LABELS.get(phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value])
             state.phase_since = phase_event.timestamp
             state.lifecycle_confidence = phase_event.confidence
             state.lifecycle_provenance = phase_event.provenance
         else:
             state.phase = LIFECYCLE_LABELS[state.lifecycle.value]
-        semantic_evidence = [
+
+    def _derive_recovery_axis(
+        self,
+        state: SessionHealth,
+        context: TurnDerivationContext,
+    ) -> None:
+        relevant = context.relevant
+        task_terminal = context.task_terminal
+        recovery_events = relevant
+        if task_terminal and not context.current_turn:
+            recovery_events = [event for event in relevant if event.timestamp > task_terminal.timestamp]
+        candidates = [
+            event
+            for event in (
+                self._latest(recovery_events, "RECONNECTING"),
+                self._latest(recovery_events, "TRANSPORT_FALLBACK"),
+                self._latest(recovery_events, "RECOVERED"),
+            )
+            if event
+        ]
+        if candidates:
+            state.recovery = RecoveryState(max(candidates, key=lambda event: event.timestamp).kind)
+        if state.network.state.value == "SUSPECT" and state.recovery == RecoveryState.NONE:
+            state.recovery = RecoveryState.SUSPECT
+
+    @staticmethod
+    def _derive_protocol_uncertainty(
+        state: SessionHealth,
+        relevant: list[NormalizedEvent],
+    ) -> None:
+        semantic = [
             event
             for event in relevant
             if (event.kind != "UNPARSED_PAYLOAD" and event.kind not in NON_SEMANTIC_KINDS)
@@ -1176,28 +1211,34 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
                 and event.metadata.get("semantic_scope") != "auxiliary"
             )
         ]
-        latest_semantic = semantic_evidence[-1] if semantic_evidence else None
-        if latest_semantic and latest_semantic.kind == "UNPARSED_PAYLOAD":
-            scope = str(latest_semantic.metadata.get("semantic_scope") or "lifecycle")
-            previous_phase = state.phase
-            source_type = (
-                latest_semantic.unparsed.source_type
-                if latest_semantic.unparsed is not None
-                else "unknown"
-            )
-            state.protocol_uncertain = True
-            state.protocol_uncertainty_scope = scope
-            state.protocol_uncertainty_reason = (
-                f"最新协议记录 {source_type} 可能改变 {scope}；上一结论为 {previous_phase}"
-            )
-            state.lifecycle_confidence = Confidence.LOW
-            state.lifecycle_provenance = latest_semantic.provenance
-            if scope == "attention":
-                state.attention_confidence = Confidence.LOW
-                state.attention_provenance = latest_semantic.provenance
-                state.phase = "协议不确定（可能等待交互）"
-            else:
-                state.phase = "协议状态不确定"
+        latest = semantic[-1] if semantic else None
+        if latest is None or latest.kind != "UNPARSED_PAYLOAD":
+            return
+        scope = str(latest.metadata.get("semantic_scope") or "lifecycle")
+        source_type = latest.unparsed.source_type if latest.unparsed is not None else "unknown"
+        state.protocol_uncertain = True
+        state.protocol_uncertainty_scope = scope
+        state.protocol_uncertainty_reason = (
+            f"最新协议记录 {source_type} 可能改变 {scope}；上一结论为 {state.phase}"
+        )
+        state.lifecycle_confidence = Confidence.LOW
+        state.lifecycle_provenance = latest.provenance
+        if scope == "attention":
+            state.attention_confidence = Confidence.LOW
+            state.attention_provenance = latest.provenance
+            state.phase = "协议不确定（可能等待交互）"
+        else:
+            state.phase = "协议状态不确定"
+
+    def _derive_summaries(
+        self,
+        key: str | SessionIdentity,
+        state: SessionHealth,
+        all_events: list[NormalizedEvent],
+        authoritative: list[NormalizedEvent],
+        observation: ObservationPulse,
+        now: float,
+    ) -> None:
         token_event = self._latest(all_events, "TOKEN_USAGE")
         rate_event = self._latest(all_events, "TOKEN_USAGE", "RATE_LIMIT")
         state.token_used, state.token_limit = self._tokens(token_event)
@@ -1208,15 +1249,13 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             state.token_limit = state.token_usage.context_window
         state.rate_limits = self._rate_limits(rate_event)
         state.tool_executions = self._tool_summaries(all_events)
-        state.turns = self._turn_summaries(all_events, state.tool_executions, process)
+        state.turns = self._turn_summaries(all_events, state.tool_executions, state.process)
         state.compactions = deepcopy(self.compactions.get(key, []))
         state.agents = self._agent_tree(all_events)
         state.protocol_capabilities = self._capabilities(all_events)
         state.event_telemetry = self._event_telemetry(key, all_events)
-        state.observation = self._finalize_observation(
-            state, all_events, observation or ObservationPulse(), now
-        )
-        self._apply_completeness(key, state, authoritative_events)
+        state.observation = self._finalize_observation(state, all_events, observation, now)
+        self._apply_completeness(key, state, authoritative)
         state.silence = self._silence_assessment(state, now)
         state.current_operation = self._operation_summary(state, all_events)
         state.reasons = derive_axis_reasons(state, all_events, now)
@@ -1226,6 +1265,14 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             *reason_diagnosis(state.reasons),
         ]
 
+    def _derive_alerts(
+        self,
+        key: str | SessionIdentity,
+        state: SessionHealth,
+        relevant: list[NormalizedEvent],
+        current_turn: bool,
+        now: float,
+    ) -> None:
         if current_turn:
             self._derive_alert(state, relevant, now)
         if (
@@ -1237,11 +1284,10 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             state.alert_level = "严重"
             state.alert_reason = state.silence.reason
             state.alert_age_seconds = max(
-                0,
-                int(now - (state.observation.last_semantic_at or now)),
+                0, int(now - (state.observation.last_semantic_at or now))
             )
-        agent_errors = []
         pending_agents = list(state.agents)
+        agent_errors = []
         while pending_agents:
             agent = pending_agents.pop()
             if agent.error:
@@ -1253,6 +1299,33 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             state.alert_reason = agent_errors[-1].message
             state.alert_age_seconds = max(0, int(now - agent_errors[-1].timestamp))
         self._reconcile_alert(key, state, now)
+
+    def derive(
+        self,
+        key: str | SessionIdentity,
+        process: ProcessInfo,
+        network: NetworkEvidence,
+        now: float | None = None,
+        observation: ObservationPulse | None = None,
+    ) -> SessionHealth:
+        now = time.time() if now is None else now
+        state, all_events, authoritative = self._initial_derivation_state(
+            key, process, network, now
+        )
+        pulse = observation or ObservationPulse()
+        if not all_events:
+            self._derive_summaries(key, state, all_events, authoritative, pulse, now)
+            self._reconcile_alert(key, state, now)
+            return state
+
+        context = self._turn_derivation_context(authoritative)
+        relevant = context.relevant
+        self._derive_attention_axis(state, relevant)
+        self._derive_lifecycle_axis(state, authoritative, context)
+        self._derive_recovery_axis(state, context)
+        self._derive_protocol_uncertainty(state, relevant)
+        self._derive_summaries(key, state, all_events, authoritative, pulse, now)
+        self._derive_alerts(key, state, relevant, context.current_turn, now)
         return state
 
     @classmethod
