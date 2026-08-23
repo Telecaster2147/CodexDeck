@@ -32,7 +32,7 @@ body:
     id: codexdeck_version
     attributes:
       label: CodexDeck version
-      placeholder: 0.3.0
+      placeholder: 0.4.0
     validations:
       required: true
   - type: input

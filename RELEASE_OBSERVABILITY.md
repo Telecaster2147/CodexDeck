@@ -1,4 +1,4 @@
-# CodexDeck 0.3.x release observability
+# CodexDeck 0.4.x release observability
 
 CodexDeck does not collect telemetry. Release health is reviewed from opt-in, manually redacted
 Doctor reports, GitHub issue forms, CI artifacts and the deterministic local performance gate.
@@ -7,7 +7,7 @@ traceable.
 
 ## Review cadence
 
-For every 0.3.x release, the maintainer records a release-health issue at 24 hours, 72 hours, and
+For every 0.4.x release, the maintainer records a release-health issue at 24 hours, 72 hours, and
 weekly for the first four weeks. Each review records the denominator, observation window, source
 query/artifact, result, and follow-up issue. An empty issue count is recorded as “no reports”, not
 as a 100% success claim.
