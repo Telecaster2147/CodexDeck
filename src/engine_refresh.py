@@ -113,6 +113,7 @@ class FastRefreshMixin:
                     unknown_event_types=self.rollouts.unknown_counts(rollout_paths),
                     protocol_shape_families=self.rollouts.shape_counts(rollout_paths),
                     protocol_family_counters=self.rollouts.family_counter_summary(rollout_paths),
+                    observed_codex_versions=self.rollouts.version_counts(rollout_paths),
                     rollout_context_truncated=(self.rollouts.has_truncated_context(rollout_paths)),
                     rollout_activity=rollout_activity_values,
                     processes=processes,

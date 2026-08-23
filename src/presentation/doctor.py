@@ -5,19 +5,18 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from codex.compatibility import compatibility_stats
+from codex.compatibility import SUPPORTED_CODEX_RELEASES, compatibility_stats
 from diagnostics import (
     diagnostic_text,
     normalize_diagnostic,
     snapshot_diagnostics,
 )
 from models import LifecycleState, MonitorSnapshot, NetworkState, SilenceState
+from presentation.privacy import public_rollout_activity, public_value
 from presentation.projection import (
     collector_items,
     instance_collector_items,
 )
-from presentation.privacy import public_rollout_activity, public_value
-
 
 DOCTOR_SCHEMA_VERSION = 2
 COLLECTION_BUDGET_SECONDS = 2.0
@@ -124,6 +123,14 @@ def doctor_dict(snapshot: MonitorSnapshot) -> dict[str, Any]:
                         else "unobserved"
                     ),
                     "shape_families": shape_families,
+                    "observed_codex_versions": dict(
+                        getattr(instance, "observed_codex_versions", {}) or {}
+                    ),
+                    "supported_codex_releases": list(SUPPORTED_CODEX_RELEASES),
+                    "unknown_family_summary": {
+                        "families": unknown,
+                        "total": unknown_total,
+                    },
                     "family_counters": family_counters,
                     **compatibility_stats(),
                 },
@@ -418,6 +425,12 @@ def render_doctor_text(snapshot: MonitorSnapshot) -> str:
             for name, count in unknown["types"].items():
                 lines.append(f"    - {name}: {count}")
         compatibility = instance["protocol_compatibility"]
+        observed_versions = compatibility["observed_codex_versions"]
+        lines.append(
+            "  Codex versions: "
+            f"observed={','.join(observed_versions) or '-'}; "
+            f"validated={','.join(compatibility['supported_codex_releases'])}"
+        )
         if compatibility["status"] != "unobserved":
             counters = compatibility["family_counters"]
             lines.append(

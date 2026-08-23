@@ -1,0 +1,5 @@
+{"timestamp":"2026-07-26T00:00:00Z","type":"session_meta","payload":{"id":"SESSION_ID","cwd":"/workspace-a","cli_version":"0.145.0","source":"cli"}}
+{"timestamp":"2026-07-26T00:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"TURN_ID"}}
+{"timestamp":"2026-07-26T00:00:02Z","type":"response_item","payload":{"type":"function_call","call_id":"CALL_ID","name":"exec_command","arguments":"{\"cmd\":\"printf ready\",\"workdir\":\"/workspace-a\"}"}}
+{"timestamp":"2026-07-26T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"CALL_ID","output":"Process exited with code 0\nFinal output:\nready\n"}}
+{"timestamp":"2026-07-26T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"TURN_ID"}}

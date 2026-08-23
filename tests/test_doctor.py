@@ -144,6 +144,7 @@ class DoctorTests(unittest.TestCase):
     def test_text_prioritizes_paths_and_degraded_details(self) -> None:
         instance = make_instance()
         instance.unknown_event_types = {"future_event": 2}
+        instance.observed_codex_versions = {"0.145.0": 1}
         snapshot = MonitorSnapshot("now", 2.0, [instance], 0.25)
         text = render_doctor_text(snapshot)
         self.assertIn("CODEX_HOME: /tmp/codex-home", text)
@@ -151,6 +152,7 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("threads: yes", text)
         self.assertNotIn("turn_timing: direct", text)
         self.assertIn("future_event: 2", text)
+        self.assertIn("observed=0.145.0; validated=0.144,0.145", text)
         report = doctor_dict(snapshot)
         self.assertEqual(report["observer_status"], "healthy")
         self.assertEqual(report["compatibility_signals"][0]["code"], "PROTOCOL_UNKNOWN")
@@ -207,6 +209,10 @@ class DoctorTests(unittest.TestCase):
             report["instances"][0]["protocol_compatibility"]["status"],
             "unobserved",
         )
+        compatibility = report["instances"][0]["protocol_compatibility"]
+        self.assertEqual(compatibility["supported_codex_releases"], ["0.144", "0.145"])
+        self.assertEqual(compatibility["observed_codex_versions"], {})
+        self.assertEqual(compatibility["unknown_family_summary"]["total"], 0)
         self.assertEqual(
             report["instances"][0]["protocol_capabilities"]["turn_timing"]["mode"], "direct"
         )

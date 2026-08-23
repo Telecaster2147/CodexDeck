@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-
 LONG_UNOBSERVED_DAYS = 180
+SUPPORTED_CODEX_RELEASES = ("0.144", "0.145")
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,7 @@ class CompatibilityHandler:
     source: str
     fixture: str
     last_observed_version: str
+    last_observed_on: str
     semantics: str
     diagnostic_only: bool
     deletion_condition: str
@@ -25,7 +26,8 @@ COMPATIBILITY_HANDLERS = (
         "event_msg.lifecycle",
         "rollout:event_msg",
         "replay_lifecycle_terminal.jsonl",
-        "unversioned-fixture-2026-07-22",
+        "0.145.0",
+        "2026-07-26",
         "lifecycle",
         False,
         "Remove after two supported Codex minor lines emit no covered event_msg lifecycle shape.",
@@ -34,7 +36,8 @@ COMPATIBILITY_HANDLERS = (
         "response_item.progress",
         "rollout:response_item",
         "replay_lifecycle_terminal.jsonl",
-        "unversioned-fixture-2026-07-22",
+        "0.145.0",
+        "2026-07-26",
         "lifecycle and model progress",
         False,
         "Remove after replacement progress records cover the same lifecycle transitions.",
@@ -43,7 +46,8 @@ COMPATIBILITY_HANDLERS = (
         "attention.structured",
         "rollout:request_user_input/approval/elicitation",
         "ground_truth_attention.jsonl",
-        "unversioned-fixture-2026-07-24",
+        "0.145.0",
+        "2026-07-26",
         "attention",
         False,
         "Remove only after anonymous fixtures prove an authoritative replacement family.",
@@ -52,7 +56,8 @@ COMPATIBILITY_HANDLERS = (
         "compaction.structured",
         "rollout:compaction records",
         "auto_compact_rollout.jsonl",
-        "unversioned-fixture-2026-07-24",
+        "0.145.0",
+        "2026-07-26",
         "compaction lifecycle",
         False,
         "Remove after current compaction fixtures pass through the replacement handler.",
@@ -61,7 +66,8 @@ COMPATIBILITY_HANDLERS = (
         "tool.structured",
         "rollout:function and custom tool calls",
         "replay_lifecycle_terminal.jsonl",
-        "unversioned-fixture-2026-07-22",
+        "0.145.0",
+        "2026-07-26",
         "tool lifecycle and terminal ownership",
         False,
         "Remove after call, output, nested identity, and terminal association fixtures migrate.",
@@ -70,7 +76,8 @@ COMPATIBILITY_HANDLERS = (
         "log.compaction",
         "sqlite:structured logs",
         "compact_structured_logs.jsonl",
-        "unversioned-fixture-2026-07-24",
+        "0.145.0",
+        "2026-07-26",
         "supporting compaction diagnostics",
         True,
         "Remove when structured rollout evidence fully replaces this supporting signal.",
@@ -79,7 +86,8 @@ COMPATIBILITY_HANDLERS = (
         "unknown.conservative",
         "rollout:unknown record family",
         "replay_unknown_phase.jsonl",
-        "unversioned-fixture-2026-07-22",
+        "0.145.0",
+        "2026-07-26",
         "diagnostic and confidence degradation",
         True,
         "Keep while unknown families remain possible; never promote without a fixture.",
@@ -91,11 +99,12 @@ def compatibility_stats(today: date | None = None) -> dict[str, int]:
     today = today or date.today()
     long_unobserved = 0
     for handler in COMPATIBILITY_HANDLERS:
-        observed = date.fromisoformat(handler.last_observed_version[-10:])
+        observed = date.fromisoformat(handler.last_observed_on)
         if (today - observed).days > LONG_UNOBSERVED_DAYS:
             long_unobserved += 1
     return {
         "handler_count": len(COMPATIBILITY_HANDLERS),
         "diagnostic_only_count": sum(handler.diagnostic_only for handler in COMPATIBILITY_HANDLERS),
         "long_unobserved_count": long_unobserved,
+        "supported_release_count": len(SUPPORTED_CODEX_RELEASES),
     }

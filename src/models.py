@@ -1149,6 +1149,7 @@ class InstanceSnapshot:
     unknown_event_types: dict[str, int] = field(default_factory=dict)
     protocol_shape_families: dict[str, int] = field(default_factory=dict)
     protocol_family_counters: dict[str, int] = field(default_factory=dict)
+    observed_codex_versions: dict[str, int] = field(default_factory=dict)
     rollout_context_truncated: bool = False
     rollout_activity: list[dict[str, Any]] = field(default_factory=list)
     process_data_stale_age_seconds: float | None = None

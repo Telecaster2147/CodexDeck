@@ -631,6 +631,7 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
                     protocol_family_counters=self.rollouts.family_counter_summary(
                         instance_rollouts
                     ),
+                    observed_codex_versions=self.rollouts.version_counts(instance_rollouts),
                     rollout_context_truncated=(
                         self.rollouts.has_truncated_context(instance_rollouts)
                     ),

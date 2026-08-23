@@ -1,0 +1,1 @@
+{"observed_version":"0.145.0","state":{"table":"threads","columns":["id","rollout_path","cwd","title","model","reasoning_effort","preview","first_user_message"]},"logs":{"table":"logs","columns":["id","ts","ts_nanos","level","target","thread_id","process_uuid","message"]}}
