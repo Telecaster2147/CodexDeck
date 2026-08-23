@@ -36,7 +36,7 @@ jobs:
           test "${verified}" = true
       - name: Verify release version
         run: |
-          version=$(uv run python -c 'from config import VERSION; print(VERSION)')
+          version=$(uv run python -c 'from codexdeck.config import VERSION; print(VERSION)')
           test "v${version}" = "${GITHUB_REF_NAME}"
       - name: Build and checksum
         run: |
