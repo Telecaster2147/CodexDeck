@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
 
 from codex.paths import ResolvedInstance
 from codex.processes import DiscoveryResult
@@ -30,6 +32,17 @@ class SocketStage:
 
 class CollectorStagesMixin:
     """Run host collectors while preserving the last complete result on failure."""
+
+    discovery: Any
+    selected_pids: set[int] | None
+    selected_homes: set[Path] | None
+    collectors: Any
+    last_discovery: DiscoveryResult | None
+    discovery_stale_since: float | None
+    identity_registry: Any
+    sockets: Any
+    last_socket_by_pid: dict[int, list[SocketInfo]]
+    socket_stale_since: float | None
 
     def _collect_discovery_stage(
         self,

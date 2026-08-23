@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from codex.rollout import RolloutActivity
 from models import InstanceSnapshot, MonitorSnapshot, NormalizedEvent, ProcessInfo, SessionHealth
@@ -14,6 +15,19 @@ from temporal import apply_temporal_completeness, build_temporal_cut
 
 class FastRefreshMixin:
     """Refresh known rollout streams without running full host collectors."""
+
+    interval: float
+    rollouts: Any
+    terminals: Any
+    machine: Any
+    live_sessions: dict[Any, SessionHealth]
+    _rollout_activity_value: Any
+    _with_compact_config: Any
+    _evidence_coverage: Any
+    _observation_pulse: Any
+    _attach_terminal_snapshot: Any
+    _attach_ingress_diagnosis: Any
+    _merge_protocol_capabilities: Any
 
     def refresh_events(self, snapshot: MonitorSnapshot) -> MonitorSnapshot:
         """Refresh active rollout events without resampling processes or sockets."""

@@ -11,12 +11,12 @@ from pathlib import Path
 
 from codex.config_reader import CodexConfigReader
 from codex.events import normalize_log
+from codex.file_tail import RegularFileTailCollector
 from codex.paths import ProcReader, open_rollout_paths
 from codex.process_activity import ProcessActivityCollector
 from codex.processes import DiscoveryResult, ProcessDiscovery
 from codex.rollout import RolloutActivity, RolloutReader, latest_user_task, rollout_identity
 from codex.state_store import StateStore
-from codex.file_tail import RegularFileTailCollector
 from codex.terminal import TerminalStore
 from diagnostics import CollectorTracker, make_diagnostic
 from engine_collectors import CollectorStagesMixin
@@ -38,11 +38,11 @@ from models import (
     NetworkState,
     NormalizedEvent,
     ObservationPulse,
-    ProtocolCapabilities,
     ProcessInfo,
+    ProtocolCapabilities,
     RolloutIdentity,
-    SessionIdentity,
     SessionHealth,
+    SessionIdentity,
 )
 from network.classifier import assess_process_network
 from network.sockets import SocketCollector
@@ -712,9 +712,11 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
             path: value for path, value in self.task_cache.items() if path in active_rollouts
         }
         retained_keys = set(self.retired_sessions)
-        self.machine.prune(active_session_keys | retained_keys)
-        self.terminals.prune(active_session_keys | retained_keys)
-        self.terminal_files.prune(active_session_keys)
+        active_or_retained: set[str | SessionIdentity] = set(active_session_keys)
+        active_or_retained.update(retained_keys)
+        self.machine.prune(active_or_retained)
+        self.terminals.prune(active_or_retained)
+        self.terminal_files.prune(set(active_session_keys))
         active_scopes.update(self.terminal_files.active_scopes())
         self.terminals.prune_scopes(active_scopes)
         self.rollout_path_cache = {
@@ -950,6 +952,7 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
     ) -> ProtocolCapabilities:
         rank = {"unavailable": 0, "derived": 1, "direct": 2}
         merged = {}
+        defaults = ProtocolCapabilities()
         for descriptor in fields(ProtocolCapabilities):
             statuses = [
                 getattr(session.protocol_capabilities, descriptor.name) for session in sessions
@@ -957,7 +960,7 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
             merged[descriptor.name] = max(
                 statuses,
                 key=lambda status: rank[status.mode.value],
-                default=descriptor.default_factory(),
+                default=getattr(defaults, descriptor.name),
             )
         return ProtocolCapabilities(**merged)
 
@@ -985,7 +988,7 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
             cached = self.rollout_path_cache.get(process.stable_key)
             if cached and cached[0] is not None and cached[0].exists():
                 return cached
-            result = (None, "")
+            result: tuple[Path | None, str] = (None, "")
             self.rollout_path_cache[process.stable_key] = result
             return result
         _, _, _, path, session_id = max(
@@ -1101,15 +1104,15 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
         }
         for retained, _ in self.retired_sessions.values():
             identity = retained.session_identity.instance
-            snapshot = snapshot_by_instance.get(identity)
-            if snapshot is None:
+            target_snapshot = snapshot_by_instance.get(identity)
+            if target_snapshot is None:
                 template = self.instance_templates.get(identity)
                 if template is None:
                     continue
-                snapshot = replace(template, sessions=[])
-                snapshots.append(snapshot)
-                snapshot_by_instance[identity] = snapshot
-            snapshot.sessions.append(retained)
+                target_snapshot = replace(template, sessions=[])
+                snapshots.append(target_snapshot)
+                snapshot_by_instance[identity] = target_snapshot
+            target_snapshot.sessions.append(retained)
         self.live_sessions = current
         retained_instances = {
             session.session_identity.instance for session, _ in self.retired_sessions.values()
