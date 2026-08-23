@@ -11,7 +11,6 @@ from codex.state_store import LogRecord
 from models import NetworkEvidence, NormalizedEvent, ProcessIdentity, ProcessInfo
 from state_machine import SessionStateMachine
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 
 

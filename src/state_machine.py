@@ -20,18 +20,15 @@ from config import (
     LIFECYCLE_LABELS,
     MAX_EVENTS_PER_SESSION,
 )
-from state_axes import AxisDerivationMixin
-from state_summaries import SummaryDerivationMixin
-
 from models import (
-    AttentionRequest,
-    AttentionState,
     AlertOccurrence,
     AlertStatus,
     AlertTransition,
-    Confidence,
+    AttentionRequest,
+    AttentionState,
     CompactionEvidence,
     CompactionSummary,
+    Confidence,
     DiagnosisFinding,
     EvidenceCoverage,
     LifecycleState,
@@ -41,12 +38,13 @@ from models import (
     ProcessInfo,
     Provenance,
     RecoveryState,
-    SessionIdentity,
     SessionHealth,
+    SessionIdentity,
     SilenceAssessment,
     SilenceState,
 )
-
+from state_axes import AxisDerivationMixin
+from state_summaries import SummaryDerivationMixin
 
 PROGRESS_KINDS = {
     "RESPONSE_STARTED",
@@ -761,9 +759,7 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
                 self.pending_recovery[key] = RecoveryState.RECONNECTING
             elif event.kind == "TRANSPORT_FALLBACK":
                 self.pending_recovery[key] = RecoveryState.TRANSPORT_FALLBACK
-            elif event.kind == "RECOVERED":
-                self.pending_recovery.pop(key, None)
-            elif event.kind in TERMINAL_KINDS:
+            elif event.kind == "RECOVERED" or event.kind in TERMINAL_KINDS:
                 self.pending_recovery.pop(key, None)
             self._remember_axis_baselines(key, event)
             bucket.append(event)

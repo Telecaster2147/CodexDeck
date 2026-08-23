@@ -10,7 +10,6 @@ from dataclasses import replace
 from models import SocketInfo
 from utils import CommandBudget, CommandError, CommandExecutionResult, CommandRunner
 
-
 SOCKET_COMMAND_BUDGET = CommandBudget(
     stdout_bytes=16 * 1024 * 1024,
     stdout_retained_bytes=4 * 1024 * 1024,

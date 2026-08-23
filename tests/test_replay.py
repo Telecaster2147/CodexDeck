@@ -11,7 +11,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from codex.replay import ProtocolReplayRunner, ReplayOperation  # noqa: E402
 from config import MAX_SESSION_TAIL  # noqa: E402
 
-
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
 
 
@@ -146,7 +145,8 @@ class ProtocolReplayTests(unittest.TestCase):
         )
         keepalives = b"".join(
             (
-                '{"timestamp":%d,"type":"event_msg","payload":{"type":"keepalive"}}\n' % (index + 2)
+                f'{{"timestamp":{index + 2},"type":"event_msg",'
+                '{"payload":{"type":"keepalive"}}\n'
             ).encode()
             for index in range(501)
         )

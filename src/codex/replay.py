@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from codex.rollout import RolloutReader
 from codex.terminal import TerminalStore

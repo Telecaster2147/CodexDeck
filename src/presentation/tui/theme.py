@@ -2,7 +2,6 @@
 
 from textual.theme import Theme
 
-
 CODEXDECK_BLUE_THEME = Theme(
     name="codexdeck-blue",
     primary="#38bdf8",

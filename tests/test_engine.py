@@ -7,29 +7,29 @@ import sys
 import tempfile
 import time
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from app import exit_code  # noqa: E402
 from codex.paths import ProcReader, ResolvedInstance  # noqa: E402
 from codex.processes import DiscoveryResult  # noqa: E402
 from codex.rollout import RolloutActivity  # noqa: E402
 from codex.terminal import TerminalUpdate  # noqa: E402
 from engine import MonitorEngine  # noqa: E402
-from app import exit_code  # noqa: E402
 from models import (  # noqa: E402
     AdapterResult,
     AdapterStatus,
-    CodexPaths,
     ChildProcessActivity,
-    LifecycleState,
+    CodexPaths,
     Confidence,
     DiscoverySummary,
+    LifecycleState,
     NetworkState,
     ProcessIdentity,
     ProcessInfo,

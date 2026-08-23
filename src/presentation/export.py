@@ -12,7 +12,6 @@ from models import NormalizedEvent, SessionHealth
 from presentation.privacy import public_value
 from utils import redact_sensitive
 
-
 EXPORT_SCHEMA_VERSION = 3
 _SENSITIVE_KEY = re.compile(
     r"(?i)(?:^|_)(?:authorization|cookie|api_?key|secret|password|passwd|"

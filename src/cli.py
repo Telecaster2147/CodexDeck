@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from app import AppOptions, run_application
 from config import DEFAULT_EVENT_LOOKBACK, DEFAULT_IDLE_THRESHOLD, VERSION

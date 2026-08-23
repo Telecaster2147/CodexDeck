@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from datetime import datetime
 
 from diagnostics import CollectorTracker
-from models import DiscoverySummary, InstanceSnapshot, MonitorSnapshot, ObserverHealth
+from models import Diagnostic, DiscoverySummary, InstanceSnapshot, MonitorSnapshot, ObserverHealth
 from temporal import apply_temporal_completeness, build_temporal_cut
 
 
@@ -28,7 +29,7 @@ class SnapshotPublisher:
         instances: list[InstanceSnapshot],
         started: float,
         now_monotonic: float,
-        diagnostics: list[str],
+        diagnostics: Sequence[Diagnostic | str],
         discovery: DiscoverySummary,
         discovery_stale_since: float | None,
         socket_stale_since: float | None,
@@ -50,7 +51,7 @@ class SnapshotPublisher:
             interval_seconds=self.interval,
             instances=sorted(instances, key=lambda item: item.display_codex_home),
             collection_duration_seconds=duration,
-            diagnostics=diagnostics,
+            diagnostics=list(diagnostics),
             discovery=discovery,
             process_data_stale_age_seconds=(
                 now_monotonic - discovery_stale_since if discovery_stale_since is not None else None

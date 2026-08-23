@@ -9,9 +9,10 @@ import stat
 import subprocess
 import time
 import unicodedata
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from config import COMMAND_TIMEOUT
 

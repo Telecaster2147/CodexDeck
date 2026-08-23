@@ -28,7 +28,6 @@ from models import (
     TurnSummary,
 )
 
-
 TERMINAL_KINDS = {"TURN_COMPLETED", "TURN_FAILED", "TURN_ABORTED"}
 
 

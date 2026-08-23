@@ -18,7 +18,6 @@ from models import (  # noqa: E402
 )
 from state_machine import SessionStateMachine  # noqa: E402
 
-
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
 
 

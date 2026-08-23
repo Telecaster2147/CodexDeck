@@ -6,7 +6,6 @@ import hashlib
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-
 STREAM_ANCHOR_BYTES = 64
 
 

@@ -10,7 +10,6 @@ from typing import Any
 from models import NormalizedEvent, ToolExecutionSummary
 from utils import redact_sensitive
 
-
 MAX_PUBLIC_STRING = 2048
 MAX_PUBLIC_COLLECTION = 4096
 

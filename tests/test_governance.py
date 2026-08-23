@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import sqlite3
 import tempfile
@@ -14,6 +15,7 @@ from codex.compatibility import (
 from codex.events import normalize_log
 from codex.replay import ProtocolReplayRunner
 from codex.state_store import LogRecord, StateStore
+from engine_state import ENGINE_STATE_OWNERS, engine_state_fields
 from models import CodexPaths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +144,100 @@ class CompatibilityBudgetTests(unittest.TestCase):
                 )
                 self.assertTrue(events)
 
+
+class StaticQualityBudgetTests(unittest.TestCase):
+    def test_monitor_engine_state_has_one_declared_owner(self) -> None:
+        tree = ast.parse((PROJECT_ROOT / "src" / "engine.py").read_text())
+        monitor_engine = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "MonitorEngine"
+        )
+        initializer = next(
+            node
+            for node in monitor_engine.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+        initialized: set[str] = set()
+        for node in ast.walk(initializer):
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets.extend(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets.append(node.target)
+            for target in targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    initialized.add(target.attr)
+
+        declared = engine_state_fields()
+        self.assertEqual(len(declared), len(set(declared)))
+        self.assertEqual(set(declared), initialized)
+        self.assertTrue(all(owner.lifecycle for owner in ENGINE_STATE_OWNERS))
+        self.assertTrue(all(owner.publication_boundary for owner in ENGINE_STATE_OWNERS))
+
+    def test_engine_mixins_declare_shared_state_without_owning_initializers(self) -> None:
+        for relative, class_name in (
+            ("src/engine_collectors.py", "CollectorStagesMixin"),
+            ("src/engine_refresh.py", "FastRefreshMixin"),
+        ):
+            with self.subTest(module=relative):
+                tree = ast.parse((PROJECT_ROOT / relative).read_text())
+                mixin = next(
+                    node
+                    for node in tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == class_name
+                )
+                self.assertFalse(
+                    any(
+                        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name == "__init__"
+                        for node in mixin.body
+                    )
+                )
+                annotations = {
+                    node.target.id
+                    for node in mixin.body
+                    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                }
+                self.assertTrue(annotations)
+                state_annotations = {name for name in annotations if not name.startswith("_")}
+                self.assertLessEqual(state_annotations, set(engine_state_fields()))
+
+    def test_large_modules_do_not_exceed_reviewed_line_budgets(self) -> None:
+        baseline = json.loads(
+            (PROJECT_ROOT / "tools" / "quality_baseline.json").read_text()
+        )
+        self.assertEqual(baseline["schema_version"], 1)
+        self.assertEqual(baseline["review_threshold"]["ruff_hard_limit"], 44)
+        for relative, limit in baseline["large_module_line_limits"].items():
+            with self.subTest(module=relative):
+                lines = (PROJECT_ROOT / relative).read_text().count("\n") + 1
+                self.assertLessEqual(lines, limit)
+
+    def test_complex_function_baseline_points_to_existing_symbols(self) -> None:
+        baseline = json.loads(
+            (PROJECT_ROOT / "tools" / "quality_baseline.json").read_text()
+        )
+        by_module: dict[str, set[str]] = {}
+        for path in (PROJECT_ROOT / "src").rglob("*.py"):
+            module = ".".join(path.relative_to(PROJECT_ROOT / "src").with_suffix("").parts)
+            tree = ast.parse(path.read_text())
+            names: set[str] = set()
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.add(f"{module}.{node.name}")
+                elif isinstance(node, ast.ClassDef):
+                    for member in node.body:
+                        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            names.add(f"{module}.{node.name}.{member.name}")
+            by_module[module] = names
+        all_names = set().union(*by_module.values())
+        self.assertEqual(
+            set(baseline["complex_functions"]) - all_names,
+            set(),
+        )
 
 
 if __name__ == "__main__":

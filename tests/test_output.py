@@ -11,9 +11,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from models import (  # noqa: E402
     AgentNode,
-    AxisCompleteness,
     AttentionRequest,
     AttentionState,
+    AxisCompleteness,
     CodexPaths,
     CollectorHealth,
     CommandExecutionSummary,
@@ -28,8 +28,8 @@ from models import (  # noqa: E402
     ProcessInfo,
     RateLimitSummary,
     RateLimitWindow,
-    SessionHealth,
     SessionCompleteness,
+    SessionHealth,
     TerminalAssociationSummary,
     TerminalCapability,
     TerminalChunk,
@@ -38,9 +38,9 @@ from models import (  # noqa: E402
     ToolExecutionSummary,
     TurnSummary,
 )
-from presentation.json_output import render_json  # noqa: E402
-from presentation.export import session_export  # noqa: E402
 from presentation.doctor import render_doctor_json  # noqa: E402
+from presentation.export import session_export  # noqa: E402
+from presentation.json_output import render_json  # noqa: E402
 from presentation.privacy import public_value  # noqa: E402
 from presentation.text import render_text  # noqa: E402
 

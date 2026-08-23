@@ -14,7 +14,6 @@ from models import (
     SilenceState,
 )
 
-
 ACTIVE_LIFECYCLES = {
     LifecycleState.STARTING,
     LifecycleState.WAITING_RESPONSE,

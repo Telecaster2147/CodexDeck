@@ -5,11 +5,12 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 from datetime import datetime
+from typing import Any, cast
 
 from rich.table import Table
 from rich.text import Text
 
-from models import SessionHealth
+from models import NormalizedEvent, SessionHealth
 from presentation.tui.theme import STATE_COLORS
 from utils import operator_text
 
@@ -91,13 +92,23 @@ def timeline_entries(
             start_metadata = start.metadata if start else {}
             fallback_name = _tool_name_is_fallback(event.metadata)
 
-            def resolved(name: str, summary_value: object = "") -> object:
+            def resolved(
+                name: str,
+                summary_value: object = "",
+                *,
+                current_event: NormalizedEvent = event,
+                current_fallback_name: bool = fallback_name,
+                current_start_metadata: dict[str, object] = start_metadata,
+            ) -> object:
                 if summary_value not in (None, "", (), []):
                     return summary_value
-                current = event.metadata.get(name)
-                if name in {"category", "display_name", "tool_name"} and fallback_name:
+                current = current_event.metadata.get(name)
+                if (
+                    name in {"category", "display_name", "tool_name"}
+                    and current_fallback_name
+                ):
                     current = None
-                return current or start_metadata.get(name)
+                return current or current_start_metadata.get(name)
 
             metadata = {
                 **event.metadata,
@@ -256,25 +267,25 @@ def timeline_entries(
                 "turn_id": failure.turn_id,
             }
         )
-    entries = sorted(entries, key=lambda item: float(_value(item, "timestamp", 0) or 0))
+    entries = sorted(entries, key=lambda item: _float_value(_value(item, "timestamp", 0)))
     folded: list[object] = []
     pending_tools: dict[str, object] = {}
     for entry in entries:
         kind = str(_value(entry, "kind", ""))
-        metadata = _value(entry, "metadata", {})
-        metadata = metadata if isinstance(metadata, dict) else {}
+        raw_metadata = _value(entry, "metadata", {})
+        metadata = cast(dict[str, Any], raw_metadata) if isinstance(raw_metadata, dict) else {}
         call_id = str(metadata.get("call_id") or "")
         if kind == "TOOL_RUNNING" and call_id:
             pending_tools[call_id] = entry
             continue
         if kind == "TOOL_COMPLETED" and call_id in pending_tools:
             started = pending_tools.pop(call_id)
-            duration = float(_value(entry, "timestamp", 0) or 0) - float(
-                _value(started, "timestamp", 0) or 0
+            duration = _float_value(_value(entry, "timestamp", 0)) - _float_value(
+                _value(started, "timestamp", 0)
             )
             if hasattr(entry, "metadata"):
                 entry = replace(
-                    entry,
+                    cast(Any, entry),
                     metadata={
                         **metadata,
                         "duration_seconds": metadata.get("duration_seconds") or max(0.0, duration),
@@ -282,7 +293,7 @@ def timeline_entries(
                 )
         folded.append(entry)
     folded.extend(pending_tools.values())
-    entries = sorted(folded, key=lambda item: float(_value(item, "timestamp", 0) or 0))
+    entries = sorted(folded, key=lambda item: _float_value(_value(item, "timestamp", 0)))
     return entries
 
 
@@ -291,6 +302,10 @@ def _value(item: object, name: str, default: object = "") -> object:
         return item.get(name, default)
     value = getattr(item, name, None)
     return default if value is None else value
+
+
+def _float_value(value: object) -> float:
+    return float(value) if isinstance(value, (int, float, str)) else 0.0
 
 
 def _matches_failure(event: object, failure: object) -> bool:
@@ -331,7 +346,12 @@ def _timeline_signature(event: object) -> tuple[object, ...]:
 def _trace_tag(kind: str, metadata: dict[str, object]) -> str:
     name = " ".join(str(metadata.get(key) or "") for key in ("tool_name", "display_name")).lower()
     category = str(metadata.get("category") or "").lower()
-    nested_tools = [str(item) for item in (metadata.get("nested_tools") or [])]
+    raw_nested_tools = metadata.get("nested_tools")
+    nested_tools = (
+        [str(item) for item in raw_nested_tools]
+        if isinstance(raw_nested_tools, (list, tuple))
+        else []
+    )
     if kind == "ACTION_REQUIRED":
         return "ACTION"
     if kind == "UNPARSED_PAYLOAD":
@@ -383,14 +403,16 @@ def _looks_serialized(value: object) -> bool:
 
 
 def _timeline_line(event: object) -> Table:
-    timestamp = float(_value(event, "presentation_timestamp", _value(event, "timestamp", 0)) or 0)
+    timestamp = _float_value(
+        _value(event, "presentation_timestamp", _value(event, "timestamp", 0))
+    )
     stamp = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
     kind = str(_value(event, "kind", ""))
     severity, color = event_severity(kind)
     summary = str(_value(event, "summary", kind or "事件"))
     detail = str(_value(event, "detail", ""))
-    metadata = _value(event, "metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
+    raw_metadata = _value(event, "metadata", {})
+    metadata = cast(dict[str, object], raw_metadata) if isinstance(raw_metadata, dict) else {}
     tag = _trace_tag(kind, metadata)
     if kind in {"TOOL_RUNNING", "TOOL_COMPLETED"}:
         tool_label = str(
@@ -440,8 +462,14 @@ def _timeline_line(event: object) -> Table:
     command = _trace_excerpt(metadata.get("command"), max_lines=4, max_chars=700)
     tool_name = str(metadata.get("tool_name") or "")
     cwd = str(metadata.get("cwd") or "")
-    files = [str(path) for path in (metadata.get("files") or [])]
-    nested_tools = [str(name) for name in (metadata.get("nested_tools") or []) if name]
+    raw_files = metadata.get("files")
+    files = [str(path) for path in raw_files] if isinstance(raw_files, (list, tuple)) else []
+    raw_nested_tools = metadata.get("nested_tools")
+    nested_tools = (
+        [str(name) for name in raw_nested_tools if name]
+        if isinstance(raw_nested_tools, (list, tuple))
+        else []
+    )
     if tool_name:
         add_detail("TOOL", tool_name, "#7dd3fc")
     if command:

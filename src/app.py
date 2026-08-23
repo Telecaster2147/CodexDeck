@@ -56,16 +56,16 @@ def exit_code(snapshot: MonitorSnapshot, *, strict_observation: bool = False) ->
 def _validate_explicit_filters(options: AppOptions, snapshot: MonitorSnapshot) -> None:
     processes = [process for instance in snapshot.instances for process in instance.processes]
     if options.selected_pids:
-        found = {process.pid for process in processes}
-        missing = sorted(options.selected_pids - found)
-        if missing:
-            raise RuntimeError(f"未找到指定 Codex PID：{', '.join(map(str, missing))}")
+        found_pids = {process.pid for process in processes}
+        missing_pids = sorted(options.selected_pids - found_pids)
+        if missing_pids:
+            raise RuntimeError(f"未找到指定 Codex PID：{', '.join(map(str, missing_pids))}")
     if options.selected_homes:
         requested = {path.expanduser().resolve(strict=False) for path in options.selected_homes}
-        found = {instance.paths.codex_home for instance in snapshot.instances}
-        missing = sorted(requested - found)
-        if missing:
-            homes = ", ".join(str(path) for path in missing)
+        found_homes = {instance.paths.codex_home for instance in snapshot.instances}
+        missing_homes = sorted(requested - found_homes)
+        if missing_homes:
+            homes = ", ".join(str(path) for path in missing_homes)
             raise RuntimeError(f"指定 CODEX_HOME 中没有运行中的 Codex：{homes}")
 
 

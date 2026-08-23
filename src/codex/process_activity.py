@@ -9,7 +9,6 @@ from pathlib import Path
 
 from models import ChildProcessActivity, ProcessIdentity, ProcessTreeActivity
 
-
 MAX_PROCESS_COMMAND_BYTES = 64 * 1024
 
 

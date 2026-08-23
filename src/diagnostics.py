@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from models import (
     CollectorHealth,
@@ -15,7 +15,6 @@ from models import (
     MonitorSnapshot,
 )
 from utils import contains_invisible_text
-
 
 MAX_DIAGNOSTICS = 128
 

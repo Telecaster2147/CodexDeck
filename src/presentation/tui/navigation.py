@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from rich.text import Text
 from textual.widgets import ListItem, Static
@@ -156,7 +156,7 @@ class NavigationItem(ListItem):
         self.instance_id = instance_id
         self.session_key = session_key
 
-    def update_from(self, item: "NavigationItem") -> bool:
+    def update_from(self, item: NavigationItem) -> bool:
         """Refresh row content without replacing the focused widget."""
 
         changed = self._content != item._content

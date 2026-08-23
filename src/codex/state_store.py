@@ -5,13 +5,12 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from config import SQLITE_TIMEOUT
 from models import AdapterResult, AdapterStatus, CodexPaths, SourceCapabilities
-
 
 THREAD_COLUMNS = {
     "id",
@@ -287,7 +286,7 @@ class StateStore:
             )
         records: dict[str, ThreadRecord] = {}
         for row in rows:
-            values = dict(zip(wanted, row))
+            values = dict(zip(wanted, row, strict=True))
             session_id = str(values.get("id") or "")
             records[session_id] = ThreadRecord(
                 session_id=session_id,

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
 try:
     import tomllib
@@ -18,7 +18,6 @@ from config import VERSION
 from presentation.doctor import DOCTOR_SCHEMA_VERSION
 from presentation.export import EXPORT_SCHEMA_VERSION
 from presentation.json_output import SCHEMA_VERSION
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 

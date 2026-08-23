@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 from diagnostics import snapshot_diagnostics
 from models import MonitorSnapshot
 from presentation.privacy import public_value
-
 
 SCHEMA_VERSION = 1
 NULLABLE_STRING_FIELDS = {
@@ -59,7 +59,7 @@ def _normalize_nulls(value: object, field: str = "") -> object:
 
 
 def snapshot_dict(snapshot: MonitorSnapshot, *, show_auxiliary: bool = False) -> dict[str, object]:
-    instances = _normalize_nulls(public_value(snapshot.instances))
+    instances = cast(list[dict[str, Any]], _normalize_nulls(public_value(snapshot.instances)))
     if not show_auxiliary:
         for instance in instances:
             instance["processes"] = [

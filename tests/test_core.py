@@ -31,11 +31,11 @@ from models import (  # noqa: E402
     NormalizedEvent,
     ProcessIdentity,
     ProcessInfo,
-    RolloutIdentity,
     RecoveryState,
+    RolloutIdentity,
     SessionIdentity,
-    SocketInfo,
     SocketFlowIdentity,
+    SocketInfo,
     TerminalIdentity,
 )
 from network.classifier import assess_process_network  # noqa: E402

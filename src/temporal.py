@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 
 from models import (
-    Confidence,
+    AxisCompleteness,
     CollectorHealth,
+    Confidence,
     EvidenceObservation,
     InstanceSnapshot,
     SnapshotTemporalCut,
 )
-
 
 TEMPORAL_SOURCES = ("process", "rollout", "terminal", "sqlite", "socket")
 
@@ -41,19 +42,21 @@ def apply_temporal_completeness(
     sources = {item.source: item for item in cut.sources}
 
     def axis_has_disjoint_windows(axis_name: str) -> bool:
-        windows = [
-            sources[source].observed_to
-            for source in AXIS_SOURCES[axis_name]
-            if source in sources
-            and sources[source].complete
-            and sources[source].observed_to is not None
-        ]
+        windows: list[float] = []
+        for source in AXIS_SOURCES[axis_name]:
+            observation = sources.get(source)
+            if (
+                observation is not None
+                and observation.complete
+                and observation.observed_to is not None
+            ):
+                windows.append(observation.observed_to)
         return len(windows) >= 2 and max(windows) - min(windows) > cut.max_source_skew_seconds
 
-    def downgrade(axis: object) -> object:
-        if not getattr(axis, "complete", False):
+    def downgrade(axis: AxisCompleteness) -> AxisCompleteness:
+        if not axis.complete:
             return axis
-        evidence = tuple(getattr(axis, "evidence", ())) + (
+        evidence = axis.evidence + (
             f"temporal_skew={cut.actual_source_skew_seconds:.3f}s",
         )
         return replace(
@@ -112,7 +115,7 @@ def apply_temporal_completeness(
     return updated
 
 
-def _latest(values: list[float | None]) -> float | None:
+def _latest(values: Sequence[float | None]) -> float | None:
     present = [value for value in values if value is not None]
     return max(present) if present else None
 
@@ -137,10 +140,10 @@ def _source_times(
     socket = _collector_time(collectors, "socket")
     sqlite = _collector_time(collectors, "state_db")
     rollout_values = [
-        float(activity.get("observed_at"))
+        value
         for instance in instances
         for activity in instance.rollout_activity
-        if activity.get("observed_at") is not None
+        if isinstance((value := activity.get("observed_at")), (int, float))
     ]
     rollout_observed = _latest(rollout_values)
     terminal_present = any(
@@ -175,11 +178,11 @@ def build_temporal_cut(
     for source in TEMPORAL_SOURCES:
         observed_at, complete = current[source]
         inherited = previous_by_source.get(source)
-        if fast and source not in fast_sources and inherited is not None:
-            observed_at = inherited.observed_to
-            complete = inherited.complete
-            source_generation = inherited.sample_generation
-        elif fast and inherited is not None and observed_at is None:
+        if (
+            fast
+            and inherited is not None
+            and (source not in fast_sources or observed_at is None)
+        ):
             observed_at = inherited.observed_to
             complete = inherited.complete
             source_generation = inherited.sample_generation

@@ -20,11 +20,11 @@ from models import (  # noqa: E402
     MonitorSnapshot,
     NetworkEvidence,
     NetworkState,
+    ObserverHealth,
     ProcessIdentity,
     ProcessInfo,
-    SessionHealth,
     SessionCompleteness,
-    ObserverHealth,
+    SessionHealth,
 )
 
 

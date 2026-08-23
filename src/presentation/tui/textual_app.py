@@ -14,8 +14,8 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import (
-    ContentSwitcher,
     Collapsible,
+    ContentSwitcher,
     DataTable,
     Input,
     ListView,
@@ -39,6 +39,12 @@ from models import (
     SessionHealth,
     SilenceState,
 )
+from preferences import (
+    CodexDeckPreferences,
+    load_preferences,
+    preferences_path,
+    save_preferences,
+)
 from presentation.attention import attention_queue
 from presentation.tui.activity import _timeline_line, _timeline_signature, timeline_entries
 from presentation.tui.controls import (
@@ -46,6 +52,8 @@ from presentation.tui.controls import (
     ControlsScreen,
     SettingsScreen,
     ShortcutFooter,
+)
+from presentation.tui.controls import (
     keyboard_reference as _keyboard_reference,
 )
 from presentation.tui.diagnosis import (
@@ -56,9 +64,9 @@ from presentation.tui.navigation import (
     NavigationItem,
     matches_session,
     network_color,
-    session_marker,
     session_hidden_label,
     session_is_visible,
+    session_marker,
     session_status,
     session_title,
     session_workspace,
@@ -68,12 +76,6 @@ from presentation.tui.navigation import (
 from presentation.tui.sampling import SamplingCoordinator
 from presentation.tui.terminal_panel import TerminalLog, TerminalPanel
 from presentation.tui.theme import CODEXDECK_BLUE_THEME, STATE_COLORS
-from preferences import (
-    CodexDeckPreferences,
-    load_preferences,
-    preferences_path,
-    save_preferences,
-)
 from utils import format_duration, operator_text
 
 BINDING_KEY_LABELS = {
@@ -270,7 +272,7 @@ class SessionInspector(Vertical):
             if resize_follow is not None
             else follow and (not same_session or was_at_end)
         )
-        self._resize_follow = None
+        self._resize_follow: bool | None = None
         self._resize_scroll_y = log.scroll_y
 
         self._timeline_session_key = session.key
@@ -784,7 +786,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
             item.key_value for item in items
         ]
         if stable_structure:
-            for current, updated in zip(current_items, items):
+            for current, updated in zip(current_items, items, strict=True):
                 current.update_from(updated)
             keys = [item.key_value for item in current_items]
             if keys:
@@ -980,14 +982,18 @@ class CodexDeckApp(App[MonitorSnapshot]):
             self.query_one("#session-list", ListView).action_cursor_up()
 
     def action_next_match(self) -> None:
-        if self.query_one("#detail-tabs", Tabs).active == "terminal-tab":
-            if not self.query_one(TerminalPanel).next_match(1):
-                self._set_status_message("NO TERMINAL MATCHES")
+        if (
+            self.query_one("#detail-tabs", Tabs).active == "terminal-tab"
+            and not self.query_one(TerminalPanel).next_match(1)
+        ):
+            self._set_status_message("NO TERMINAL MATCHES")
 
     def action_previous_match(self) -> None:
-        if self.query_one("#detail-tabs", Tabs).active == "terminal-tab":
-            if not self.query_one(TerminalPanel).next_match(-1):
-                self._set_status_message("NO TERMINAL MATCHES")
+        if (
+            self.query_one("#detail-tabs", Tabs).active == "terminal-tab"
+            and not self.query_one(TerminalPanel).next_match(-1)
+        ):
+            self._set_status_message("NO TERMINAL MATCHES")
 
     async def action_toggle_grouped(self) -> None:
         self.grouped = not self.grouped

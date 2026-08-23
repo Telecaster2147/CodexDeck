@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from engine import MonitorEngine
 from models import MonitorSnapshot
+
 from .textual_app import run_textual_tui
 
 

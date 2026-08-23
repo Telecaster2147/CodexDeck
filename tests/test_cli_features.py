@@ -9,7 +9,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
@@ -105,9 +104,11 @@ class CliFeatureTests(unittest.TestCase):
     def test_only_ps_is_a_hard_command_dependency(self) -> None:
         with patch("cli.shutil.which", side_effect=lambda command: None if command == "ss" else "/bin/ps"):
             required_commands_available()
-        with patch("cli.shutil.which", return_value=None):
-            with self.assertRaisesRegex(RuntimeError, "ps"):
-                required_commands_available()
+        with (
+            patch("cli.shutil.which", return_value=None),
+            self.assertRaisesRegex(RuntimeError, "ps"),
+        ):
+            required_commands_available()
 
     def test_checkout_launcher_uses_project_environment(self) -> None:
         system_python = Path("/usr/bin/python3")
@@ -131,9 +132,8 @@ class CliFeatureTests(unittest.TestCase):
             build_parser().parse_args(["monitor", "--strict-observation"]).strict_observation
         )
 
-        with self.assertRaises(SystemExit):
-            with redirect_stderr(io.StringIO()):
-                build_parser().parse_args(["--pid", "42", "export", "--session", "abc"])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            build_parser().parse_args(["--pid", "42", "export", "--session", "abc"])
 
     def test_monitor_output_modes_are_explicit_and_validated(self) -> None:
         parser = build_parser()
@@ -151,10 +151,13 @@ class CliFeatureTests(unittest.TestCase):
             ["monitor", "--watch", "--format", "json"],
             ["monitor", "--format", "ndjson"],
         ):
-            with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    parsed = parser.parse_args(arguments)
-                    _normalize_args(parser, parsed)
+            with (
+                self.subTest(arguments=arguments),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parsed = parser.parse_args(arguments)
+                _normalize_args(parser, parsed)
 
     def test_subcommands_reject_arguments_from_other_domains(self) -> None:
         invalid = (
@@ -164,9 +167,12 @@ class CliFeatureTests(unittest.TestCase):
             ["monitor", "--session", "abc"],
         )
         for arguments in invalid:
-            with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    build_parser().parse_args(arguments)
+            with (
+                self.subTest(arguments=arguments),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                build_parser().parse_args(arguments)
 
     def test_bare_invocation_normalizes_to_monitor_defaults(self) -> None:
         parser = build_parser()

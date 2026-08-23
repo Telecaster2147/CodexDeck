@@ -36,7 +36,7 @@ class SamplingCoordinator:
         *,
         wall_now: float | None = None,
         fast_interval: float = 0.1,
-    ) -> "SamplingCoordinator":
+    ) -> SamplingCoordinator:
         return cls(
             interval=interval,
             next_full_at=now + interval,
