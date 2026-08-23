@@ -14,8 +14,18 @@ the contract without turning every incremental collector cache into an immutable
 
 `src/codexdeck/engine_state.py` is the checked ownership registry for every field created by
 `MonitorEngine.__init__`. Each field has one owner, one lifecycle, and one publication rule.
-Collector-stage and fast-refresh mixins declare the state they consume; they do not create caches.
-`SnapshotPublisher` remains the only full-snapshot publisher.
+The host-collector, per-instance sampling, and fast-refresh mixins declare the state they consume;
+they do not create caches. `SnapshotPublisher` remains the only full-snapshot publisher.
+
+The full-sample pipeline has explicit stages:
+
+1. `engine_collectors.py` publishes bounded discovery and socket stage results;
+2. `engine_sampling.py` resolves instance identity, enriches processes, reads logs, collects rollout
+   and terminal evidence, derives sessions, and assembles one `InstanceSnapshot`;
+3. `engine.py` retains exited sessions, prunes private state, and hands all instances to the publisher;
+4. `engine_refresh.py` performs rollout-only copy-on-write refreshes between full samples.
+
+Stage results are short-lived builders. None are published directly or own long-lived mutable state.
 
 ## Model layers
 

@@ -155,6 +155,27 @@ class CompatibilityBudgetTests(unittest.TestCase):
 
 
 class StaticQualityBudgetTests(unittest.TestCase):
+    def test_readme_is_task_oriented_and_indexes_owned_design_docs(self) -> None:
+        readme = (PROJECT_ROOT / "README.md").read_text()
+        self.assertLessEqual(len(readme.splitlines()), 350)
+        self.assertGreaterEqual(len(readme.splitlines()), 250)
+        required_docs = (
+            "ARCHITECTURE.md",
+            "EVIDENCE_MODEL.md",
+            "STATE_MODEL.md",
+            "PROTOCOL_COMPATIBILITY.md",
+            "TERMINAL_OBSERVABILITY.md",
+            "NETWORK_MODEL.md",
+            "TESTING.md",
+            "RELEASE_OBSERVABILITY.md",
+        )
+        for name in required_docs:
+            with self.subTest(document=name):
+                self.assertTrue((PROJECT_ROOT / name).is_file())
+                self.assertIn(f"]({name})", readme)
+        self.assertIn("Needs You — Approval required", readme)
+        self.assertTrue((PROJECT_ROOT / "assets" / "screenshots" / "overview.png").is_file())
+
     def test_release_observability_maps_every_required_signal_to_evidence(self) -> None:
         runbook = (PROJECT_ROOT / "RELEASE_OBSERVABILITY.md").read_text()
         required_signals = (
