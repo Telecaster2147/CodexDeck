@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -345,7 +345,7 @@ class InstanceIdentity:
     storage_id: str = field(default="", repr=False)
 
     @classmethod
-    def from_storage_key(cls, storage_key: str) -> "InstanceIdentity":
+    def from_storage_key(cls, storage_key: str) -> InstanceIdentity:
         marker = Path("/") / storage_key
         return cls(marker, marker, storage_key)
 
@@ -587,6 +587,9 @@ class ProcessInfo:
     process_group_id: int | None = None
     foreground_process_group_id: int | None = None
     terminal: str = ""
+    tmux_pane: str = field(default="", metadata={"public": False})
+    terminal_program: str = field(default="", metadata={"public": False})
+    ssh_tty: str = field(default="", metadata={"public": False})
     discovery_confidence: Confidence = Confidence.HIGH
     discovery_evidence: tuple[str, ...] = ()
     instance_identity: InstanceIdentity | None = field(
@@ -1050,7 +1053,7 @@ class AgentNode:
     provenance: Provenance = field(
         default_factory=lambda: Provenance("", Confidence.LOW, complete=False)
     )
-    children: list["AgentNode"] = field(default_factory=list)
+    children: list[AgentNode] = field(default_factory=list)
 
 
 @dataclass

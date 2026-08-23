@@ -15,6 +15,7 @@ from models import (
     ProcessInfo,
 )
 from utils import CommandBudget, CommandError, CommandExecutionResult, CommandRunner
+
 from .paths import ProcReader, ResolvedInstance, resolve_instance
 
 
@@ -47,6 +48,19 @@ def is_codex_candidate(command: str, args: str) -> bool:
 
 
 is_codex_process = is_codex_candidate
+
+
+def _location_environment_value(
+    environment: dict[str, str] | None,
+    key: str,
+    limit: int = 120,
+) -> str:
+    """Retain only bounded, non-secret terminal identity hints."""
+
+    if not environment:
+        return ""
+    value = " ".join(str(environment.get(key, "")).split())
+    return value[:limit]
 
 
 @dataclass
@@ -262,6 +276,11 @@ class ProcessDiscovery:
                         process_group_id=process_group_id,
                         foreground_process_group_id=foreground_process_group_id,
                         terminal=terminal,
+                        tmux_pane=_location_environment_value(environment, "TMUX_PANE"),
+                        terminal_program=_location_environment_value(
+                            environment, "TERM_PROGRAM"
+                        ),
+                        ssh_tty=_location_environment_value(environment, "SSH_TTY"),
                         discovery_confidence=(Confidence.HIGH if evidence else Confidence.LOW),
                         discovery_evidence=evidence,
                         instance_identity=resolved.identity,

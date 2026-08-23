@@ -11,6 +11,7 @@ from config import NETWORK_LABELS
 from diagnostics import diagnostic_text
 from models import InstanceSnapshot, SessionHealth
 from presentation.projection import instance_quality_issues
+from presentation.source_location import source_terminal_location
 from presentation.tui.theme import STATE_COLORS
 from utils import format_duration
 
@@ -60,6 +61,13 @@ def _diagnosis_renderable(
         conclusion.append("当前未发现需要关注的问题", style="bold #4ade80")
         blocks.append(conclusion)
 
+    location = source_terminal_location(session.process)
+    source = Text("\n源终端定位\n", style="bold #64748b")
+    source.append(location.label, style="bold #d6f3ff" if location.sufficient else "#fbbf24")
+    source.append("\n线索  " + " · ".join(location.clues), style="#94a3b8")
+    source.append(f"\n建议  {location.guidance}", style="#cbd5e1")
+    blocks.append(source)
+
     observation = session.observation
     freshness_parts = []
     for label, timestamp in (
@@ -80,6 +88,8 @@ def _diagnosis_renderable(
     unparsed_events = [event for event in session.events if event.unparsed]
     for event in unparsed_events[-3:]:
         payload = event.unparsed
+        if payload is None:
+            continue
         quality_issues.append(
             f"未解析 {payload.source_type} · {payload.length} chars · {payload.sha256[:10]}"
         )
@@ -292,8 +302,10 @@ def _diagnosis_details_renderable(
             blocks.append(Text(f"未知协议类型\n{event_type} × {event_count}", style="#fbbf24"))
 
     for event in (event for event in session.events if event.unparsed):
-        count += 1
         payload = event.unparsed
+        if payload is None:
+            continue
+        count += 1
         protocol = Text(f"未知协议  {payload.source_type}", style="bold #fbbf24")
         protocol.append(
             f"\n来源时间  {event.presentation_timestamp:.3f}"

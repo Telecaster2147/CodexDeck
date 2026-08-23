@@ -14,10 +14,24 @@ from rich.console import Console
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from textual.css.query import NoMatches  # noqa: E402
+from textual.widgets import (  # noqa: E402
+    Collapsible,
+    ContentSwitcher,
+    DataTable,
+    Input,
+    ListView,
+    RichLog,
+    Select,
+    Static,
+    Switch,
+    Tabs,
+)
+
 from models import (  # noqa: E402
-    AxisCompleteness,
     AttentionRequest,
     AttentionState,
+    AxisCompleteness,
     CodexPaths,
     CompactionSummary,
     CurrentOperationSummary,
@@ -32,8 +46,8 @@ from models import (  # noqa: E402
     ProcessIdentity,
     ProcessInfo,
     RecoveryState,
-    SessionHealth,
     SessionCompleteness,
+    SessionHealth,
     TerminalCapability,
     TerminalChunk,
     TerminalSessionSummary,
@@ -41,6 +55,7 @@ from models import (  # noqa: E402
     UnparsedPayload,
 )
 from preferences import CodexDeckPreferences  # noqa: E402
+from presentation.tui.sampling import SamplingCoordinator  # noqa: E402
 from presentation.tui.textual_app import (  # noqa: E402
     CodexDeckApp,
     NavigationItem,
@@ -53,24 +68,10 @@ from presentation.tui.textual_app import (  # noqa: E402
     _timeline_line,
     binding_key_label,
     keyboard_reference,
-    session_marker,
     session_hidden_label,
+    session_marker,
     session_status,
     timeline_entries,
-)
-from presentation.tui.sampling import SamplingCoordinator  # noqa: E402
-from textual.css.query import NoMatches  # noqa: E402
-from textual.widgets import (  # noqa: E402
-    Collapsible,
-    ContentSwitcher,
-    DataTable,
-    Input,
-    ListView,
-    RichLog,
-    Select,
-    Static,
-    Switch,
-    Tabs,
 )
 
 
@@ -486,6 +487,9 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("置信度 中", rendered)
         self.assertIn("完整度 完整", rendered)
         self.assertIn("数据质量", rendered)
+        self.assertIn("源终端定位", rendered)
+        self.assertIn("定位线索不足", rendered)
+        self.assertIn("PID", rendered)
         self.assertNotIn("自动 compact 边界", rendered)
         self.assertNotIn("config.toml", rendered)
         self.assertNotIn("历史趋势", rendered)
@@ -1660,6 +1664,9 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(f"`{label}`", readme)
         for removed in ("Operational", "Diagnostic", "显示设置", "辅助进程"):
             self.assertNotIn(removed, reference)
+        for environment in ("tmux", "VS Code", "普通终端", "SSH", "线索不足"):
+            self.assertIn(environment, reference)
+        self.assertIn("不接管 PTY", reference)
 
     def test_timeline_failure_is_not_duplicated_or_reordered(self) -> None:
         session = make_snapshot(1).sessions[0]

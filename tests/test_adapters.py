@@ -203,6 +203,23 @@ class PathTests(unittest.TestCase):
         self.assertTrue(by_pid[11].foreground_active)
         self.assertEqual(by_pid[11].terminal, "pts/1")
 
+    def test_process_discovery_retains_bounded_source_terminal_evidence(self) -> None:
+        output = "11 1 1000 11 11 pts/7 codex 9 0.0 S wait /opt/codex resume\n"
+        proc = FakeProc(
+            {
+                "CODEX_HOME": "/custom/codex",
+                "TMUX_PANE": "%4",
+                "TERM_PROGRAM": "vscode",
+                "SSH_TTY": "/dev/pts/7",
+            }
+        )
+
+        process = ProcessDiscovery(FakeRunner(output), proc, user_id=1000).discover().processes[0]
+
+        self.assertEqual(process.tmux_pane, "%4")
+        self.assertEqual(process.terminal_program, "vscode")
+        self.assertEqual(process.ssh_tty, "/dev/pts/7")
+
     def test_process_command_filters_uid_and_non_candidates_before_retention(self) -> None:
         output = (
             "99 1 1000 99 99 ? python 10 0.0 S wait python PRIVATE_ARGUMENT\n"

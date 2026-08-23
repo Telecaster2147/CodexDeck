@@ -161,6 +161,18 @@ def keyboard_reference() -> str:
                 )
             )
         lines.append("")
+    lines.extend(
+        (
+            "返回源终端",
+            "  tmux       在 Diagnosis 核对 pane、TTY 与 PID，再切换到对应 pane。",
+            "  VS Code    在 Remote 窗口的终端列表中核对 TTY 与 PID。",
+            "  普通终端   用 TTY 与 PID 匹配原窗口或标签页。",
+            "  SSH        回到对应连接，核对 SSH_TTY、TTY 与 PID。",
+            "  线索不足   仅按 workspace、当前 cwd 和 PID 手工核对，不推测 pane 归属。",
+            "",
+            "CodexDeck 始终只读：不接管 PTY，不写 stdin，不发 signal，也不自动切换终端。",
+        )
+    )
     return "\n".join(lines).rstrip()
 
 
