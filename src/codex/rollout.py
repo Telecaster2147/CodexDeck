@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import time
 from collections import Counter
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from pathlib import Path
 
 from config import MAX_SESSION_TAIL
 from models import NormalizedEvent, RolloutIdentity
 from utils import message_text
+
 from .events import is_compact_command, normalize_rollout_record, parse_timestamp
 from .ingress import (
     MAX_INGRESS_BYTES_PER_TICK,
@@ -26,13 +27,33 @@ from .mutable_stream import (
     stream_metadata,
     stream_source_id,
 )
+from .protocol_families import (
+    MAX_PROTOCOL_FAMILY_COUNTERS as MAX_PROTOCOL_FAMILY_COUNTERS,
+)
+from .protocol_families import (
+    OTHER_PROTOCOL_FAMILY as OTHER_PROTOCOL_FAMILY,
+)
+from .protocol_families import (
+    BoundedFamilyCounter as BoundedFamilyCounter,
+)
+from .rollout_types import (
+    RolloutActivity as RolloutActivity,
+)
+from .rollout_types import (
+    RolloutCursor as RolloutCursor,
+)
+from .rollout_types import (
+    RolloutReadResult as RolloutReadResult,
+)
+from .rollout_types import (
+    TerminalMetadataBackfillCursor as TerminalMetadataBackfillCursor,
+)
 from .terminal import (
     TerminalProtocolParser,
     TerminalStore,
     TerminalUpdate,
     extract_terminal_updates,
 )
-
 
 KNOWN_IGNORED_TYPES = {
     "event_msg:image_generation_end",
@@ -54,38 +75,6 @@ MAX_TERMINAL_METADATA_ATTEMPTED_IDS = 256
 MAX_TERMINAL_METADATA_CALL_IDS = 256
 MAX_TERMINAL_METADATA_PENDING_CALLS = 256
 MAX_TERMINAL_METADATA_PENDING_UPDATES_PER_CALL = 8
-MAX_PROTOCOL_FAMILY_COUNTERS = 128
-OTHER_PROTOCOL_FAMILY = "__other__"
-
-
-@dataclass
-class BoundedFamilyCounter:
-    """Fixed-cardinality Misra-Gries candidates with an exact total."""
-
-    max_families: int = MAX_PROTOCOL_FAMILY_COUNTERS
-    counts: Counter[str] = field(default_factory=Counter)
-    total: int = 0
-    dropped_family_count: int = 0
-
-    def add(self, family: str) -> None:
-        self.total += 1
-        if family in self.counts or len(self.counts) < self.max_families:
-            self.counts[family] += 1
-            return
-        self.dropped_family_count += 1
-        for candidate in tuple(self.counts):
-            self.counts[candidate] -= 1
-            if self.counts[candidate] <= 0:
-                del self.counts[candidate]
-
-    def snapshot(self) -> Counter[str]:
-        result = Counter(self.counts)
-        other = self.total - sum(result.values())
-        if other:
-            result[OTHER_PROTOCOL_FAMILY] = other
-        return result
-
-
 _TERMINAL_METADATA_MARKERS = (
     b"exec_command",
     b"write_stdin",
@@ -98,109 +87,6 @@ _TERMINAL_METADATA_MARKERS = (
     b'"session_id"',
     b'"cell_id"',
 )
-
-
-@dataclass
-class RolloutCursor:
-    device: int
-    inode: int
-    offset: int
-    generation: int = 0
-    partial: bytes = b""
-    anchor: bytes = b""
-    saw_turn_boundary: bool = False
-    saw_user_input: bool = False
-    context_tokens: int | None = None
-    context_window: int | None = None
-    context_observed_at: float | None = None
-    context_source_id: str = ""
-    context_turn_id: str = ""
-    manual_compact_in_flight: bool = False
-    pending_empty_task_at: float | None = None
-    pending_empty_task_source_id: str = ""
-    pending_empty_task_turn_id: str = ""
-    pending_context_tokens: int | None = None
-    pending_context_window: int | None = None
-    stat_size: int = 0
-    mtime_ns: int = 0
-    last_growth_at: float | None = None
-    last_compact_completion_at: float | None = None
-    last_compact_completion_type: str = ""
-    skipping_oversize: bool = False
-    skipped_bytes: int = 0
-    oversize_records: int = 0
-    gap_count: int = 0
-    gap_reason: str = ""
-    gap_hash: str = ""
-    backlog_since: float | None = None
-    stream_uncertain: bool = False
-    stream_uncertainty_count: int = 0
-    stream_uncertainty_reason: str = ""
-
-
-@dataclass
-class TerminalMetadataBackfillCursor:
-    inode: int
-    next_end: int
-    floor: int
-    process_ids: set[str]
-    generation: int = 0
-    call_ids: set[str] = field(default_factory=set)
-    process_call_ids: dict[str, set[str]] = field(default_factory=dict)
-    resolved_process_ids: set[str] = field(default_factory=set)
-    pending_updates: dict[str, list[TerminalUpdate]] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class RolloutActivity:
-    path: str
-    observed_at: float
-    available: bool = False
-    stat_size: int = 0
-    mtime_ns: int = 0
-    bytes_read: int = 0
-    complete_record_count: int = 0
-    record_count: int = 0
-    ignored_record_count: int = 0
-    normalized_count: int = 0
-    partial_bytes: int = 0
-    last_growth_at: float | None = None
-    replaced: bool = False
-    truncated: bool = False
-    copy_truncated: bool = False
-    consumed_bytes: int = 0
-    backlog_bytes: int = 0
-    backlog_records_lower_bound: int = 0
-    backlog_age_seconds: float | None = None
-    budget_exceeded: bool = False
-    oversize_record_count: int = 0
-    skipped_bytes: int = 0
-    gap_count: int = 0
-    gap_reason: str = ""
-    gap_hash: str = ""
-    parse_duration_seconds: float = 0.0
-    metadata_backfill_dropped: int = 0
-    metadata_backfill_reason: str = ""
-    terminal_parser_evictions: int = 0
-    terminal_parser_eviction_reason: str = ""
-    device: int = 0
-    inode: int = 0
-    generation: int = 0
-    anchor_hash: str = ""
-    stream_uncertain: bool = False
-    stream_uncertainty_count: int = 0
-    stream_uncertainty_reason: str = ""
-
-    @property
-    def changed(self) -> bool:
-        return bool(self.bytes_read or self.replaced or self.truncated or self.copy_truncated)
-
-
-@dataclass(frozen=True)
-class RolloutReadResult:
-    events: tuple[NormalizedEvent, ...]
-    activity: RolloutActivity
-    terminal_updates: tuple[TerminalUpdate, ...] = ()
 
 
 def _record_shape(record: dict[str, object]) -> tuple[str, str, dict[str, object]]:
@@ -228,6 +114,7 @@ class RolloutReader:
         self.cursors: dict[str, RolloutCursor] = {}
         self.unknown_types: dict[str, BoundedFamilyCounter] = {}
         self.shape_types: dict[str, BoundedFamilyCounter] = {}
+        self.codex_versions: dict[str, BoundedFamilyCounter] = {}
         self.bootstrap_truncated: set[str] = set()
         self.terminal_metadata_attempted: dict[str, set[str]] = {}
         self.terminal_metadata_backfills: dict[str, TerminalMetadataBackfillCursor] = {}
@@ -292,6 +179,7 @@ class RolloutReader:
             if replaced or truncated:
                 self.unknown_types.pop(key, None)
                 self.shape_types.pop(key, None)
+                self.codex_versions.pop(key, None)
                 self.terminal_metadata_attempted.pop(key, None)
                 self.terminal_metadata_backfills.pop(key, None)
                 self.terminal_metadata_saturated.discard(key)
@@ -322,6 +210,7 @@ class RolloutReader:
                     # grown the new file beyond the previous byte offset.
                     self.unknown_types.pop(key, None)
                     self.shape_types.pop(key, None)
+                    self.codex_versions.pop(key, None)
                     self.terminal_metadata_attempted.pop(key, None)
                     self.terminal_metadata_backfills.pop(key, None)
                     self.terminal_metadata_saturated.discard(key)
@@ -552,6 +441,10 @@ class RolloutReader:
                 record_type, item_type, item = _record_shape(record)
                 family = f"{record_type}:{item_type or '_'}"
                 self.shape_types.setdefault(key, BoundedFamilyCounter()).add(family)
+                if record_type == "session_meta":
+                    version = item.get("cli_version")
+                    if isinstance(version, str) and version:
+                        self.codex_versions.setdefault(key, BoundedFamilyCounter()).add(version)
                 item_value = item.get("item")
                 item_value = item_value if isinstance(item_value, dict) else {}
                 compact_item_type = str(item_value.get("type") or "").lower()
@@ -761,7 +654,10 @@ class RolloutReader:
                     cursor.last_compact_completion_type = completion_type
                 unparsed = [event for event in normalized if event.kind == "UNPARSED_PAYLOAD"]
                 if unparsed:
-                    event_type = str(unparsed[-1].unparsed.source_type)
+                    unparsed_payload = unparsed[-1].unparsed
+                    if unparsed_payload is None:
+                        continue
+                    event_type = unparsed_payload.source_type
                     self.unknown_types.setdefault(key, BoundedFamilyCounter()).add(event_type)
                 elif (
                     not normalized
@@ -772,8 +668,12 @@ class RolloutReader:
                         "response_item",
                     }
                 ):
-                    item = record.get("payload")
-                    item_type = str(item.get("type") or "") if isinstance(item, dict) else ""
+                    payload_item = record.get("payload")
+                    item_type = (
+                        str(payload_item.get("type") or "")
+                        if isinstance(payload_item, dict)
+                        else ""
+                    )
                     if item_type:
                         event_type = f"{record['type']}:{item_type}"
                         if event_type not in KNOWN_IGNORED_TYPES:
@@ -912,7 +812,9 @@ class RolloutReader:
             new_process_ids = selected_process_ids
         if new_process_ids:
             process_ids = new_process_ids | (state.process_ids if state is not None else set())
-            process_call_ids = {process_id: set() for process_id in process_ids}
+            process_call_ids: dict[str, set[str]] = {
+                process_id: set() for process_id in process_ids
+            }
             call_ids: set[str] = set()
             for update in current_updates:
                 if update.process_id in process_ids and update.call_id:
@@ -1078,6 +980,14 @@ class RolloutReader:
                 total.update(counter.snapshot())
         return dict(sorted(total.items()))
 
+    def version_counts(self, paths: set[str]) -> dict[str, int]:
+        total: Counter[str] = Counter()
+        for path in paths:
+            counter = self.codex_versions.get(path)
+            if counter is not None:
+                total.update(counter.snapshot())
+        return dict(sorted(total.items()))
+
     def family_counter_summary(self, paths: set[str]) -> dict[str, int]:
         unknown = [counter for path, counter in self.unknown_types.items() if path in paths]
         shapes = [counter for path, counter in self.shape_types.items() if path in paths]
@@ -1107,6 +1017,9 @@ class RolloutReader:
         }
         self.shape_types = {
             path: counts for path, counts in self.shape_types.items() if path in active_paths
+        }
+        self.codex_versions = {
+            path: counts for path, counts in self.codex_versions.items() if path in active_paths
         }
         self.bootstrap_truncated.intersection_update(active_paths)
         self.terminal_metadata_attempted = {

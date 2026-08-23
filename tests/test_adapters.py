@@ -13,12 +13,12 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.paths import resolve_instance  # noqa: E402
 from codex.ingress import (  # noqa: E402
     MAX_INGRESS_BYTES_PER_TICK,
     MAX_INGRESS_RECORDS_PER_TICK,
     MAX_JSONL_RECORD_BYTES,
 )
+from codex.paths import resolve_instance  # noqa: E402
 from codex.processes import ProcessDiscovery  # noqa: E402
 from codex.rollout import (  # noqa: E402
     MAX_PROTOCOL_FAMILY_COUNTERS,
@@ -1020,6 +1020,18 @@ class RolloutTests(unittest.TestCase):
         self.assertGreater(snapshot[OTHER_PROTOCOL_FAMILY], 0)
         self.assertIn("dominant", snapshot)
         self.assertGreater(counter.dropped_family_count, 0)
+
+    def test_rollout_tracks_observed_codex_cli_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout.jsonl"
+            path.write_text(
+                '{"timestamp":"2026-07-26T00:00:00Z","type":"session_meta",'
+                '"payload":{"id":"SESSION_ID","cli_version":"0.145.0"}}\n'
+            )
+            reader = RolloutReader()
+            reader.read(path)
+
+            self.assertEqual(reader.version_counts({str(path)}), {"0.145.0": 1})
 
     def test_rollout_unknown_family_overflow_remains_visible_as_other(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
