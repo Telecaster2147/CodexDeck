@@ -146,6 +146,29 @@ class CompatibilityBudgetTests(unittest.TestCase):
 
 
 class StaticQualityBudgetTests(unittest.TestCase):
+    def test_release_observability_maps_every_required_signal_to_evidence(self) -> None:
+        runbook = (PROJECT_ROOT / "RELEASE_OBSERVABILITY.md").read_text()
+        required_signals = (
+            "Install, dependency and upgrade outcomes",
+            "discovered candidate / confirmed / rejected / unresolved",
+            "unknown record family rate",
+            "protocol-uncertain sessions",
+            "incomplete completeness axes",
+            "Terminal eligible / associated / ambiguous / conflicting / unresolved",
+            "false attention, false stall and missed signal",
+            "full sample p50/p95/p99",
+            "fast backlog, skipped/coalesced ticks and snapshot stale",
+            "TUI freeze, crash, focus, scroll, resize and search",
+            "Codex-version correlation",
+            "CLI migration and removed-feature demand",
+        )
+        for signal in required_signals:
+            with self.subTest(signal=signal):
+                self.assertIn(signal, runbook)
+        self.assertIn("does not collect telemetry", runbook)
+        self.assertTrue((PROJECT_ROOT / ".github/ISSUE_TEMPLATE/installation.yml").is_file())
+        self.assertTrue((PROJECT_ROOT / ".github/ISSUE_TEMPLATE/runtime.yml").is_file())
+
     def test_monitor_engine_state_has_one_declared_owner(self) -> None:
         tree = ast.parse((PROJECT_ROOT / "src" / "engine.py").read_text())
         monitor_engine = next(

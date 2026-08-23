@@ -1,0 +1,52 @@
+name: Installation or upgrade report
+description: Report a CodexDeck install, dependency, or upgrade outcome
+title: "install: "
+labels:
+  - installation
+body:
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Installation failed
+        - Upgrade failed
+        - Dependency resolution failed
+        - Installation succeeded
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      options:
+        - Installer preflight
+        - Python environment
+        - Dependency resolution
+        - Package installation
+        - Launcher smoke test
+        - Upgrade or rollback
+    validations:
+      required: true
+  - type: input
+    id: codexdeck_version
+    attributes:
+      label: CodexDeck version
+      placeholder: 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Linux distribution, Python version, and environment
+      placeholder: Ubuntu 24.04, Python 3.12, WSL2
+    validations:
+      required: true
+  - type: textarea
+    id: reviewed_log
+    attributes:
+      label: Reviewed and redacted output
+      description: Remove usernames, local paths, tokens, endpoints, task text, and identifiers.
+      render: shell
+    validations:
+      required: true

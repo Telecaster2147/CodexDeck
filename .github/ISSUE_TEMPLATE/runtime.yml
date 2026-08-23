@@ -1,0 +1,59 @@
+name: Runtime accuracy or TUI report
+description: Report an accuracy, responsiveness, navigation, or migration issue
+title: "runtime: "
+labels:
+  - runtime
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - False attention
+        - Missed attention
+        - False network stall
+        - Missed confirmed stall
+        - Terminal association
+        - TUI freeze or crash
+        - Focus, scroll, resize, or search
+        - CLI migration
+        - Removed feature workflow
+        - Other runtime behavior
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: CodexDeck and Codex CLI versions
+      placeholder: CodexDeck 0.3.0; codex-cli 0.145.0
+    validations:
+      required: true
+  - type: input
+    id: frontend
+    attributes:
+      label: Terminal environment and dimensions
+      placeholder: tmux over SSH, 120x36
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed and expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Reviewed and redacted Doctor JSON
+      description: |
+        Run `codexdeck doctor --format json`, inspect it manually, and remove local
+        paths, identifiers, task text, endpoints, and secrets before pasting.
+      render: json
+    validations:
+      required: false

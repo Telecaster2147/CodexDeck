@@ -1,0 +1,43 @@
+name: Codex compatibility report
+description: Report an upstream rollout, SQLite, log, or discovery compatibility issue
+title: "compat: "
+labels:
+  - compatibility
+body:
+  - type: input
+    id: codex_version
+    attributes:
+      label: Codex CLI version
+      description: Paste the output of `codex --version`.
+      placeholder: codex-cli 0.145.0
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Reviewed and redacted Doctor JSON
+      description: |
+        Run `codexdeck doctor --format json`, inspect it manually, remove any remaining
+        local paths or identifiers, and paste the bounded result here.
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Suspected source
+      options:
+        - Rollout JSONL
+        - Codex SQLite
+        - Structured logs
+        - Process discovery
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Describe the displayed state and the state you expected.
+    validations:
+      required: true
