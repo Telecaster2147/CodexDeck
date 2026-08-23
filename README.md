@@ -198,8 +198,9 @@ Diagnosis、text、JSON 和 export 从同一个领域投影生成，不各自重
 
 ## 设置
 
-按 `s` 打开设置中心，可持久化分组、隐藏会话、follow 和主题。Activity 保持默认 Inspector 页面；
-命令行 `--flat` 只覆盖本次运行。设置只写 CodexDeck 自己的配置：
+按 `s` 打开设置中心，可持久化启动动画、分组、隐藏会话、follow 和主题。启动动画默认开启，播放时
+后台准备首个一致快照；Activity 保持默认 Inspector 页面。命令行 `--flat` 只覆盖本次运行。设置只写
+CodexDeck 自己的配置：
 
 ```text
 $XDG_CONFIG_HOME/codexdeck/preferences.json

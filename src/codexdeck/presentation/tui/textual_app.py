@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 from pathlib import Path
+from threading import Thread
 
 from rich.console import Console
 from rich.text import Text
@@ -78,6 +79,12 @@ from codexdeck.presentation.tui.navigation import (
     session_hidden_label as session_hidden_label,
 )
 from codexdeck.presentation.tui.sampling import SamplingCoordinator
+from codexdeck.presentation.tui.startup import (
+    STARTUP_DURATION,
+    STARTUP_FRAME_INTERVAL,
+    StartupOverlay,
+    startup_renderable,
+)
 from codexdeck.presentation.tui.terminal_panel import TerminalLog, TerminalPanel
 from codexdeck.presentation.tui.theme import CODEXDECK_BLUE_THEME, STATE_COLORS
 from codexdeck.utils import format_duration, operator_text
@@ -379,6 +386,8 @@ class CodexDeckApp(App[MonitorSnapshot]):
     CSS_PATH = "codexdeck.tcss"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = APP_BINDINGS
+    STARTUP_FRAME_INTERVAL = STARTUP_FRAME_INTERVAL
+    STARTUP_DURATION = STARTUP_DURATION
 
     def __init__(
         self,
@@ -388,12 +397,16 @@ class CodexDeckApp(App[MonitorSnapshot]):
         use_color: bool = True,
         flat: bool = False,
         sampling: bool = True,
+        startup_animation: bool = False,
         preferences: CodexDeckPreferences | None = None,
         preferences_file: Path | None = None,
+        prepare_on_start: bool = False,
     ) -> None:
         super().__init__(ansi_color=use_color)
         self.register_theme(CODEXDECK_BLUE_THEME)
-        preferences = preferences or CodexDeckPreferences()
+        preferences = preferences or CodexDeckPreferences(
+            startup_animation=startup_animation,
+        )
         self.engine = engine
         self.snapshot = snapshot
         self.preferences = preferences
@@ -401,8 +414,10 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self.grouped = preferences.group_sessions and not flat
         self.show_hidden = preferences.show_hidden_sessions
         self.sampling = sampling
+        self.startup_animation_enabled = preferences.startup_animation
         self.notifications_enabled = preferences.notifications
         self.preferences_file = preferences_file
+        self.prepare_on_start = prepare_on_start
         self.collapsed: set[str] = set()
         self.selected_key = ""
         self.selected_session: SessionHealth | None = None
@@ -428,6 +443,13 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self._status_message_until = 0.0
         self._header_signature: tuple[object, ...] | None = None
         self._status_line_value = ""
+        self._startup_frame = 0
+        self._startup_visible = self.startup_animation_enabled
+        self._startup_animation_complete = not self.startup_animation_enabled
+        self._startup_data_ready = not prepare_on_start
+        self._initial_preparing = prepare_on_start
+        self._startup_interval = None
+        self._startup_timer = None
         self.theme = preferences.theme
 
     def compose(self) -> ComposeResult:
@@ -440,8 +462,22 @@ class CodexDeckApp(App[MonitorSnapshot]):
             yield SessionInspector(id="inspector")
         yield Static("READY", id="status-line")
         yield ShortcutFooter(id="shortcut-footer")
+        yield StartupOverlay(id="startup-overlay")
 
     async def on_mount(self) -> None:
+        overlay = self.query_one(StartupOverlay)
+        if self._startup_visible:
+            self._render_startup()
+            self._startup_interval = self.set_interval(
+                self.STARTUP_FRAME_INTERVAL,
+                self._advance_startup,
+            )
+            self._startup_timer = self.set_timer(
+                self.STARTUP_DURATION,
+                self._complete_startup_animation,
+            )
+        else:
+            overlay.display = False
         self._update_header()
         self._update_status_line()
         self._update_shortcut_footer()
@@ -450,6 +486,52 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self.set_interval(TUI_CLOCK_INTERVAL, self._clock_tick)
         if self.sampling:
             self.set_interval(TUI_EVENT_POLL_INTERVAL, self._poll_live_events)
+        if self.prepare_on_start and self.sampling_coordinator.begin_initial():
+            Thread(
+                target=self._initial_sample_worker,
+                name="codexdeck-initial-sample",
+                daemon=True,
+            ).start()
+
+    def _render_startup(self) -> None:
+        if not self._startup_visible:
+            return
+        compact = self.size.width < 96 or self.size.height < 28
+        try:
+            overlay = self.query_one(StartupOverlay)
+        except NoMatches:
+            self._stop_startup()
+            return
+        overlay.update(startup_renderable(self._startup_frame, compact=compact))
+
+    def _advance_startup(self) -> None:
+        if not self._startup_visible:
+            return
+        self._startup_frame += 1
+        self._render_startup()
+
+    def _complete_startup_animation(self) -> None:
+        self._startup_animation_complete = True
+        if self._startup_data_ready:
+            self._dismiss_startup()
+
+    def _dismiss_startup(self) -> None:
+        if not self._startup_visible:
+            return
+        self._stop_startup()
+        try:
+            self.query_one(StartupOverlay).display = False
+        except NoMatches:
+            return
+
+    def _stop_startup(self) -> None:
+        self._startup_visible = False
+        if self._startup_interval is not None:
+            self._startup_interval.stop()
+            self._startup_interval = None
+        if self._startup_timer is not None:
+            self._startup_timer.stop()
+            self._startup_timer = None
 
     async def _clock_tick(self) -> None:
         """Refresh display-only ages without invoking any collector."""
@@ -469,6 +551,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 return
 
     def on_resize(self, event: events.Resize) -> None:
+        self._render_startup()
         if self.is_mounted and self.selected_session and self._resize_timer is None:
             try:
                 log = self.query_one("#activity-panel", RichLog)
@@ -828,6 +911,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 self._set_status_message(f"SETTINGS ERROR · {error}")
                 return
         self.preferences = preferences
+        self.startup_animation_enabled = preferences.startup_animation
         self.notifications_enabled = preferences.notifications
         self.grouped = preferences.group_sessions and not self._flat_override
         self.show_hidden = preferences.show_hidden_sessions
@@ -1054,6 +1138,14 @@ class CodexDeckApp(App[MonitorSnapshot]):
             return
         self.post_message(SampleCompleted(snapshot))
 
+    def _initial_sample_worker(self) -> None:
+        try:
+            snapshot = self.engine.prepare_initial_snapshot()
+        except Exception as error:
+            self.post_message(SampleCompleted(None, str(error)))
+            return
+        self.post_message(SampleCompleted(snapshot))
+
     def on_sample_completed(self, event: SampleCompleted) -> None:
         self._finish_sample(event.snapshot, event.error)
 
@@ -1074,6 +1166,13 @@ class CodexDeckApp(App[MonitorSnapshot]):
             self._collector_error = ""
             if had_error:
                 self._update_status_line()
+
+        if self._initial_preparing:
+            self._initial_preparing = False
+            self._startup_data_ready = True
+            if self._startup_animation_complete:
+                self._dismiss_startup()
+
     def _show_collector_error(self, message: str) -> None:
         if message == self._collector_error:
             return
@@ -1134,12 +1233,17 @@ def run_textual_tui(
     flat: bool,
     show_all: bool = False,
 ) -> MonitorSnapshot:
-    """Start Textual after preparing the first coherent snapshot."""
+    """Start Textual and prepare the first snapshot behind the optional brand layer."""
     preference_file = preferences_path()
     preferences = load_preferences(preference_file)
     if show_all:
         preferences = replace(preferences, show_hidden_sessions=True)
-    snapshot = engine.prepare_initial_snapshot()
+    if preferences.startup_animation:
+        snapshot = MonitorSnapshot("", engine.interval, [])
+        prepare_on_start = True
+    else:
+        snapshot = engine.prepare_initial_snapshot()
+        prepare_on_start = False
     app = CodexDeckApp(
         engine,
         snapshot,
@@ -1147,5 +1251,6 @@ def run_textual_tui(
         flat=flat,
         preferences=preferences,
         preferences_file=preference_file,
+        prepare_on_start=prepare_on_start,
     )
     return app.run() or snapshot

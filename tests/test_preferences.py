@@ -28,6 +28,7 @@ class PreferencesTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             path = Path(temp) / "nested" / "preferences.json"
             preferences = CodexDeckPreferences(
+                startup_animation=False,
                 group_sessions=False,
                 show_hidden_sessions=True,
                 follow_output=False,
@@ -40,6 +41,7 @@ class PreferencesTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 {
+                    "startup_animation": False,
                     "group_sessions": False,
                     "show_hidden_sessions": True,
                     "follow_output": False,
@@ -71,5 +73,6 @@ class PreferencesTests(unittest.TestCase):
 
             preferences = load_preferences(path)
 
+            self.assertFalse(preferences.startup_animation)
             self.assertTrue(preferences.group_sessions)
             self.assertEqual(preferences.theme, "codexdeck-blue")

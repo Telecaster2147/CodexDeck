@@ -427,6 +427,13 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
                 id="settings-subtitle",
             )
             with VerticalScroll(id="settings-scroll"):
+                yield Static("启动体验", classes="setting-section")
+                yield self._switch_row(
+                    "启动动画",
+                    "下次启动时完整播放品牌动画，同时在后台准备首个快照",
+                    "startup-animation-switch",
+                    self.preferences.startup_animation,
+                )
                 yield Static("默认视图", classes="setting-section")
                 yield self._switch_row(
                     "按工作区分组",
@@ -489,7 +496,7 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
 
     def on_mount(self) -> None:
         self.set_class(self.app.size.width < 64, "narrow")
-        self.query_one("#group-sessions-switch", Switch).focus()
+        self.query_one("#startup-animation-switch", Switch).focus()
 
     def on_resize(self, event: events.Resize) -> None:
         self.set_class(event.size.width < 64, "narrow")
@@ -501,6 +508,7 @@ class SettingsScreen(ModalScreen[CodexDeckPreferences]):
         theme = self.query_one("#theme-select", Select).value
         self.dismiss(
             CodexDeckPreferences(
+                startup_animation=self.query_one("#startup-animation-switch", Switch).value,
                 group_sessions=self.query_one("#group-sessions-switch", Switch).value,
                 show_hidden_sessions=self.query_one("#show-hidden-switch", Switch).value,
                 follow_output=self.query_one("#follow-output-switch", Switch).value,

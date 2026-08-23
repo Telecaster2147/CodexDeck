@@ -11,6 +11,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class CodexDeckPreferences:
+    startup_animation: bool = True
     group_sessions: bool = True
     show_hidden_sessions: bool = False
     follow_output: bool = True
@@ -44,6 +45,7 @@ def load_preferences(path: Path | None = None) -> CodexDeckPreferences:
 
     theme = payload.get("theme")
     return CodexDeckPreferences(
+        startup_animation=boolean("startup_animation", defaults.startup_animation),
         group_sessions=boolean("group_sessions", defaults.group_sessions),
         show_hidden_sessions=boolean(
             "show_hidden_sessions",

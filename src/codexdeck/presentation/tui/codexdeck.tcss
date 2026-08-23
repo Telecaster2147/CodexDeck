@@ -1,7 +1,18 @@
 Screen {
-    layers: base;
+    layers: base startup;
     background: $background;
     color: $text;
+}
+
+#startup-overlay {
+    layer: startup;
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+    background: $background;
+    color: $text;
+    content-align: center middle;
+    text-align: center;
 }
 
 #app-header {

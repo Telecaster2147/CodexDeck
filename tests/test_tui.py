@@ -63,14 +63,17 @@ from codexdeck.presentation.tui.textual_app import (  # noqa: E402
     SessionInspector,
     SettingsScreen,
     ShortcutFooter,
+    StartupOverlay,
     _diagnosis_details_renderable,
     _diagnosis_renderable,
     _timeline_line,
     binding_key_label,
     keyboard_reference,
+    run_textual_tui,
     session_hidden_label,
     session_marker,
     session_status,
+    startup_renderable,
     timeline_entries,
 )
 
@@ -229,6 +232,66 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(variables["panel"], "#1F2937")
             self.assertEqual(variables["primary"], "#38BDF8")
 
+    def test_startup_renderable_has_wide_and_compact_brand_frames(self) -> None:
+        wide = render_plain(startup_renderable(0), width=120)
+        ready = render_plain(startup_renderable(99), width=120)
+        compact = render_plain(startup_renderable(2, compact=True), width=50)
+
+        self.assertIn("██████", wide)
+        self.assertIn("██████╗ ███████╗ ██████╗██╗  ██╗", wide)
+        self.assertIn("CORE", wide)
+        self.assertIn("CONSOLE READY", ready)
+        self.assertIn("CODEXDECK", compact)
+        self.assertNotIn("██████", compact)
+        self.assertLessEqual(max(map(len, compact.splitlines())), 50)
+
+    async def test_startup_overlay_plays_fully_while_initial_sample_prepares(self) -> None:
+        snapshot = make_snapshot(1)
+        engine = FakeEngine(snapshot)
+        empty = MonitorSnapshot("", 2.0, [])
+        app = CodexDeckApp(
+            engine,
+            empty,
+            sampling=False,
+            startup_animation=True,
+            prepare_on_start=True,
+        )
+        app.STARTUP_FRAME_INTERVAL = 0.01
+        app.STARTUP_DURATION = 1.0
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            overlay = app.query_one(StartupOverlay)
+            self.assertTrue(overlay.display)
+            await pilot.pause(0.03)
+            self.assertTrue(overlay.display)
+            self.assertEqual(engine.baselines, 1)
+            self.assertEqual(engine.full_samples, 1)
+            self.assertEqual(len(app.snapshot.sessions), 1)
+            await pilot.pause(1.05)
+            self.assertFalse(overlay.display)
+            await pilot.press("3")
+            self.assertEqual(app.query_one("#detail-tabs", Tabs).active, "terminal-tab")
+
+    def test_run_tui_defaults_to_animation_and_defers_initial_sample(self) -> None:
+        snapshot = make_snapshot(1)
+        engine = FakeEngine(snapshot)
+        preferences = CodexDeckPreferences()
+        module = "codexdeck.presentation.tui.textual_app"
+
+        with (
+            patch(f"{module}.load_preferences", return_value=preferences),
+            patch(f"{module}.CodexDeckApp") as app_class,
+        ):
+            app_class.return_value.run.return_value = None
+            result = run_textual_tui(engine, True, False)
+
+        self.assertTrue(preferences.startup_animation)
+        self.assertEqual(engine.baselines, 0)
+        self.assertEqual(result.sessions, ())
+        _, initial_snapshot = app_class.call_args.args[:2]
+        self.assertEqual(initial_snapshot.sessions, ())
+        self.assertTrue(app_class.call_args.kwargs["prepare_on_start"])
+
     async def test_settings_persists_and_applies_all_preferences(self) -> None:
         snapshot = make_snapshot(1)
         with TemporaryDirectory() as temp:
@@ -237,6 +300,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 FakeEngine(snapshot),
                 snapshot,
                 sampling=False,
+                preferences=CodexDeckPreferences(startup_animation=False),
                 preferences_file=preference_file,
             )
 
@@ -245,6 +309,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("s")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, SettingsScreen)
+                app.screen.query_one("#startup-animation-switch", Switch).value = True
                 app.screen.query_one("#group-sessions-switch", Switch).value = False
                 app.screen.query_one("#show-hidden-switch", Switch).value = True
                 app.screen.query_one("#follow-output-switch", Switch).value = False
@@ -257,6 +322,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(app.show_hidden)
                 self.assertFalse(app.follow)
                 self.assertFalse(app.notifications_enabled)
+                self.assertTrue(app.startup_animation_enabled)
                 self.assertEqual(app.theme, "textual-light")
                 self.assertNotEqual(
                     app.query_one("#app-header").styles.background,
@@ -267,6 +333,7 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 json.loads(preference_file.read_text()),
                 {
+                    "startup_animation": True,
                     "group_sessions": False,
                     "show_hidden_sessions": True,
                     "follow_output": False,
@@ -287,8 +354,8 @@ class TextualTuiTests(unittest.IsolatedAsyncioTestCase):
             scroll = app.screen.query_one("#settings-scroll")
             self.assertLessEqual(dialog.size.width, 68)
             self.assertGreater(scroll.virtual_size.height, scroll.size.height)
-            self.assertEqual(len(app.screen.query(".setting-row")), 5)
-            self.assertEqual(len(app.screen.query(Switch)), 4)
+            self.assertEqual(len(app.screen.query(".setting-row")), 6)
+            self.assertEqual(len(app.screen.query(Switch)), 5)
             self.assertEqual(len(app.screen.query(Select)), 1)
 
             scroll.scroll_end(animate=False)
