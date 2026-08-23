@@ -1615,6 +1615,310 @@
         "terminal_store": false,
         "tui": true
       }
+    },
+    {
+      "id": "GT-LIFECYCLE-TP-002",
+      "domain": "lifecycle",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "MODEL_PROGRESS"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI was generating after attachment began in the middle of an active turn.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "mid_turn_model_progress",
+        "basis": "Typed model progress is a current phase baseline even when TURN_STARTED predates the retained tail.",
+        "invalidates": "Do not leave lifecycle unknown solely because the retained stream begins after TURN_STARTED."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-LIFECYCLE-TP-003",
+      "domain": "lifecycle",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TOOL_RUNNING"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI showed an active tool after attachment began in the middle of the invocation.",
+      "codexdeck_expected": {
+        "lifecycle": "RUNNING_TOOL",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "mid_turn_tool_running",
+        "basis": "Typed tool progress establishes the running-tool phase without requiring an earlier turn baseline.",
+        "invalidates": "Do not downgrade a typed active tool to unknown when its TURN_STARTED record is outside lookback."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-LIFECYCLE-TP-004",
+      "domain": "lifecycle",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "COMPACTING"
+          },
+          {
+            "timestamp": 91,
+            "kind": "KEEPALIVE"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI remained in compaction while a keepalive arrived.",
+      "codexdeck_expected": {
+        "lifecycle": "COMPACTING",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "compaction_remains_active",
+        "basis": "Compaction remains authoritative until a typed completion or terminal turn event.",
+        "invalidates": "Do not let non-phase keepalive traffic end an active compaction phase."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-LIFECYCLE-TP-005",
+      "domain": "lifecycle",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "COMPACTING"
+          },
+          {
+            "timestamp": 91,
+            "kind": "COMPACT_COMPLETED"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI resumed generation after compaction completed.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "compaction_completed",
+        "basis": "A typed compaction completion closes COMPACTING and restores the active model phase.",
+        "invalidates": "Do not leave lifecycle stuck in COMPACTING after its completion edge."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-LIFECYCLE-FP-002",
+      "domain": "lifecycle",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "MODEL_PROGRESS"
+          },
+          {
+            "timestamp": 91,
+            "kind": "KEEPALIVE"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI continued generating when a later keepalive arrived.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "keepalive_is_not_phase",
+        "basis": "Keepalive is freshness evidence and does not supersede the latest phase-bearing protocol event.",
+        "invalidates": "Do not translate a recent keepalive into waiting or completed lifecycle."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-LIFECYCLE-FP-003",
+      "domain": "lifecycle",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TOOL_RUNNING"
+          },
+          {
+            "timestamp": 91,
+            "kind": "MODEL_CONFIG"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI still showed the tool running after a model configuration record arrived.",
+      "codexdeck_expected": {
+        "lifecycle": "RUNNING_TOOL",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "model_config_is_not_phase",
+        "basis": "Model configuration updates metadata and cannot replace a typed tool phase.",
+        "invalidates": "Do not derive lifecycle from the newest record regardless of record authority."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-LIFECYCLE-FP-004",
+      "domain": "lifecycle",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 92,
+            "kind": "MODEL_PROGRESS"
+          },
+          {
+            "timestamp": 91,
+            "kind": "TURN_COMPLETED"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI was generating in a newer phase when an older completion record arrived late.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "protocol_uncertain": false
+      },
+      "adjudication": {
+        "semantic": "late_terminal_event",
+        "basis": "Event-time ordering keeps the newer phase-bearing progress authoritative over late historical completion.",
+        "invalidates": "Do not mark a current turn completed from a terminal event older than observed progress."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-TERMINAL-TP-002",
+      "domain": "terminal_association",
+      "classification": "true_positive",
+      "runner": "terminal",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "updates": [
+          {
+            "source_id": "SOURCE_ONE",
+            "observed_at": 1,
+            "call_id": "CALL_ONE",
+            "process_id": "PROCESS_ONE",
+            "terminal_candidate": true,
+            "status": "running"
+          },
+          {
+            "source_id": "SOURCE_TWO",
+            "observed_at": 2,
+            "call_id": "CALL_TWO",
+            "process_id": "PROCESS_TWO",
+            "terminal_candidate": true,
+            "status": "running"
+          }
+        ]
+      },
+      "codex_ui_observation": "Two parallel background commands were visible as separate active operations.",
+      "codexdeck_expected": {
+        "confirmed": 2,
+        "ambiguous": 0,
+        "conflicting": 0
+      },
+      "adjudication": {
+        "semantic": "parallel_process_ownership",
+        "basis": "Distinct protocol process identities preserve two independently confirmed terminal operations.",
+        "invalidates": "Do not collapse parallel calls into one terminal because their lifetimes overlap."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": true,
+        "tui": true
+      }
     }
   ]
 }

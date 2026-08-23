@@ -64,7 +64,7 @@ class GroundTruthTests(unittest.TestCase):
         protocol = self.manifest["adjudication_protocol"]
         self.assertEqual(protocol["authority_order"][0], "codex_ui_direct_observation")
         cases = self.manifest["cases"]
-        self.assertGreaterEqual(len(cases), 30)
+        self.assertGreaterEqual(len(cases), 50)
         domains = {case["domain"] for case in cases}
         self.assertTrue(
             {
