@@ -45,6 +45,7 @@ from codexdeck.models import (
 )
 from codexdeck.reasons import derive_axis_reasons, evidence_timeline, reason_diagnosis
 from codexdeck.state_axes import AxisDerivationMixin
+from codexdeck.state_dedupe import DEDUPE_FILTER_BITS, BoundedDedupeFilter
 from codexdeck.state_summaries import SummaryDerivationMixin
 
 PROGRESS_KINDS = {
@@ -133,9 +134,7 @@ CLOCK_POLICIES = {
     "process": (2.0, 1.0, "observer_process_wall_clock"),
     "detector": (2.0, 1.0, "observer_wall_clock"),
 }
-DEDUPE_FILTER_BITS = 1 << 18
-DEDUPE_FILTER_HASHES = 4
-DEDUPE_FILTER_DEGRADED_RATIO = 0.90
+
 MAX_MUTABLE_STREAM_IDENTITIES_PER_SESSION = 32
 
 
@@ -151,47 +150,6 @@ class TurnDerivationContext:
     failure_event: NormalizedEvent | None
     compact_abort: NormalizedEvent | None
     process_exit: NormalizedEvent | None
-
-
-class BoundedDedupeFilter:
-    """Fixed-size duplicate memory with no false negatives for inserted keys."""
-
-    def __init__(
-        self,
-        bit_count: int = DEDUPE_FILTER_BITS,
-        hash_count: int = DEDUPE_FILTER_HASHES,
-    ) -> None:
-        if bit_count <= 0 or bit_count & (bit_count - 1):
-            raise ValueError("bit_count must be a positive power of two")
-        self.bit_count = bit_count
-        self.hash_count = hash_count
-        self.bits = 0
-
-    def _positions(self, value: str) -> tuple[int, ...]:
-        digest = hashlib.blake2b(value.encode("utf-8"), digest_size=32).digest()
-        mask = self.bit_count - 1
-        return tuple(
-            int.from_bytes(digest[index * 4 : index * 4 + 4], "little") & mask
-            for index in range(self.hash_count)
-        )
-
-    def __contains__(self, value: str) -> bool:
-        return all(self.bits & (1 << position) for position in self._positions(value))
-
-    def add(self, value: str) -> None:
-        for position in self._positions(value):
-            self.bits |= 1 << position
-
-    def __len__(self) -> int:
-        return self.bits.bit_count()
-
-    @property
-    def fill_ratio(self) -> float:
-        return len(self) / self.bit_count
-
-    @property
-    def degraded(self) -> bool:
-        return self.fill_ratio >= DEDUPE_FILTER_DEGRADED_RATIO
 
 
 class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
@@ -235,9 +193,9 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
         self.network_probe_complete: dict[str | SessionIdentity, bool] = {}
         self.silence_probe_complete: dict[str | SessionIdentity, bool] = {}
         self.event_retention_dropped: dict[str | SessionIdentity, int] = defaultdict(int)
-        self.axis_baselines: dict[
-            str | SessionIdentity, dict[str, NormalizedEvent]
-        ] = defaultdict(dict)
+        self.axis_baselines: dict[str | SessionIdentity, dict[str, NormalizedEvent]] = defaultdict(
+            dict
+        )
         self.clock_sequence = 0
 
     def _remember_axis_baselines(
@@ -1041,10 +999,15 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
         current_turn = (
             not task_terminal or task_start.timestamp > task_terminal.timestamp
             if task_start
-            else bool(latest_active and (not task_terminal or latest_active.timestamp > task_terminal.timestamp))
+            else bool(
+                latest_active
+                and (not task_terminal or latest_active.timestamp > task_terminal.timestamp)
+            )
         )
         relevant = [
-            event for event in state_events if not task_start or event.timestamp >= task_start.timestamp
+            event
+            for event in state_events
+            if not task_start or event.timestamp >= task_start.timestamp
         ]
         compact_start = self._latest(relevant, "COMPACTING")
         compact_end = self._latest(
@@ -1166,7 +1129,9 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             else self._latest(relevant, *DISPLAY_PHASE_KINDS)
         )
         if phase_event:
-            state.phase = EVENT_LABELS.get(phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value])
+            state.phase = EVENT_LABELS.get(
+                phase_event.kind, LIFECYCLE_LABELS[state.lifecycle.value]
+            )
             state.phase_since = phase_event.timestamp
             state.lifecycle_confidence = phase_event.confidence
             state.lifecycle_provenance = phase_event.provenance
@@ -1182,7 +1147,9 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
         task_terminal = context.task_terminal
         recovery_events = relevant
         if task_terminal and not context.current_turn:
-            recovery_events = [event for event in relevant if event.timestamp > task_terminal.timestamp]
+            recovery_events = [
+                event for event in relevant if event.timestamp > task_terminal.timestamp
+            ]
         candidates = [
             event
             for event in (
@@ -1283,9 +1250,7 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             state.alert = "SILENCE_STALL"
             state.alert_level = "严重"
             state.alert_reason = state.silence.reason
-            state.alert_age_seconds = max(
-                0, int(now - (state.observation.last_semantic_at or now))
-            )
+            state.alert_age_seconds = max(0, int(now - (state.observation.last_semantic_at or now)))
         pending_agents = list(state.agents)
         agent_errors = []
         while pending_agents:
