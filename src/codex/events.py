@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 import shlex
 from datetime import datetime
@@ -11,9 +11,9 @@ from typing import Any
 
 from config import EVENT_LABELS
 from models import Confidence, FailureInfo, NormalizedEvent, UnparsedPayload
-from utils import message_text, one_line, redact_sensitive, redact_structured
-from .state_store import LogRecord
+from utils import message_text, redact_sensitive, redact_structured
 
+from .log_events import normalize_log as normalize_log
 
 NON_TURN_FAILURES = {"active_turn_not_steerable", "thread_rollback_failed"}
 COMPACT_COMMAND = re.compile(r"^/compact(?:\s+.*)?$", re.IGNORECASE)
@@ -677,9 +677,12 @@ def normalize_attention_record(
     if item_type in attention_types:
         state = attention_types[item_type]
         request = payload.get("request")
-        if item_type == "elicitation_request" and isinstance(request, dict):
-            if str(request.get("mode") or "").lower() in {"url", "auth"}:
-                state = "AUTH_ELICITATION"
+        if (
+            item_type == "elicitation_request"
+            and isinstance(request, dict)
+            and str(request.get("mode") or "").lower() in {"url", "auth"}
+        ):
+            state = "AUTH_ELICITATION"
         return [_attention_event(timestamp, payload, source_id, turn_id, state)]
     if item_type not in {
         "exec_approval",
@@ -1308,110 +1311,4 @@ def normalize_rollout_record(
             source_id,
             turn_id,
         )
-    return []
-
-
-def normalize_log(record: LogRecord) -> list[NormalizedEvent]:
-    body = record.body
-    lowered = body.lower()
-    source_id = f"log:{record.log_id}"
-    turn_id = ""
-    if record.target == "codex_core::responses_retry":
-        if "falling back from websockets to https" in lowered:
-            return [
-                _event(
-                    record.timestamp,
-                    "TRANSPORT_FALLBACK",
-                    one_line(body),
-                    source="log",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    confidence=Confidence.MEDIUM,
-                )
-            ]
-        if "stream disconnected" in lowered or "idle timeout waiting for sse" in lowered:
-            return [
-                _event(
-                    record.timestamp,
-                    "RECONNECTING",
-                    one_line(body),
-                    source="log",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    confidence=Confidence.MEDIUM,
-                )
-            ]
-    if record.target == "codex_http_client::transport" and "/responses" in lowered:
-        compacting = any(
-            marker in lowered
-            for marker in ("run_auto_compact{", "run_remote_compact", "run_pre_sampling_compact")
-        )
-        if not compacting and " post to " not in lowered:
-            return []
-        kind = "COMPACTING" if compacting else "REQUEST_SENT"
-        trigger = "auto" if "run_auto_compact" in lowered else "unknown"
-        return [
-            _event(
-                record.timestamp,
-                kind,
-                source="log",
-                source_id=source_id,
-                turn_id=turn_id,
-                confidence=Confidence.MEDIUM,
-                metadata={"trigger": trigger} if compacting else {},
-            )
-        ]
-    if record.target == "codex_api::sse::responses" and "sse event: " in lowered:
-        encoded = body.split("SSE event: ", 1)[1]
-        try:
-            payload = json.loads(encoded)
-        except json.JSONDecodeError:
-            match = re.search(r'"type"\s*:\s*"([^"]+)"', encoded)
-            payload = {"type": match.group(1) if match else ""}
-        event_type = str(payload.get("type") or "")
-        response = payload.get("response")
-        response = response if isinstance(response, dict) else {}
-        if event_type == "response.completed" and response.get("object") == "response.compaction":
-            return [
-                _event(
-                    record.timestamp,
-                    "COMPACT_COMPLETED",
-                    source="sse",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    confidence=Confidence.MEDIUM,
-                )
-            ]
-        mapping = {
-            "keepalive": "KEEPALIVE",
-            "response.created": "RESPONSE_STARTED",
-            "response.completed": "MODEL_PROGRESS",
-            "response.failed": "TURN_FAILED",
-            "response.incomplete": "TURN_FAILED",
-        }
-        mapped_kind = mapping.get(event_type)
-        if mapped_kind:
-            failure = None
-            detail = event_type
-            if mapped_kind == "TURN_FAILED":
-                error = response.get("error")
-                error = error if isinstance(error, dict) else {}
-                message = redact_sensitive(
-                    str(error.get("message") or response.get("status_details") or event_type)
-                )
-                category = str(error.get("code") or event_type.replace(".", "_"))
-                failure = FailureInfo(category, message, "", turn_id, record.timestamp, "sse")
-                detail = message
-            return [
-                _event(
-                    record.timestamp,
-                    mapped_kind,
-                    detail,
-                    source="sse",
-                    source_id=source_id,
-                    turn_id=turn_id,
-                    confidence=Confidence.MEDIUM,
-                    failure=failure,
-                )
-            ]
     return []
