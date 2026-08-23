@@ -16,13 +16,13 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from app import exit_code  # noqa: E402
-from codex.paths import ProcReader, ResolvedInstance  # noqa: E402
-from codex.processes import DiscoveryResult  # noqa: E402
-from codex.rollout import RolloutActivity  # noqa: E402
-from codex.terminal import TerminalUpdate  # noqa: E402
-from engine import MonitorEngine  # noqa: E402
-from models import (  # noqa: E402
+from codexdeck.app import exit_code  # noqa: E402
+from codexdeck.codex.paths import ProcReader, ResolvedInstance  # noqa: E402
+from codexdeck.codex.processes import DiscoveryResult  # noqa: E402
+from codexdeck.codex.rollout import RolloutActivity  # noqa: E402
+from codexdeck.codex.terminal import TerminalUpdate  # noqa: E402
+from codexdeck.engine import MonitorEngine  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AdapterResult,
     AdapterStatus,
     ChildProcessActivity,
@@ -37,8 +37,8 @@ from models import (  # noqa: E402
     SessionHealth,
     SocketInfo,
 )
-from presentation.projection import primitive_value  # noqa: E402
-from utils import CommandError, CommandExecutionResult  # noqa: E402
+from codexdeck.presentation.projection import primitive_value  # noqa: E402
+from codexdeck.utils import CommandError, CommandExecutionResult  # noqa: E402
 
 
 class FakeDiscovery:

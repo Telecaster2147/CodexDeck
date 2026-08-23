@@ -8,7 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.events import (  # noqa: E402
+from codexdeck.codex.events import (  # noqa: E402
     normalize_attention_record,
     normalize_collaboration_record,
     normalize_compaction_record,
@@ -17,8 +17,8 @@ from codex.events import (  # noqa: E402
     normalize_rollout_record,
     normalize_tool_record,
 )
-from codex.state_store import LogRecord  # noqa: E402
-from models import (  # noqa: E402
+from codexdeck.codex.state_store import LogRecord  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AlertStatus,
     AttentionState,
     Confidence,
@@ -38,10 +38,10 @@ from models import (  # noqa: E402
     SocketInfo,
     TerminalIdentity,
 )
-from network.classifier import assess_process_network  # noqa: E402
-from network.sockets import parse_ss_output  # noqa: E402
-from state_machine import BoundedDedupeFilter, SessionStateMachine  # noqa: E402
-from utils import redact_sensitive, redact_structured  # noqa: E402
+from codexdeck.network.classifier import assess_process_network  # noqa: E402
+from codexdeck.network.sockets import parse_ss_output  # noqa: E402
+from codexdeck.state_machine import BoundedDedupeFilter, SessionStateMachine  # noqa: E402
+from codexdeck.utils import redact_sensitive, redact_structured  # noqa: E402
 
 
 def process(session_id: str = "session-1") -> ProcessInfo:
@@ -720,8 +720,8 @@ class EventNormalizationTests(unittest.TestCase):
         self.assertEqual(events[0].kind, "OPERATION_ERROR")
 
     def test_sse_terminal_failure_has_error_message(self) -> None:
-        from codex.events import normalize_log
-        from codex.state_store import LogRecord
+        from codexdeck.codex.events import normalize_log
+        from codexdeck.codex.state_store import LogRecord
 
         body = (
             'SSE event: {"type":"response.failed","response":'

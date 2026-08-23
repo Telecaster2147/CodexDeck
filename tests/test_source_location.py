@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from models import ProcessIdentity, ProcessInfo
-from presentation.privacy import public_value
-from presentation.source_location import source_terminal_location
+from codexdeck.models import ProcessIdentity, ProcessInfo
+from codexdeck.presentation.privacy import public_value
+from codexdeck.presentation.source_location import source_terminal_location
 
 
 def process(**overrides: object) -> ProcessInfo:

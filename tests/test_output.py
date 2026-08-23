@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from models import (  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AgentNode,
     AttentionRequest,
     AttentionState,
@@ -38,11 +38,11 @@ from models import (  # noqa: E402
     ToolExecutionSummary,
     TurnSummary,
 )
-from presentation.doctor import render_doctor_json  # noqa: E402
-from presentation.export import session_export  # noqa: E402
-from presentation.json_output import render_json  # noqa: E402
-from presentation.privacy import public_value  # noqa: E402
-from presentation.text import render_text  # noqa: E402
+from codexdeck.presentation.doctor import render_doctor_json  # noqa: E402
+from codexdeck.presentation.export import session_export  # noqa: E402
+from codexdeck.presentation.json_output import render_json  # noqa: E402
+from codexdeck.presentation.privacy import public_value  # noqa: E402
+from codexdeck.presentation.text import render_text  # noqa: E402
 
 
 def snapshot() -> MonitorSnapshot:

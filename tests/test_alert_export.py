@@ -8,7 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from models import (  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AlertStatus,
     Confidence,
     ConnectionAssessment,
@@ -20,11 +20,11 @@ from models import (  # noqa: E402
     ProcessInfo,
     TokenUsageSummary,
 )
-from presentation.export import (  # noqa: E402
+from codexdeck.presentation.export import (  # noqa: E402
     render_export_json,
     session_export,
 )
-from state_machine import SessionStateMachine  # noqa: E402
+from codexdeck.state_machine import SessionStateMachine  # noqa: E402
 
 
 def process() -> ProcessInfo:

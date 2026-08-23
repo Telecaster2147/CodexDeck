@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from models import (
+from codexdeck.models import (
     CodexPaths,
     CollectorHealth,
     InstanceSnapshot,
@@ -13,7 +13,7 @@ from models import (
     TerminalCapability,
     TerminalSessionSummary,
 )
-from temporal import apply_temporal_completeness, build_temporal_cut
+from codexdeck.temporal import apply_temporal_completeness, build_temporal_cut
 
 
 def instance(observed_at: float) -> InstanceSnapshot:

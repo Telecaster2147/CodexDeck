@@ -6,16 +6,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex.file_tail import RegularFileTailCollector
-from codex.rollout import RolloutReader, TerminalMetadataBackfillCursor
-from codex.terminal import (
+from codexdeck.codex.file_tail import RegularFileTailCollector
+from codexdeck.codex.rollout import RolloutReader, TerminalMetadataBackfillCursor
+from codexdeck.codex.terminal import (
     TerminalProtocolParser,
     TerminalStore,
     TerminalUpdate,
     extract_terminal_updates,
     sanitize_terminal_text,
 )
-from models import (
+from codexdeck.models import (
     ChildProcessActivity,
     InstanceIdentity,
     ProcessIdentity,
@@ -30,7 +30,7 @@ class TerminalTranscriptTests(unittest.TestCase):
         store = TerminalStore()
         old_scope = RolloutIdentity(Path("/workspace-a/old.jsonl"), 1, 10, 0)
         new_scope = RolloutIdentity(Path("/workspace-a/new.jsonl"), 1, 11, 0)
-        with patch("codex.terminal.MAX_TERMINAL_SOURCE_IDS_PER_SCOPE", 3):
+        with patch("codexdeck.codex.terminal.MAX_TERMINAL_SOURCE_IDS_PER_SCOPE", 3):
             for index in range(3):
                 store.apply(
                     "session",
@@ -106,7 +106,7 @@ class TerminalTranscriptTests(unittest.TestCase):
     def test_terminal_correlation_aliases_are_bounded_per_retained_terminal(self) -> None:
         store = TerminalStore()
         scope = RolloutIdentity(Path("/workspace-a/rollout.jsonl"), 1, 10, 0)
-        with patch("codex.terminal.MAX_TERMINAL_ALIASES_PER_TERMINAL", 2):
+        with patch("codexdeck.codex.terminal.MAX_TERMINAL_ALIASES_PER_TERMINAL", 2):
             for index in range(8):
                 store.apply(
                     "session",
@@ -1000,8 +1000,8 @@ const results = await Promise.all([
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
             with (
-                patch("codex.rollout.MAX_SESSION_TAIL", 700),
-                patch("codex.rollout.MAX_TERMINAL_METADATA_BACKFILL", 16 * 1024),
+                patch("codexdeck.codex.rollout.MAX_SESSION_TAIL", 700),
+                patch("codexdeck.codex.rollout.MAX_TERMINAL_METADATA_BACKFILL", 16 * 1024),
             ):
                 reader = RolloutReader()
                 result = reader.read_with_activity(path)
@@ -1080,10 +1080,10 @@ const results = await Promise.all([
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
             with (
-                patch("codex.rollout.MAX_SESSION_TAIL", 700),
-                patch("codex.rollout.MAX_TERMINAL_METADATA_BACKFILL", 8 * 1024),
-                patch("codex.rollout.MAX_TERMINAL_METADATA_BACKFILL_CHUNK", 256),
-                patch("codex.rollout.TERMINAL_METADATA_LINE_OVERLAP", 512),
+                patch("codexdeck.codex.rollout.MAX_SESSION_TAIL", 700),
+                patch("codexdeck.codex.rollout.MAX_TERMINAL_METADATA_BACKFILL", 8 * 1024),
+                patch("codexdeck.codex.rollout.MAX_TERMINAL_METADATA_BACKFILL_CHUNK", 256),
+                patch("codexdeck.codex.rollout.TERMINAL_METADATA_LINE_OVERLAP", 512),
             ):
                 reader = RolloutReader()
                 store = TerminalStore()
@@ -1163,7 +1163,7 @@ const results = await Promise.all([
                 for index in range(6)
             )
 
-            with patch("codex.rollout.MAX_TERMINAL_METADATA_PROCESS_IDS", 2):
+            with patch("codexdeck.codex.rollout.MAX_TERMINAL_METADATA_PROCESS_IDS", 2):
                 reader._advance_terminal_metadata_backfill(
                     path,
                     stat.st_size,
@@ -1236,7 +1236,7 @@ const results = await Promise.all([
             )
             path.write_text("".join(json.dumps(record) + "\n" for record in initial))
 
-            with patch("codex.rollout.MAX_SESSION_TAIL", 700):
+            with patch("codexdeck.codex.rollout.MAX_SESSION_TAIL", 700):
                 reader = RolloutReader()
                 first = reader.read_with_activity(path)
                 self.assertEqual(first.terminal_updates, ())
@@ -2047,7 +2047,7 @@ const results = await Promise.all([
 
     def test_global_buffer_limit_marks_dropped_bytes(self) -> None:
         store = TerminalStore()
-        with patch("codex.terminal.MAX_GLOBAL_TERMINAL_BYTES", 10):
+        with patch("codexdeck.codex.terminal.MAX_GLOBAL_TERMINAL_BYTES", 10):
             for index in range(2):
                 store.apply(
                     f"session-{index}",
@@ -2192,7 +2192,7 @@ const results = await Promise.all([
             )
             collector = RegularFileTailCollector(root / "proc")
 
-            with patch("codex.terminal.os.getpid", return_value=44):
+            with patch("codexdeck.codex.terminal.os.getpid", return_value=44):
                 updates = collector.read("session", str(workspace), children, 1.0)
 
         active = [update for update in updates if update.status == "running"]

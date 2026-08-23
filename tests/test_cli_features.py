@@ -12,9 +12,9 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from app import AppOptions, _run_application, _select_export_session  # noqa: E402
-from cli import _normalize_args, build_parser, required_commands_available  # noqa: E402
-from models import (  # noqa: E402
+from codexdeck.app import AppOptions, _run_application, _select_export_session  # noqa: E402
+from codexdeck.cli import _normalize_args, build_parser, required_commands_available  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     CodexPaths,
     InstanceSnapshot,
     MonitorSnapshot,
@@ -23,7 +23,7 @@ from models import (  # noqa: E402
     ProcessIdentity,
     ProcessInfo,
 )
-from state_machine import SessionStateMachine  # noqa: E402
+from codexdeck.state_machine import SessionStateMachine  # noqa: E402
 
 
 def fixture() -> tuple[MonitorSnapshot, SessionStateMachine]:
@@ -102,10 +102,10 @@ def options(command: str, **values: object) -> AppOptions:
 
 class CliFeatureTests(unittest.TestCase):
     def test_only_ps_is_a_hard_command_dependency(self) -> None:
-        with patch("cli.shutil.which", side_effect=lambda command: None if command == "ss" else "/bin/ps"):
+        with patch("codexdeck.cli.shutil.which", side_effect=lambda command: None if command == "ss" else "/bin/ps"):
             required_commands_available()
         with (
-            patch("cli.shutil.which", return_value=None),
+            patch("codexdeck.cli.shutil.which", return_value=None),
             self.assertRaisesRegex(RuntimeError, "ps"),
         ):
             required_commands_available()
@@ -219,9 +219,9 @@ class CliFeatureTests(unittest.TestCase):
         engine = FakeEngine(snapshot, machine)
         output = io.StringIO()
         with (
-            patch("app.sys.stdin.isatty", return_value=False),
-            patch("app.sys.stdout.isatty", return_value=False),
-            patch("app.time.sleep") as sleep,
+            patch("codexdeck.app.sys.stdin.isatty", return_value=False),
+            patch("codexdeck.app.sys.stdout.isatty", return_value=False),
+            patch("codexdeck.app.time.sleep") as sleep,
             redirect_stdout(output),
         ):
             result = _run_application(engine, options("monitor"))

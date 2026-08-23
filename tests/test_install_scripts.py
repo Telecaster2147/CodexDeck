@@ -14,28 +14,28 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
-from config import VERSION
-from presentation.doctor import DOCTOR_SCHEMA_VERSION
-from presentation.export import EXPORT_SCHEMA_VERSION
-from presentation.json_output import SCHEMA_VERSION
+from codexdeck.config import VERSION
+from codexdeck.presentation.doctor import DOCTOR_SCHEMA_VERSION
+from codexdeck.presentation.export import EXPORT_SCHEMA_VERSION
+from codexdeck.presentation.json_output import SCHEMA_VERSION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallScriptTests(unittest.TestCase):
-    def test_package_manifest_includes_runtime_top_level_modules(self) -> None:
+    def test_package_uses_one_non_colliding_namespace(self) -> None:
         pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        modules = set(pyproject["tool"]["setuptools"]["py-modules"])
+        setuptools = pyproject["tool"]["setuptools"]
 
-        for module in (
-            "engine_collectors",
-            "engine_refresh",
-            "state_axes",
-            "state_summaries",
-            "temporal",
-        ):
-            self.assertIn(module, modules)
-            self.assertTrue((PROJECT_ROOT / "src" / f"{module}.py").is_file())
+        self.assertNotIn("py-modules", setuptools)
+        self.assertEqual(
+            pyproject["tool"]["setuptools"]["packages"]["find"]["include"],
+            ["codexdeck*"],
+        )
+        self.assertEqual(pyproject["project"]["scripts"]["codexdeck"], "codexdeck.cli:run")
+        self.assertTrue((PROJECT_ROOT / "src" / "codexdeck" / "__init__.py").is_file())
+        for top_level in ("config.py", "models.py", "utils.py", "codex", "network", "presentation"):
+            self.assertFalse((PROJECT_ROOT / "src" / top_level).exists(), top_level)
 
     def test_scripts_are_executable_and_valid_posix_shell(self) -> None:
         for name in ("install.sh", "uninstall.sh"):

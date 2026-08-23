@@ -7,16 +7,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex.compatibility import (
+from codexdeck.codex.compatibility import (
     COMPATIBILITY_HANDLERS,
     SUPPORTED_CODEX_RELEASES,
     compatibility_stats,
 )
-from codex.events import normalize_log
-from codex.replay import ProtocolReplayRunner
-from codex.state_store import LogRecord, StateStore
-from engine_state import ENGINE_STATE_OWNERS, engine_state_fields
-from models import CodexPaths
+from codexdeck.codex.events import normalize_log
+from codexdeck.codex.replay import ProtocolReplayRunner
+from codexdeck.codex.state_store import LogRecord, StateStore
+from codexdeck.engine_state import ENGINE_STATE_OWNERS, engine_state_fields
+from codexdeck.models import CodexPaths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
@@ -170,7 +170,7 @@ class StaticQualityBudgetTests(unittest.TestCase):
         self.assertTrue((PROJECT_ROOT / ".github/ISSUE_TEMPLATE/runtime.yml").is_file())
 
     def test_monitor_engine_state_has_one_declared_owner(self) -> None:
-        tree = ast.parse((PROJECT_ROOT / "src" / "engine.py").read_text())
+        tree = ast.parse((PROJECT_ROOT / "src" / "codexdeck" / "engine.py").read_text())
         monitor_engine = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "MonitorEngine"
         )
@@ -202,8 +202,8 @@ class StaticQualityBudgetTests(unittest.TestCase):
 
     def test_engine_mixins_declare_shared_state_without_owning_initializers(self) -> None:
         for relative, class_name in (
-            ("src/engine_collectors.py", "CollectorStagesMixin"),
-            ("src/engine_refresh.py", "FastRefreshMixin"),
+            ("src/codexdeck/engine_collectors.py", "CollectorStagesMixin"),
+            ("src/codexdeck/engine_refresh.py", "FastRefreshMixin"),
         ):
             with self.subTest(module=relative):
                 tree = ast.parse((PROJECT_ROOT / relative).read_text())

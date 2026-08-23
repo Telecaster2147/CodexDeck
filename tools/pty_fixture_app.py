@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from models import (  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     CodexPaths,
     InstanceSnapshot,
     MonitorSnapshot,
@@ -21,9 +21,9 @@ from models import (  # noqa: E402
     TerminalChunk,
     TerminalSessionSummary,
 )
-from preferences import CodexDeckPreferences  # noqa: E402
-from presentation.tui.textual_app import CodexDeckApp  # noqa: E402
-from state_machine import SessionStateMachine  # noqa: E402
+from codexdeck.preferences import CodexDeckPreferences  # noqa: E402
+from codexdeck.presentation.tui.textual_app import CodexDeckApp  # noqa: E402
+from codexdeck.state_machine import SessionStateMachine  # noqa: E402
 
 
 class FixtureEngine:

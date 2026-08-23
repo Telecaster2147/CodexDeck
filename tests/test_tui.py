@@ -28,7 +28,7 @@ from textual.widgets import (  # noqa: E402
     Tabs,
 )
 
-from models import (  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AttentionRequest,
     AttentionState,
     AxisCompleteness,
@@ -54,9 +54,9 @@ from models import (  # noqa: E402
     TokenUsageSummary,
     UnparsedPayload,
 )
-from preferences import CodexDeckPreferences  # noqa: E402
-from presentation.tui.sampling import SamplingCoordinator  # noqa: E402
-from presentation.tui.textual_app import (  # noqa: E402
+from codexdeck.preferences import CodexDeckPreferences  # noqa: E402
+from codexdeck.presentation.tui.sampling import SamplingCoordinator  # noqa: E402
+from codexdeck.presentation.tui.textual_app import (  # noqa: E402
     CodexDeckApp,
     NavigationItem,
     SampleCompleted,

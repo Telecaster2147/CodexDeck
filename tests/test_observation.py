@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex.process_activity import ProcessActivityCollector
-from codex.rollout import RolloutReader
-from models import (
+from codexdeck.codex.process_activity import ProcessActivityCollector
+from codexdeck.codex.rollout import RolloutReader
+from codexdeck.models import (
     LifecycleState,
     NetworkEvidence,
     NetworkState,
@@ -17,7 +17,7 @@ from models import (
     ProcessTreeActivity,
     SilenceState,
 )
-from state_machine import SessionStateMachine
+from codexdeck.state_machine import SessionStateMachine
 
 
 def _process() -> ProcessInfo:

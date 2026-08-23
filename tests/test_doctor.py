@@ -10,9 +10,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from app import AppOptions, _run_application  # noqa: E402
-from cli import build_parser  # noqa: E402
-from models import (  # noqa: E402
+from codexdeck.app import AppOptions, _run_application  # noqa: E402
+from codexdeck.cli import build_parser  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AdapterResult,
     AdapterStatus,
     CapabilityMode,
@@ -31,7 +31,7 @@ from models import (  # noqa: E402
     SessionHealth,
     SourceCapabilities,
 )
-from presentation.doctor import (  # noqa: E402
+from codexdeck.presentation.doctor import (  # noqa: E402
     doctor_dict,
     doctor_exit_code,
     render_doctor_json,

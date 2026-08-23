@@ -5,29 +5,29 @@
     "ruff_hard_limit": 44
   },
   "complex_functions": [
-    "codex.events.normalize_rollout_record",
-    "codex.rollout.RolloutReader.read_with_activity",
-    "codex.rollout.RolloutReader._terminal_metadata_backfill_step",
-    "codex.terminal.TerminalStore.apply",
-    "codex.terminal.TerminalStore.reconcile_children",
-    "codex.file_tail.RegularFileTailCollector.read",
-    "engine.MonitorEngine._collect_full_sample",
-    "presentation.text._session_summary_lines",
-    "presentation.tui.activity.timeline_entries",
-    "presentation.tui.activity._timeline_line",
-    "presentation.tui.diagnosis._diagnosis_renderable",
-    "presentation.tui.textual_app.CodexDeckApp._rebuild_navigation",
-    "state_machine.SessionStateMachine.derive",
-    "state_summaries.SummaryDerivationMixin._agent_tree",
-    "utils.CommandRunner.run_result"
+    "codexdeck.codex.events.normalize_rollout_record",
+    "codexdeck.codex.rollout.RolloutReader.read_with_activity",
+    "codexdeck.codex.rollout.RolloutReader._terminal_metadata_backfill_step",
+    "codexdeck.codex.terminal.TerminalStore.apply",
+    "codexdeck.codex.terminal.TerminalStore.reconcile_children",
+    "codexdeck.codex.file_tail.RegularFileTailCollector.read",
+    "codexdeck.engine.MonitorEngine._collect_full_sample",
+    "codexdeck.presentation.text._session_summary_lines",
+    "codexdeck.presentation.tui.activity.timeline_entries",
+    "codexdeck.presentation.tui.activity._timeline_line",
+    "codexdeck.presentation.tui.diagnosis._diagnosis_renderable",
+    "codexdeck.presentation.tui.textual_app.CodexDeckApp._rebuild_navigation",
+    "codexdeck.state_machine.SessionStateMachine.derive",
+    "codexdeck.state_summaries.SummaryDerivationMixin._agent_tree",
+    "codexdeck.utils.CommandRunner.run_result"
   ],
   "large_module_line_limits": {
-    "src/codex/terminal.py": 1300,
-    "src/state_machine.py": 1600,
-    "src/codex/events.py": 1500,
-    "src/engine.py": 1400,
-    "src/models.py": 1300,
-    "src/presentation/tui/textual_app.py": 1300,
-    "src/codex/rollout.py": 1300
+    "src/codexdeck/codex/terminal.py": 1300,
+    "src/codexdeck/state_machine.py": 1600,
+    "src/codexdeck/codex/events.py": 1500,
+    "src/codexdeck/engine.py": 1400,
+    "src/codexdeck/models.py": 1300,
+    "src/codexdeck/presentation/tui/textual_app.py": 1300,
+    "src/codexdeck/codex/rollout.py": 1300
   }
 }

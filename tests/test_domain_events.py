@@ -7,15 +7,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.events import normalize_rollout_record  # noqa: E402
-from config import MAX_TURNS_PER_SESSION  # noqa: E402
-from models import (  # noqa: E402
+from codexdeck.codex.events import normalize_rollout_record  # noqa: E402
+from codexdeck.config import MAX_TURNS_PER_SESSION  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     CapabilityMode,
     NetworkEvidence,
     ProcessIdentity,
     ProcessInfo,
 )
-from state_machine import SessionStateMachine  # noqa: E402
+from codexdeck.state_machine import SessionStateMachine  # noqa: E402
 
 
 def process() -> ProcessInfo:

@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from models import (
+from codexdeck.models import (
     CodexPaths,
     InstanceSnapshot,
     MonitorSnapshot,
@@ -13,10 +13,10 @@ from models import (
     SessionHealth,
     TerminalChunk,
 )
-from presentation.json_output import render_json
-from presentation.tui.navigation import session_title, session_workspace
-from presentation.tui.terminal_panel import TerminalPanel
-from utils import contains_invisible_text, operator_text
+from codexdeck.presentation.json_output import render_json
+from codexdeck.presentation.tui.navigation import session_title, session_workspace
+from codexdeck.presentation.tui.terminal_panel import TerminalPanel
+from codexdeck.utils import contains_invisible_text, operator_text
 
 
 class UnicodeRenderingTests(unittest.TestCase):

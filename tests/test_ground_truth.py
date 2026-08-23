@@ -8,15 +8,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.replay import ProtocolReplayRunner  # noqa: E402
-from codex.terminal import TerminalStore, TerminalUpdate  # noqa: E402
-from models import (  # noqa: E402
+from codexdeck.codex.replay import ProtocolReplayRunner  # noqa: E402
+from codexdeck.codex.terminal import TerminalStore, TerminalUpdate  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     EvidenceCoverage,
     NetworkEvidence,
     ProcessIdentity,
     ProcessInfo,
 )
-from state_machine import SessionStateMachine  # noqa: E402
+from codexdeck.state_machine import SessionStateMachine  # noqa: E402
 
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
 

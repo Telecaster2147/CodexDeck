@@ -6,14 +6,14 @@ reachable from an older snapshot remains stable.
 
 ## Runtime state ownership
 
-`src/engine_state.py` is the checked ownership registry for every field created by
+`src/codexdeck/engine_state.py` is the checked ownership registry for every field created by
 `MonitorEngine.__init__`. Each field has one owner, one lifecycle, and one publication rule.
 Collector-stage and fast-refresh mixins declare the state they consume; they do not create caches.
 `SnapshotPublisher` remains the only full-snapshot publisher.
 
 ## Model layers
 
-`src/models.py` remains the stable import facade, but its values fall into four reviewed layers:
+`src/codexdeck/models.py` remains the stable import facade, but its values fall into four reviewed layers:
 
 1. **Domain identities and state:** instance/session/process/rollout/terminal/socket identities,
    lifecycle, attention, recovery, silence, confidence, completeness, provenance.
@@ -22,7 +22,7 @@ Collector-stage and fast-refresh mixins declare the state they consume; they do 
 3. **Published contracts:** `SessionHealth`, `InstanceSnapshot`, `MonitorSnapshot`, temporal cut,
    observer health, diagnostics and bounded terminal summaries.
 4. **Presentation projections:** navigation, attention queue and rendered text belong under
-   `src/presentation/`; they are derived from snapshots and do not write domain state.
+   `src/codexdeck/presentation/`; they are derived from snapshots and do not write domain state.
 
 New presentation-only fields belong in a projection module rather than `models.py`. New collector
 fields enter a snapshot only through an explicit publisher or `replace()` copy-on-write step.

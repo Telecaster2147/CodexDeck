@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex.events import normalize_log
-from codex.rollout import RolloutReader
-from codex.state_store import LogRecord
-from models import NetworkEvidence, NormalizedEvent, ProcessIdentity, ProcessInfo
-from state_machine import SessionStateMachine
+from codexdeck.codex.events import normalize_log
+from codexdeck.codex.rollout import RolloutReader
+from codexdeck.codex.state_store import LogRecord
+from codexdeck.models import NetworkEvidence, NormalizedEvent, ProcessIdentity, ProcessInfo
+from codexdeck.state_machine import SessionStateMachine
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

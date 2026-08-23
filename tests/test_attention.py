@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from models import (  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     AttentionRequest,
     AttentionState,
     FailureInfo,
@@ -20,7 +20,7 @@ from models import (  # noqa: E402
     SilenceAssessment,
     SilenceState,
 )
-from presentation.attention import attention_queue  # noqa: E402
+from codexdeck.presentation.attention import attention_queue  # noqa: E402
 
 
 def session(session_id: str) -> SessionHealth:

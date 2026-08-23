@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from codexdeck.utils import CommandError, CommandExecutionResult
 from tools.benchmark_core import (
     fast_refresh_benchmark,
     host_command_benchmark,
@@ -16,7 +17,6 @@ from tools.benchmark_core import (
     session_scale_benchmark,
 )
 from tools.check_performance import evaluate
-from utils import CommandError, CommandExecutionResult
 
 
 class BenchmarkContractTests(unittest.TestCase):

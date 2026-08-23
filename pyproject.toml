@@ -27,37 +27,20 @@ dependencies = [
 ]
 
 [project.scripts]
-codexdeck = "cli:run"
+codexdeck = "codexdeck.cli:run"
 
 [tool.setuptools]
-py-modules = [
-  "app",
-  "cli",
-  "config",
-  "diagnostics",
-  "engine",
-  "engine_collectors",
-  "engine_refresh",
-  "engine_state",
-  "models",
-  "preferences",
-  "snapshot_publisher",
-  "state_machine",
-  "state_axes",
-  "state_summaries",
-  "temporal",
-  "utils",
-]
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["codex*", "network*", "presentation*"]
+include = ["codexdeck*"]
 
 [tool.setuptools.package-data]
-"presentation.tui" = ["*.tcss"]
+"codexdeck.presentation.tui" = ["*.tcss"]
 
 [tool.setuptools.dynamic]
-version = {attr = "config.VERSION"}
+version = {attr = "codexdeck.config.VERSION"}
 
 [tool.ruff]
 line-length = 100

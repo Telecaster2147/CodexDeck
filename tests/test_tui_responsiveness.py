@@ -6,9 +6,14 @@ from dataclasses import replace
 
 from textual.widgets import ListView, RichLog
 
-from models import NormalizedEvent, TerminalCapability, TerminalChunk, TerminalSessionSummary
-from presentation.tui.responsiveness import ResponsivenessReport, ResponsivenessSample
-from presentation.tui.textual_app import CodexDeckApp
+from codexdeck.models import (
+    NormalizedEvent,
+    TerminalCapability,
+    TerminalChunk,
+    TerminalSessionSummary,
+)
+from codexdeck.presentation.tui.responsiveness import ResponsivenessReport, ResponsivenessSample
+from codexdeck.presentation.tui.textual_app import CodexDeckApp
 from tests.test_tui import FakeEngine, make_snapshot
 
 

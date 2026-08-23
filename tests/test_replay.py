@@ -8,8 +8,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.replay import ProtocolReplayRunner, ReplayOperation  # noqa: E402
-from config import MAX_SESSION_TAIL  # noqa: E402
+from codexdeck.codex.replay import ProtocolReplayRunner, ReplayOperation  # noqa: E402
+from codexdeck.config import MAX_SESSION_TAIL  # noqa: E402
 
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
 

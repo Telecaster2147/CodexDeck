@@ -13,23 +13,23 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.ingress import (  # noqa: E402
+from codexdeck.codex.ingress import (  # noqa: E402
     MAX_INGRESS_BYTES_PER_TICK,
     MAX_INGRESS_RECORDS_PER_TICK,
     MAX_JSONL_RECORD_BYTES,
 )
-from codex.paths import resolve_instance  # noqa: E402
-from codex.processes import ProcessDiscovery  # noqa: E402
-from codex.rollout import (  # noqa: E402
+from codexdeck.codex.paths import resolve_instance  # noqa: E402
+from codexdeck.codex.processes import ProcessDiscovery  # noqa: E402
+from codexdeck.codex.rollout import (  # noqa: E402
     MAX_PROTOCOL_FAMILY_COUNTERS,
     OTHER_PROTOCOL_FAMILY,
     BoundedFamilyCounter,
     RolloutReader,
 )
-from codex.state_store import StateStore  # noqa: E402
-from models import AdapterStatus, CodexPaths, Confidence, ProcessIdentity  # noqa: E402
-from network.sockets import SocketCollector  # noqa: E402
-from utils import CommandError, CommandExecutionResult  # noqa: E402
+from codexdeck.codex.state_store import StateStore  # noqa: E402
+from codexdeck.models import AdapterStatus, CodexPaths, Confidence, ProcessIdentity  # noqa: E402
+from codexdeck.network.sockets import SocketCollector  # noqa: E402
+from codexdeck.utils import CommandError, CommandExecutionResult  # noqa: E402
 
 
 class FakeProc:
@@ -739,7 +739,7 @@ class RolloutTests(unittest.TestCase):
             reader = RolloutReader()
 
             with patch(
-                "codex.rollout.time.monotonic",
+                "codexdeck.codex.rollout.time.monotonic",
                 side_effect=[0.0, 0.0, 1.0, 1.0],
             ):
                 limited = reader.read_with_activity(path)
@@ -756,9 +756,9 @@ class RolloutTests(unittest.TestCase):
             path.write_bytes(b"x" * (MAX_INGRESS_BYTES_PER_TICK * 3))
             reader = RolloutReader()
 
-            with patch("codex.rollout.time.time", return_value=100.0):
+            with patch("codexdeck.codex.rollout.time.time", return_value=100.0):
                 first = reader.read_with_activity(path)
-            with patch("codex.rollout.time.time", return_value=110.0):
+            with patch("codexdeck.codex.rollout.time.time", return_value=110.0):
                 second = reader.read_with_activity(path)
 
             self.assertEqual(first.activity.backlog_age_seconds, 0.0)
@@ -1111,7 +1111,7 @@ class RolloutTests(unittest.TestCase):
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
             reader = RolloutReader()
-            with patch("codex.rollout.MAX_SESSION_TAIL", 100):
+            with patch("codexdeck.codex.rollout.MAX_SESSION_TAIL", 100):
                 reader.read(path)
             self.assertTrue(reader.has_truncated_context({str(path)}))
 

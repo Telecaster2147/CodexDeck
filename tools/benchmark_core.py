@@ -20,10 +20,10 @@ from typing import TypeVar
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.file_tail import RegularFileTailCollector  # noqa: E402
-from codex.processes import ProcessDiscovery  # noqa: E402
-from codex.rollout import BoundedFamilyCounter, RolloutReader  # noqa: E402
-from codex.terminal import (  # noqa: E402
+from codexdeck.codex.file_tail import RegularFileTailCollector  # noqa: E402
+from codexdeck.codex.processes import ProcessDiscovery  # noqa: E402
+from codexdeck.codex.rollout import BoundedFamilyCounter, RolloutReader  # noqa: E402
+from codexdeck.codex.terminal import (  # noqa: E402
     MAX_GLOBAL_TERMINAL_BYTES,
     MAX_TERMINAL_ALIASES_PER_TERMINAL,
     MAX_TERMINAL_SOURCE_IDS_PER_SCOPE,
@@ -31,15 +31,15 @@ from codex.terminal import (  # noqa: E402
     TerminalStore,
     TerminalUpdate,
 )
-from models import (  # noqa: E402
+from codexdeck.models import (  # noqa: E402
     ChildProcessActivity,
     NormalizedEvent,
     ProcessIdentity,
     TerminalCapability,
 )
-from network.sockets import SocketCollector  # noqa: E402
-from state_machine import SessionStateMachine  # noqa: E402
-from utils import CommandError  # noqa: E402
+from codexdeck.network.sockets import SocketCollector  # noqa: E402
+from codexdeck.state_machine import SessionStateMachine  # noqa: E402
+from codexdeck.utils import CommandError  # noqa: E402
 
 T = TypeVar("T")
 
