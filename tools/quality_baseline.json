@@ -10,7 +10,6 @@
     "codexdeck.codex.terminal.TerminalStore.apply",
     "codexdeck.codex.terminal.TerminalStore.reconcile_children",
     "codexdeck.codex.file_tail.RegularFileTailCollector.read",
-    "codexdeck.engine.MonitorEngine._collect_full_sample",
     "codexdeck.presentation.text._session_summary_lines",
     "codexdeck.presentation.tui.activity.timeline_entries",
     "codexdeck.presentation.tui.activity._timeline_line",

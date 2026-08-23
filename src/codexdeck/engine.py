@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections import defaultdict
 from dataclasses import fields, replace
 from pathlib import Path
 
 from codexdeck.codex.config_reader import CodexConfigReader
-from codexdeck.codex.events import normalize_log
 from codexdeck.codex.file_tail import RegularFileTailCollector
 from codexdeck.codex.paths import ProcReader, open_rollout_paths
 from codexdeck.codex.process_activity import ProcessActivityCollector
@@ -23,17 +21,17 @@ from codexdeck.codex.rollout import (
 )
 from codexdeck.codex.state_store import StateStore
 from codexdeck.codex.terminal import TerminalStore
-from codexdeck.diagnostics import CollectorTracker, make_diagnostic
-from codexdeck.engine_collectors import CollectorStagesMixin
+from codexdeck.diagnostics import CollectorTracker
+from codexdeck.engine_collectors import (
+    CollectorStagesMixin,
+)
 from codexdeck.engine_refresh import FastRefreshMixin
+from codexdeck.engine_sampling import InstanceSamplingMixin
 from codexdeck.models import (
-    AdapterResult,
-    AdapterStatus,
     AxisCompleteness,
     CodexPaths,
     Confidence,
     DiagnosisFinding,
-    Diagnostic,
     EvidenceCoverage,
     InstanceIdentity,
     InstanceIdentityRegistry,
@@ -49,14 +47,13 @@ from codexdeck.models import (
     SessionHealth,
     SessionIdentity,
 )
-from codexdeck.network.classifier import assess_process_network, confirm_process_stall
 from codexdeck.network.sockets import SocketCollector
 from codexdeck.snapshot_publisher import SnapshotPublisher
-from codexdeck.state_machine import PROGRESS_KINDS, SessionStateMachine
-from codexdeck.utils import CommandError, compact_path, one_line
+from codexdeck.state_machine import SessionStateMachine
+from codexdeck.utils import CommandError, one_line
 
 
-class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
+class MonitorEngine(FastRefreshMixin, CollectorStagesMixin, InstanceSamplingMixin):
     INITIAL_BACKLOG_DRAIN_PASSES = 128
 
     def __init__(
@@ -153,512 +150,30 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
         now_monotonic = started
         diagnostics: list[str] = []
         discovery_stage = self._collect_discovery_stage(now_monotonic, diagnostics)
-        discovery = discovery_stage.result
         socket_stage = self._collect_socket_stage(
-            discovery,
+            discovery_stage.result,
             now_monotonic,
             diagnostics,
         )
-        socket_by_pid = socket_stage.by_pid
-        sockets_stale = socket_stage.stale
-
-        by_instance = discovery_stage.by_instance
-        active_process_keys = discovery_stage.active_process_keys
-
         instance_snapshots: list[InstanceSnapshot] = []
         active_session_keys: set[SessionIdentity] = set()
         active_rollouts: set[str] = set()
-        for instance_identity, processes in by_instance.items():
-            resolved = discovery_stage.resolved_by_instance[instance_identity]
-            instance_id = processes[0].instance_id
-            instance_diagnostics: list[Diagnostic | str] = []
-            if instance_identity in discovery_stage.identity_collisions:
-                instance_diagnostics.append(
-                    make_diagnostic(
-                        "IDENTITY_COLLISION",
-                        severity="fatal",
-                        domain="identity",
-                        source="process_discovery",
-                        message_key="identity_collision",
-                    )
-                )
-            instance_rollouts: set[str] = set()
-            codex_config = self.codex_configs.read(resolved.paths.codex_home)
-            if codex_config.error:
-                instance_diagnostics.append(f"config.toml 读取失败：{codex_config.error}")
-            if resolved.method == "unresolved":
-                instance_diagnostics.append("进程环境与活动文件不可读，路径按默认值推测")
-            state_started = time.monotonic()
-            store = self._store_for(instance_identity, resolved.paths)
-            adapter_results: list[AdapterResult] = list(store.initialization_results)
-            process_keys = {process.stable_key for process in processes}
-            if self.log_process_keys.get(instance_identity) != process_keys:
-                self.log_cursors[instance_identity] = 0
-                self.log_process_keys[instance_identity] = process_keys
-            if not store.capabilities.threads:
-                instance_diagnostics.append("state DB 不可用或缺少 threads 表")
-            if not store.capabilities.logs:
-                instance_diagnostics.append("logs DB 不可用，重试诊断可能不完整")
-
-            sessions_by_pid: dict[int, str] = {}
-            rollout_by_pid: dict[int, Path | None] = {}
-            for process in processes:
-                if process.role != "session":
-                    continue
-                rollout_path, session_id = self._fallback_rollout(
-                    process, resolved.paths.sessions_dir
-                )
-                rollout_by_pid[process.pid] = rollout_path
-                if session_id:
-                    sessions_by_pid[process.pid] = session_id
-            unresolved = [
-                process.pid
-                for process in processes
-                if process.role == "session" and process.pid not in sessions_by_pid
-            ]
-            active_threads_result = store.active_threads_result(
-                unresolved,
-                cutoff=int(time.time()) - 21600,
+        for instance_identity, processes in discovery_stage.by_instance.items():
+            instance, instance_sessions, instance_rollouts = self._collect_instance_snapshot(
+                instance_identity=instance_identity,
+                processes=processes,
+                discovery_stage=discovery_stage,
+                socket_stage=socket_stage,
+                now_monotonic=now_monotonic,
             )
-            adapter_results.append(active_threads_result)
-            if active_threads_result.status in {
-                AdapterStatus.PRESENT,
-                AdapterStatus.INCOMPLETE,
-            }:
-                sessions_by_pid.update(dict(active_threads_result.value or {}))
-            threads_result = store.threads_result(sessions_by_pid.values())
-            adapter_results.append(threads_result)
-            records = (
-                dict(threads_result.value or {})
-                if threads_result.status in {
-                    AdapterStatus.PRESENT,
-                    AdapterStatus.ABSENT,
-                    AdapterStatus.INCOMPLETE,
-                }
-                else {}
-            )
-            self.collectors.record(
-                f"state_db:{instance_id}",
-                state_started,
-                (
-                    threads_result.error_code
-                    if threads_result.status in {AdapterStatus.FAILED, AdapterStatus.INCOMPLETE}
-                    else None
-                    if store.capabilities.threads
-                    else "sqlite_unsupported"
-                ),
-            )
-            names = self._session_names(instance_identity, resolved.paths.session_index)
-            enriched: list[ProcessInfo] = []
-            for process in processes:
-                session_id = sessions_by_pid.get(process.pid, "")
-                record = records.get(session_id)
-                rollout_path = rollout_by_pid.get(process.pid)
-                if not rollout_path and record and record.rollout_path:
-                    rollout_path = Path(record.rollout_path)
-                if not rollout_path:
-                    rollout_path, fallback_id = self._fallback_rollout(
-                        process,
-                        resolved.paths.sessions_dir,
-                    )
-                    session_id = session_id or fallback_id
-                    if session_id and record is None:
-                        fallback_result = store.threads_result([session_id])
-                        adapter_results.append(fallback_result)
-                        if fallback_result.status in {
-                            AdapterStatus.PRESENT,
-                            AdapterStatus.INCOMPLETE,
-                        }:
-                            record = dict(fallback_result.value or {}).get(session_id)
-                title = names.get(session_id, "") or (record.title if record else "")
-                fallback_task = (record.preview or record.first_user_message) if record else ""
-                task = self._latest_task(rollout_path) if rollout_path else ""
-                session_identity = SessionIdentity(instance_identity, session_id)
-                previous = self.live_sessions.get(session_identity)
-                process = replace(
-                    process,
-                    instance_identity=instance_identity,
-                    cwd=(record.cwd if record and record.cwd else process.cwd),
-                    session_id=session_id,
-                    session_title=self._bounded(one_line(title), 120),
-                    current_task=self._bounded(one_line(task or fallback_task), 240),
-                    model=(
-                        record.model
-                        if record and record.model
-                        else previous.process.model
-                        if previous
-                        else ""
-                    ),
-                    reasoning_effort=(
-                        record.reasoning_effort
-                        if record and record.reasoning_effort
-                        else previous.process.reasoning_effort
-                        if previous
-                        else ""
-                    ),
-                    rollout_path=str(rollout_path or ""),
-                    activity=(
-                        self.process_activity.snapshot(process.identity)
-                        if process.role == "session"
-                        else process.activity
-                    ),
-                )
-                enriched.append(process)
-                if process.rollout_path:
-                    active_rollouts.add(process.rollout_path)
-                    instance_rollouts.add(process.rollout_path)
-
-            session_for_pid = {
-                process.pid: process.session_id for process in enriched if process.session_id
-            }
-            events_by_session: dict[str, list[NormalizedEvent]] = defaultdict(list)
-            log_activity_by_session: dict[str, float] = {}
-            cutoff = int(time.time()) - self.machine.lookback_seconds
-            log_started = time.monotonic()
-            logs_result = store.logs_since_result(
-                [process.pid for process in enriched], self.log_cursors[instance_identity], cutoff
-            )
-            adapter_results.append(logs_result)
-            logs = (
-                list(logs_result.value or [])
-                if logs_result.status in {
-                    AdapterStatus.PRESENT,
-                    AdapterStatus.ABSENT,
-                    AdapterStatus.INCOMPLETE,
-                }
-                else []
-            )
-            self.collectors.record(
-                f"log_db:{instance_id}",
-                log_started,
-                (
-                    logs_result.error_code
-                    if logs_result.status in {AdapterStatus.FAILED, AdapterStatus.INCOMPLETE}
-                    else None
-                    if store.capabilities.logs
-                    else "sqlite_unsupported"
-                ),
-            )
-            if logs:
-                self.log_cursors[instance_identity] = max(record.log_id for record in logs)
-            for record in logs:
-                session_id = record.thread_id
-                if not session_id:
-                    match = re.match(r"pid:(\d+):", record.process_uuid)
-                    session_id = session_for_pid.get(int(match.group(1)), "") if match else ""
-                if session_id:
-                    observed_at = time.time()
-                    log_activity_by_session[session_id] = observed_at
-                    events_by_session[session_id].extend(
-                        replace(event, observed_at=observed_at) for event in normalize_log(record)
-                    )
-
-            session_processes: dict[str, list[ProcessInfo]] = defaultdict(list)
-            for process in enriched:
-                if process.role == "session" and process.session_id:
-                    session_processes[process.session_id].append(process)
-
-            sessions = []
-            instance_rollout_activity: list[dict[str, object]] = []
-            rollout_started = time.monotonic()
-            for session_id, candidates in session_processes.items():
-                process = max(
-                    candidates,
-                    key=lambda item: (
-                        {True: 2, None: 1, False: 0}[item.foreground_active],
-                        item.activity.active,
-                        item.activity.sampled_at or 0.0,
-                        bool(item.rollout_path),
-                        item.identity.start_time,
-                        item.pid,
-                    ),
-                )
-                if len(candidates) > 1:
-                    pids = ", ".join(
-                        str(item.pid) for item in sorted(candidates, key=lambda p: p.pid)
-                    )
-                    instance_diagnostics.append(
-                        f"检测到同一会话由 {len(candidates)} 个 Codex 进程打开；"
-                        f"列表已合并，当前显示 PID {process.pid}（进程 {pids}）"
-                    )
-
-                incoming = list(events_by_session.get(session_id, []))
-                session_key = SessionIdentity(instance_identity, session_id)
-                rollout_activities: list[RolloutActivity] = []
-                seen_rollouts: set[str] = set()
-                observed_at = time.time()
-                process_children: dict[str, object] = {}
-                process_tree_available = False
-                process_tree_sampled_at: list[float] = []
-                for candidate in candidates:
-                    if candidate.activity.available:
-                        process_tree_available = True
-                        if candidate.activity.sampled_at is not None:
-                            process_tree_sampled_at.append(candidate.activity.sampled_at)
-                        process_children.update(
-                            {child.identity.key: child for child in candidate.activity.children}
-                        )
-                    if candidate.rollout_path and candidate.rollout_path not in seen_rollouts:
-                        seen_rollouts.add(candidate.rollout_path)
-                        rollout_result = self.rollouts.read_with_activity(
-                            Path(candidate.rollout_path)
-                        )
-                        rollout_activities.append(rollout_result.activity)
-                        incoming.extend(rollout_result.events)
-                        self.terminals.apply(
-                            session_key,
-                            rollout_result.terminal_updates,
-                        )
-                    if candidate.activity.available:
-                        file_updates = self.terminal_files.read(
-                            session_key,
-                            candidate.cwd,
-                            candidate.activity.children,
-                            observed_at,
-                        )
-                        self.terminals.apply(session_key, file_updates)
-                        for diagnostic in self.terminal_files.pop_diagnostics(session_key):
-                            fds = ",".join(str(fd) for fd in diagnostic.fds)
-                            instance_diagnostics.append(
-                                "regular-file tail 校验失败："
-                                f"reason={diagnostic.reason}; pid={diagnostic.pid}; "
-                                f"start_time={diagnostic.start_time}; fd={fds}"
-                            )
-                if process_tree_available:
-                    self.terminals.reconcile_children(
-                        session_key,
-                        tuple(process_children.values()),
-                        observed_at,
-                        evidence_cutoff=(
-                            min(process_tree_sampled_at) if process_tree_sampled_at else None
-                        ),
-                        workspace=process.cwd,
-                    )
-                else:
-                    self.terminals.mark_process_unavailable(session_key)
-                rollout_activity = max(
-                    rollout_activities,
-                    key=lambda item: (
-                        item.last_growth_at or 0.0,
-                        item.changed,
-                        item.observed_at,
-                    ),
-                    default=RolloutActivity(process.rollout_path, observed_at),
-                )
-                instance_rollout_activity.extend(
-                    self._rollout_activity_value(item) for item in rollout_activities
-                )
-                incoming = self._with_compact_config(
-                    incoming,
-                    codex_config.auto_compact_token_limit,
-                    codex_config.auto_compact_token_limit_scope,
-                )
-                if session_key in self.retired_sessions:
-                    incoming.append(
-                        NormalizedEvent(
-                            timestamp=time.time(),
-                            kind="PROCESS_RESUMED",
-                            summary="进程已重新启动",
-                            detail=f"当前 PID {process.pid}",
-                            source="process",
-                            confidence=Confidence.HIGH,
-                            source_id=f"process-resumed:{process.stable_key}",
-                            observed_at=time.time(),
-                        )
-                    )
-                active_session_keys.add(session_key)
-                before = [
-                    socket
-                    for candidate in candidates
-                    for socket in self.previous_sockets.get(candidate.stable_key, [])
-                ]
-                after = [
-                    socket
-                    for candidate in candidates
-                    for socket in socket_by_pid.get(candidate.pid, [])
-                ]
-                network = assess_process_network(before, after, self.idle_threshold)
-                if sockets_stale:
-                    network.stale = True
-                    network.stale_age_seconds = (
-                        now_monotonic - self.socket_stale_since
-                        if self.socket_stale_since is not None
-                        else 0.0
-                    )
-                    network.reason = f"{network.reason}（TCP 数据已过期）"
-                recent_progress = any(
-                    event.kind in PROGRESS_KINDS
-                    and event.timestamp >= time.time() - self.interval * 1.5
-                    for event in incoming
-                )
-                network, self.stall_windows[process.stable_key] = confirm_process_stall(
-                    network,
-                    self.stall_windows[process.stable_key],
-                    recent_protocol_progress=recent_progress,
-                )
-                association = self.terminals.association_summary(session_key)
-                association_complete = not any(
-                    (
-                        association.ambiguous,
-                        association.conflicting,
-                        association.unresolved,
-                        association.private_state_dropped,
-                    )
-                )
-                for activity in rollout_activities:
-                    self.machine.update_coverage(
-                        session_key,
-                        self._evidence_coverage(
-                            [activity],
-                            bootstrap_truncated=self.rollouts.has_truncated_context(
-                                {activity.path}
-                            ),
-                        ),
-                    )
-                self.machine.update_coverage(
-                    session_key,
-                    self._evidence_coverage(
-                        rollout_activities,
-                        bootstrap_truncated=False,
-                        track_source=False,
-                        terminal_probe_complete=(
-                            process_tree_available
-                            and association_complete
-                            and self.discovery_stale_since is None
-                        ),
-                        network_probe_complete=not sockets_stale,
-                        silence_probe_complete=(
-                            process_tree_available
-                            and self.discovery_stale_since is None
-                            and not sockets_stale
-                        ),
-                    ),
-                )
-                self.machine.ingest(session_key, incoming)
-                previous = self.live_sessions.get(session_key)
-                observation = self._observation_pulse(
-                    previous,
-                    process,
-                    incoming,
-                    rollout_activity,
-                    network,
-                    log_activity_by_session.get(session_id),
-                    full_sample=True,
-                    process_stale=self.discovery_stale_since is not None,
-                    network_stale=sockets_stale,
-                )
-                session = self.machine.derive(
-                    session_key,
-                    process,
-                    network,
-                    observation=observation,
-                )
-                if session.observation.last_evidence_at is not None and (
-                    previous is None
-                    or session.observation.last_evidence_at
-                    > (previous.observation.last_evidence_at or 0.0)
-                ):
-                    self.machine.observe_compaction(
-                        session_key,
-                        timestamp=session.observation.last_evidence_at,
-                        source=session.observation.last_evidence_source or "observation",
-                        detail=session.observation.last_evidence_detail,
-                    )
-                    session = self.machine.derive(
-                        session_key,
-                        process,
-                        network,
-                        observation=observation,
-                    )
-                recovery_states = {
-                    "SUSPECT",
-                    "RECONNECTING",
-                    "TRANSPORT_FALLBACK",
-                }
-                was_recovering = session.recovery.value in recovery_states or bool(
-                    previous and previous.recovery.value in recovery_states
-                )
-                if network.state == NetworkState.ACTIVE and was_recovering:
-                    recovered = NormalizedEvent(
-                        timestamp=time.time(),
-                        kind="RECOVERED",
-                        summary="连接已恢复",
-                        detail="TCP 传输重新出现进展",
-                        source="detector",
-                        confidence=Confidence.MEDIUM,
-                        source_id=(
-                            f"network-recovered:{process.stable_key}:{int(time.time() * 1000)}"
-                        ),
-                        observed_at=time.time(),
-                    )
-                    self.machine.ingest(session_key, [recovered])
-                    session = self.machine.derive(
-                        session_key,
-                        process,
-                        network,
-                        observation=observation,
-                    )
-                session = self._attach_terminal_snapshot(session, session_key)
-                session = self._attach_ingress_diagnosis(session, rollout_activity)
-                sessions.append(session)
-                for candidate in candidates:
-                    self.previous_sockets[candidate.stable_key] = socket_by_pid.get(
-                        candidate.pid, []
-                    )
-            self.collectors.record(f"rollout:{instance_id}", rollout_started)
-            collector_health = [
-                item
-                for item in self.collectors.snapshot()
-                if item.name in {"process", "socket"} or item.name.endswith(f":{instance_id}")
-            ]
-
-            instance_snapshots.append(
-                InstanceSnapshot(
-                    instance_id=instance_id,
-                    paths=resolved.paths,
-                    display_codex_home=compact_path(resolved.paths.codex_home),
-                    identity=instance_identity,
-                    display_sqlite_home=compact_path(resolved.paths.sqlite_home),
-                    discovery_method=resolved.method,
-                    capabilities=store.capabilities,
-                    protocol_capabilities=self._merge_protocol_capabilities(sessions),
-                    collector_health=collector_health,
-                    adapter_results=tuple(adapter_results),
-                    diagnostics=instance_diagnostics,
-                    unknown_event_types=self.rollouts.unknown_counts(instance_rollouts),
-                    protocol_shape_families=self.rollouts.shape_counts(instance_rollouts),
-                    protocol_family_counters=self.rollouts.family_counter_summary(
-                        instance_rollouts
-                    ),
-                    observed_codex_versions=self.rollouts.version_counts(instance_rollouts),
-                    rollout_context_truncated=(
-                        self.rollouts.has_truncated_context(instance_rollouts)
-                    ),
-                    rollout_activity=instance_rollout_activity,
-                    process_data_stale_age_seconds=(
-                        now_monotonic - self.discovery_stale_since
-                        if self.discovery_stale_since is not None
-                        else None
-                    ),
-                    socket_data_stale_age_seconds=(
-                        now_monotonic - self.socket_stale_since
-                        if self.socket_stale_since is not None
-                        else None
-                    ),
-                    auto_compact_token_limit=codex_config.auto_compact_token_limit,
-                    auto_compact_token_limit_scope=(codex_config.auto_compact_token_limit_scope),
-                    compact_prompt_overridden=codex_config.compact_prompt_overridden,
-                    auto_compact_config_source=codex_config.source,
-                    processes=enriched,
-                    sessions=sessions,
-                )
-            )
+            instance_snapshots.append(instance)
+            active_session_keys.update(instance_sessions)
+            active_rollouts.update(instance_rollouts)
 
         self._retain_exited_sessions(instance_snapshots, active_session_keys)
-
         self._prune_full_sample_state(
-            by_instance=set(by_instance),
-            active_process_keys=active_process_keys,
+            by_instance=set(discovery_stage.by_instance),
+            active_process_keys=discovery_stage.active_process_keys,
             active_session_keys=active_session_keys,
             active_rollouts=active_rollouts,
         )
@@ -667,7 +182,7 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
             started=started,
             now_monotonic=now_monotonic,
             diagnostics=diagnostics,
-            discovery=discovery.summary,
+            discovery=discovery_stage.result.summary,
             discovery_stale_since=self.discovery_stale_since,
             socket_stale_since=self.socket_stale_since,
         )

@@ -213,6 +213,7 @@ class StaticQualityBudgetTests(unittest.TestCase):
         for relative, class_name in (
             ("src/codexdeck/engine_collectors.py", "CollectorStagesMixin"),
             ("src/codexdeck/engine_refresh.py", "FastRefreshMixin"),
+            ("src/codexdeck/engine_sampling.py", "InstanceSamplingMixin"),
         ):
             with self.subTest(module=relative):
                 tree = ast.parse((PROJECT_ROOT / relative).read_text())
