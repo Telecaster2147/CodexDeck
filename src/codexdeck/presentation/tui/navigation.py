@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
+from pathlib import Path
 
 from rich.text import Text
 from textual.widgets import ListItem, Static
 
 from codexdeck.config import LIFECYCLE_LABELS, RECOVERY_LABELS
-from codexdeck.models import LifecycleState, SessionHealth, SilenceState
+from codexdeck.models import (
+    InstanceSnapshot,
+    LifecycleState,
+    MonitorSnapshot,
+    SessionHealth,
+    SilenceState,
+)
 from codexdeck.presentation.tui.theme import STATE_COLORS
-from codexdeck.utils import compact_path, operator_text
+from codexdeck.utils import compact_path, format_duration, operator_text
 
 
 def session_title(session: SessionHealth) -> str:
@@ -167,3 +175,159 @@ class NavigationItem(ListItem):
         if changed:
             self.query_one(Static).update(self._content)
         return changed
+
+
+def _workspace_item(
+    instance: InstanceSnapshot,
+    workspace: str,
+    sessions: list[SessionHealth],
+    *,
+    open_group: bool,
+) -> NavigationItem:
+    marker = "▼" if open_group else "▶"
+    label = Text(f"{marker}  {workspace}", style="bold #e2e8f0")
+    label.append(
+        f"\n   CODEX_HOME {instance.display_codex_home}  ·  {len(sessions)} sessions",
+        style="#64748b",
+    )
+    failures = sum(bool(item.current_failure) for item in sessions)
+    if failures:
+        label.append(f"  ·  {failures} failed", style=STATE_COLORS["error"])
+    actions = sum(bool(item.attention_request) for item in sessions)
+    if actions:
+        label.append(f"  ·  {actions} action required", style=STATE_COLORS["warning"])
+    return NavigationItem(
+        label,
+        kind="workspace",
+        key=workspace_group_key(instance.instance_id, workspace),
+        instance_id=instance.instance_id,
+        classes="workspace-row",
+    )
+
+
+def _session_item(
+    instance: InstanceSnapshot,
+    session: SessionHealth,
+    *,
+    grouped: bool,
+    now: float,
+) -> NavigationItem:
+    hidden_label = session_hidden_label(session)
+    marker, color = session_marker(session)
+    if hidden_label:
+        marker, color = "○", STATE_COLORS["muted"]
+    operation = session.current_operation
+    category = operation.category
+    operation_label = operation.label
+    detail = operation.detail
+    started_at = operation.started_at
+    if category == "idle" and session.lifecycle != LifecycleState.IDLE:
+        category = session.lifecycle.value.lower()
+        operation_label = session_status(session)
+        detail = session.phase
+        started_at = session.phase_since
+    age = format_duration(max(0, now - (started_at or now)))
+    label = Text(f"{marker}  ", style=f"bold {color}")
+    title_text = session_title(session)
+    if not grouped:
+        title_text = f"{Path(session_workspace(session)).name} · {title_text}"
+    if len(title_text) > 28:
+        title_text = title_text[:27] + "…"
+    label.append(title_text, style="#94a3b8" if hidden_label else "#f8fafc")
+    if hidden_label:
+        category = hidden_label
+        operation_label = session_status(session)
+        detail = operation_label
+    detail = detail or operation_label
+    auxiliary: list[str] = []
+    semantic_at = session.observation.last_semantic_at
+    evidence_at = session.observation.last_evidence_at
+    if session.silence.state != SilenceState.NORMAL:
+        detail = session.silence.reason
+    elif semantic_at is not None and now - semantic_at >= 10:
+        detail = f"静默 {format_duration(max(0, now - semantic_at))}"
+    if evidence_at is not None and now - evidence_at <= 60:
+        auxiliary.append(
+            f"{session.observation.last_evidence_source or 'evidence'} "
+            f"{format_duration(max(0, now - evidence_at))}前"
+        )
+    if operation.tool_count:
+        auxiliary.append(f"t{operation.tool_count}")
+    if operation.file_count:
+        auxiliary.append(f"f{operation.file_count}")
+    if session.token_usage and session.token_usage.context_percent is not None:
+        auxiliary.append(f"ctx{session.token_usage.context_percent:.0f}%")
+    if operation.agent:
+        auxiliary.append(f"a:{operation.agent[:6]}")
+    if session.observation.process_activity.child_count:
+        auxiliary.append(f"child{session.observation.process_activity.child_count}")
+    detail_limit = 20 if not auxiliary else 10
+    if len(detail) > detail_limit:
+        detail = detail[: detail_limit - 1] + "…"
+    second_line = f"\n   {category.upper()} · {detail} · {age}"
+    if auxiliary:
+        second_line += " · " + " · ".join(auxiliary[:2])
+    label.append(second_line, style="#94a3b8")
+    return NavigationItem(
+        label,
+        kind="session",
+        key=f"session:{session.key}",
+        instance_id=instance.instance_id,
+        session_key=session.key,
+        classes="session-row",
+    )
+
+
+def navigation_items(
+    snapshot: MonitorSnapshot,
+    *,
+    query: str,
+    grouped: bool,
+    show_hidden: bool,
+    collapsed: set[str],
+    now: float | None = None,
+) -> list[NavigationItem]:
+    """Project one snapshot into desired rows without touching mounted widgets."""
+
+    projected: list[NavigationItem] = []
+    observed_at = time.time() if now is None else now
+    for instance in snapshot.instances:
+        sessions = [
+            item
+            for item in instance.sessions
+            if (show_hidden or session_is_visible(item)) and matches_session(item, query)
+        ]
+        if query and not sessions:
+            continue
+        groups = workspace_groups(sessions) if grouped else [("", sessions)]
+        for workspace, workspace_sessions in groups:
+            if grouped:
+                group_key = workspace_group_key(instance.instance_id, workspace)
+                open_group = group_key not in collapsed
+                projected.append(
+                    _workspace_item(
+                        instance,
+                        workspace,
+                        workspace_sessions,
+                        open_group=open_group,
+                    )
+                )
+                if not open_group:
+                    continue
+            ordered = sorted(
+                workspace_sessions,
+                key=lambda item: (
+                    not session_is_visible(item),
+                    not bool(item.attention_request),
+                    not bool(item.current_failure),
+                    item.silence.state != SilenceState.STALL_SUSPECT,
+                    item.silence.state != SilenceState.OBSERVER_BLIND,
+                    item.alert_level != "严重",
+                    item.process.identity.start_time,
+                ),
+            )
+            projected.extend(
+                _session_item(instance, session, grouped=grouped, now=observed_at)
+                for session in ordered
+            )
+    return projected

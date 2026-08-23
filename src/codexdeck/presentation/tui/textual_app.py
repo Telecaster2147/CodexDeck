@@ -34,7 +34,6 @@ from codexdeck.config import (
 from codexdeck.engine import MonitorEngine
 from codexdeck.models import (
     InstanceSnapshot,
-    LifecycleState,
     MonitorSnapshot,
     SessionHealth,
     SilenceState,
@@ -66,16 +65,17 @@ from codexdeck.presentation.tui.diagnosis import (
 )
 from codexdeck.presentation.tui.navigation import (
     NavigationItem,
-    matches_session,
+    navigation_items,
     network_color,
-    session_hidden_label,
     session_is_visible,
     session_marker,
     session_status,
     session_title,
     session_workspace,
     workspace_group_key,
-    workspace_groups,
+)
+from codexdeck.presentation.tui.navigation import (
+    session_hidden_label as session_hidden_label,
 )
 from codexdeck.presentation.tui.sampling import SamplingCoordinator
 from codexdeck.presentation.tui.terminal_panel import TerminalLog, TerminalPanel
@@ -659,131 +659,13 @@ class CodexDeckApp(App[MonitorSnapshot]):
             # A final timer tick may arrive after Textual starts unmounting the screen.
             self.rebuilding = False
             return
-        items: list[NavigationItem] = []
-        for instance in self.snapshot.instances:
-            sessions = [
-                item
-                for item in instance.sessions
-                if (self.show_hidden or session_is_visible(item)) and matches_session(item, query)
-            ]
-            if query and not sessions:
-                continue
-            groups = workspace_groups(sessions) if self.grouped else [("", sessions)]
-            for workspace, workspace_sessions in groups:
-                if self.grouped:
-                    group_key = workspace_group_key(instance.instance_id, workspace)
-                    open_group = group_key not in self.collapsed
-                    marker = "▼" if open_group else "▶"
-                    label = Text(f"{marker}  {workspace}", style="bold #e2e8f0")
-                    label.append(
-                        f"\n   CODEX_HOME {instance.display_codex_home}  ·  "
-                        f"{len(workspace_sessions)} sessions",
-                        style="#64748b",
-                    )
-                    failures = sum(bool(item.current_failure) for item in workspace_sessions)
-                    if failures:
-                        label.append(f"  ·  {failures} failed", style=STATE_COLORS["error"])
-                    actions = sum(bool(item.attention_request) for item in workspace_sessions)
-                    if actions:
-                        label.append(
-                            f"  ·  {actions} action required", style=STATE_COLORS["warning"]
-                        )
-                    items.append(
-                        NavigationItem(
-                            label,
-                            kind="workspace",
-                            key=group_key,
-                            instance_id=instance.instance_id,
-                            classes="workspace-row",
-                        )
-                    )
-                    if not open_group:
-                        continue
-                for session in sorted(
-                    workspace_sessions,
-                    key=lambda item: (
-                        not session_is_visible(item),
-                        not bool(item.attention_request),
-                        not bool(item.current_failure),
-                        item.silence.state != SilenceState.STALL_SUSPECT,
-                        item.silence.state != SilenceState.OBSERVER_BLIND,
-                        item.alert_level != "严重",
-                        item.process.identity.start_time,
-                    ),
-                ):
-                    hidden_label = session_hidden_label(session)
-                    marker, color = session_marker(session)
-                    if hidden_label:
-                        marker, color = "○", STATE_COLORS["muted"]
-                    operation = session.current_operation
-                    operation_category = operation.category
-                    operation_label = operation.label
-                    operation_detail = operation.detail
-                    operation_started_at = operation.started_at
-                    if operation_category == "idle" and session.lifecycle != LifecycleState.IDLE:
-                        operation_category = session.lifecycle.value.lower()
-                        operation_label = session_status(session)
-                        operation_detail = session.phase
-                        operation_started_at = session.phase_since
-                    age = format_duration(
-                        max(0, time.time() - (operation_started_at or time.time()))
-                    )
-                    label = Text(f"{marker}  ", style=f"bold {color}")
-                    title_text = session_title(session)
-                    if not self.grouped:
-                        workspace_name = Path(session_workspace(session)).name
-                        title_text = f"{workspace_name} · {title_text}"
-                    if len(title_text) > 28:
-                        title_text = title_text[:27] + "…"
-                    label.append(
-                        title_text,
-                        style="#94a3b8" if hidden_label else "#f8fafc",
-                    )
-                    if hidden_label:
-                        operation_category = hidden_label
-                        operation_label = session_status(session)
-                        operation_detail = operation_label
-                    operation_detail = operation_detail or operation_label
-                    auxiliary = []
-                    now = time.time()
-                    semantic_at = session.observation.last_semantic_at
-                    evidence_at = session.observation.last_evidence_at
-                    if session.silence.state != SilenceState.NORMAL:
-                        operation_detail = session.silence.reason
-                    elif semantic_at is not None and now - semantic_at >= 10:
-                        operation_detail = f"静默 {format_duration(max(0, now - semantic_at))}"
-                    if evidence_at is not None and now - evidence_at <= 60:
-                        auxiliary.append(
-                            f"{session.observation.last_evidence_source or 'evidence'} "
-                            f"{format_duration(max(0, now - evidence_at))}前"
-                        )
-                    if operation.tool_count:
-                        auxiliary.append(f"t{operation.tool_count}")
-                    if operation.file_count:
-                        auxiliary.append(f"f{operation.file_count}")
-                    if session.token_usage and session.token_usage.context_percent is not None:
-                        auxiliary.append(f"ctx{session.token_usage.context_percent:.0f}%")
-                    if operation.agent:
-                        auxiliary.append(f"a:{operation.agent[:6]}")
-                    if session.observation.process_activity.child_count:
-                        auxiliary.append(f"child{session.observation.process_activity.child_count}")
-                    detail_limit = 20 if not auxiliary else 10
-                    if len(operation_detail) > detail_limit:
-                        operation_detail = operation_detail[: detail_limit - 1] + "…"
-                    second_line = f"\n   {operation_category.upper()} · {operation_detail} · {age}"
-                    if auxiliary:
-                        second_line += " · " + " · ".join(auxiliary[:2])
-                    label.append(second_line, style="#94a3b8")
-                    items.append(
-                        NavigationItem(
-                            label,
-                            kind="session",
-                            key=f"session:{session.key}",
-                            instance_id=instance.instance_id,
-                            session_key=session.key,
-                            classes="session-row",
-                        )
-                    )
+        items = navigation_items(
+            self.snapshot,
+            query=query,
+            grouped=self.grouped,
+            show_hidden=self.show_hidden,
+            collapsed=self.collapsed,
+        )
         previous = self.selected_key
         current_items = [item for item in list_view.children if isinstance(item, NavigationItem)]
         stable_structure = [item.key_value for item in current_items] == [
