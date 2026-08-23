@@ -829,6 +829,33 @@ class DiagnosisFinding:
 
 
 @dataclass(frozen=True)
+class AxisReason:
+    schema_version: int
+    axis: str
+    reason_code: str
+    reason_text: str
+    supporting_evidence: tuple[str, ...]
+    confidence: Confidence
+    complete: bool
+    freshness_seconds: float | None
+    provenance: Provenance
+
+
+@dataclass(frozen=True)
+class EvidenceTimelineEntry:
+    schema_version: int
+    timestamp: float
+    source: str
+    normalized_kind: str
+    axis: str
+    reason_code: str
+    published_consequence: str
+    evidence_ref: str
+    confidence: Confidence
+    complete: bool
+
+
+@dataclass(frozen=True)
 class TokenUsageSummary:
     input_tokens: int | None = None
     cached_input_tokens: int | None = None
@@ -1091,6 +1118,8 @@ class SessionHealth(PublishedGuard):
     clock_assessments: tuple[ClockAssessment, ...] = ()
     completeness: SessionCompleteness = field(default_factory=SessionCompleteness)
     current_operation: CurrentOperationSummary = field(default_factory=CurrentOperationSummary)
+    reasons: tuple[AxisReason, ...] = ()
+    evidence_timeline: tuple[EvidenceTimelineEntry, ...] = ()
     diagnosis: list[DiagnosisFinding] = field(default_factory=list)
     event_telemetry: EventTelemetrySummary = field(default_factory=EventTelemetrySummary)
     observation: ObservationPulse = field(default_factory=ObservationPulse)

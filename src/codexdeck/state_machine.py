@@ -43,6 +43,7 @@ from codexdeck.models import (
     SilenceAssessment,
     SilenceState,
 )
+from codexdeck.reasons import derive_axis_reasons, evidence_timeline, reason_diagnosis
 from codexdeck.state_axes import AxisDerivationMixin
 from codexdeck.state_summaries import SummaryDerivationMixin
 
@@ -1017,7 +1018,12 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
             self._apply_completeness(key, state, authoritative_events)
             state.silence = self._silence_assessment(state, now)
             state.current_operation = self._operation_summary(state, all_events)
-            state.diagnosis = self._diagnosis_findings(state, all_events, now)
+            state.reasons = derive_axis_reasons(state, all_events, now)
+            state.evidence_timeline = evidence_timeline(all_events, state)
+            state.diagnosis = [
+                *self._diagnosis_findings(state, all_events, now),
+                *reason_diagnosis(state.reasons),
+            ]
             self._reconcile_alert(key, state, now)
             return state
 
@@ -1213,7 +1219,12 @@ class SessionStateMachine(AxisDerivationMixin, SummaryDerivationMixin):
         self._apply_completeness(key, state, authoritative_events)
         state.silence = self._silence_assessment(state, now)
         state.current_operation = self._operation_summary(state, all_events)
-        state.diagnosis = self._diagnosis_findings(state, all_events, now)
+        state.reasons = derive_axis_reasons(state, all_events, now)
+        state.evidence_timeline = evidence_timeline(all_events, state)
+        state.diagnosis = [
+            *self._diagnosis_findings(state, all_events, now),
+            *reason_diagnosis(state.reasons),
+        ]
 
         if current_turn:
             self._derive_alert(state, relevant, now)

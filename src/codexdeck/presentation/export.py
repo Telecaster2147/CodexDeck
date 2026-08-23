@@ -187,6 +187,8 @@ def session_export(
             "attention": session.attention,
             "attention_request": session.attention_request,
             "current_operation": session.current_operation,
+            "reasons": session.reasons,
+            "evidence_timeline": session.evidence_timeline,
             "diagnosis": session.diagnosis,
             "observation": session.observation,
             "silence": session.silence,
