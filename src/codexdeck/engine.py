@@ -49,7 +49,7 @@ from codexdeck.models import (
     SessionHealth,
     SessionIdentity,
 )
-from codexdeck.network.classifier import assess_process_network
+from codexdeck.network.classifier import assess_process_network, confirm_process_stall
 from codexdeck.network.sockets import SocketCollector
 from codexdeck.snapshot_publisher import SnapshotPublisher
 from codexdeck.state_machine import PROGRESS_KINDS, SessionStateMachine
@@ -491,17 +491,11 @@ class MonitorEngine(FastRefreshMixin, CollectorStagesMixin):
                     and event.timestamp >= time.time() - self.interval * 1.5
                     for event in incoming
                 )
-                if network.state == NetworkState.SUSPECT and not recent_progress:
-                    self.stall_windows[process.stable_key] += 1
-                    if self.stall_windows[process.stable_key] >= 2:
-                        network.state = NetworkState.STALLED
-                        windows = self.stall_windows[process.stable_key]
-                        network.reason = f"连续 {windows} 个窗口异常：{network.reason}"
-                else:
-                    self.stall_windows[process.stable_key] = 0
-                    if network.state == NetworkState.SUSPECT and recent_progress:
-                        network.state = NetworkState.IDLE
-                        network.reason = "TCP 指标异常，但 Codex 协议仍有进展"
+                network, self.stall_windows[process.stable_key] = confirm_process_stall(
+                    network,
+                    self.stall_windows[process.stable_key],
+                    recent_protocol_progress=recent_progress,
+                )
                 association = self.terminals.association_summary(session_key)
                 association_complete = not any(
                     (

@@ -17,45 +17,83 @@
       "domain": "lifecycle",
       "classification": "true_positive",
       "runner": "replay",
-      "evidence": {"fixture": "replay_lifecycle_terminal.jsonl", "sources": ["rollout"]},
+      "evidence": {
+        "fixture": "replay_lifecycle_terminal.jsonl",
+        "sources": [
+          "rollout"
+        ]
+      },
       "codex_ui_observation": "Turn completed after one durable exec operation.",
-      "codexdeck_expected": {"lifecycle": "COMPLETED", "protocol_uncertain": false},
+      "codexdeck_expected": {
+        "lifecycle": "COMPLETED",
+        "protocol_uncertain": false
+      },
       "adjudication": {
         "semantic": "completed",
         "basis": "Structured turn terminal record is authoritative for lifecycle.",
         "invalidates": "Socket closure or terminal completion alone must not invent turn completion."
       },
-      "support": {"replay": true, "state_machine": true, "terminal_store": true, "tui": true}
+      "support": {
+        "replay": true,
+        "state_machine": true,
+        "terminal_store": true,
+        "tui": true
+      }
     },
     {
       "id": "GT-LIFECYCLE-FP-001",
       "domain": "lifecycle",
       "classification": "false_positive",
       "runner": "replay",
-      "evidence": {"fixture": "replay_unknown_phase.jsonl", "sources": ["rollout"]},
+      "evidence": {
+        "fixture": "replay_unknown_phase.jsonl",
+        "sources": [
+          "rollout"
+        ]
+      },
       "codex_ui_observation": "The upstream UI showed a phase that this version does not recognize.",
-      "codexdeck_expected": {"protocol_uncertain": true, "protocol_uncertainty_scope": "lifecycle"},
+      "codexdeck_expected": {
+        "protocol_uncertain": true,
+        "protocol_uncertainty_scope": "lifecycle"
+      },
       "adjudication": {
         "semantic": "unknown",
         "basis": "An unknown semantic shape cannot be mapped to a known lifecycle by text similarity.",
         "invalidates": "Remove any fallback that guesses lifecycle from unknown payload text."
       },
-      "support": {"replay": true, "state_machine": true, "terminal_store": false, "tui": true}
+      "support": {
+        "replay": true,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
     },
     {
       "id": "GT-ATTENTION-TP-001",
       "domain": "attention",
       "classification": "true_positive",
       "runner": "replay",
-      "evidence": {"fixture": "ground_truth_attention.jsonl", "sources": ["rollout"]},
+      "evidence": {
+        "fixture": "ground_truth_attention.jsonl",
+        "sources": [
+          "rollout"
+        ]
+      },
       "codex_ui_observation": "The UI displayed an execution approval prompt.",
-      "codexdeck_expected": {"attention": "APPROVAL"},
+      "codexdeck_expected": {
+        "attention": "APPROVAL"
+      },
       "adjudication": {
         "semantic": "approval_required",
         "basis": "Typed approval request is direct attention evidence.",
         "invalidates": "Generic tool-running records do not imply an approval prompt."
       },
-      "support": {"replay": true, "state_machine": true, "terminal_store": false, "tui": true}
+      "support": {
+        "replay": true,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
     },
     {
       "id": "GT-ATTENTION-FN-001",
@@ -63,17 +101,30 @@
       "classification": "false_negative",
       "runner": "coverage",
       "evidence": {
-        "sources": ["rollout"],
-        "coverage": {"bootstrap_truncated": true, "source_epoch": "ROLLOUT_EPOCH"}
+        "sources": [
+          "rollout"
+        ],
+        "coverage": {
+          "bootstrap_truncated": true,
+          "source_epoch": "ROLLOUT_EPOCH"
+        }
       },
       "codex_ui_observation": "An unresolved prompt existed before the retained rollout tail.",
-      "codexdeck_expected": {"attention": "NONE", "attention_complete": false},
+      "codexdeck_expected": {
+        "attention": "NONE",
+        "attention_complete": false
+      },
       "adjudication": {
         "semantic": "possibly_unresolved",
         "basis": "Missing pre-tail history cannot prove that attention is absent.",
         "invalidates": "Do not publish attention NONE as complete after a cold-start gap without a clear baseline."
       },
-      "support": {"replay": true, "state_machine": true, "terminal_store": false, "tui": true}
+      "support": {
+        "replay": true,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
     },
     {
       "id": "GT-TERMINAL-TP-001",
@@ -81,19 +132,36 @@
       "classification": "true_positive",
       "runner": "terminal",
       "evidence": {
-        "sources": ["rollout"],
+        "sources": [
+          "rollout"
+        ],
         "updates": [
-          {"source_id": "SOURCE_ID", "observed_at": 1, "call_id": "CALL_ID", "process_id": "PROCESS_ID", "terminal_candidate": true, "status": "running"}
+          {
+            "source_id": "SOURCE_ID",
+            "observed_at": 1,
+            "call_id": "CALL_ID",
+            "process_id": "PROCESS_ID",
+            "terminal_candidate": true,
+            "status": "running"
+          }
         ]
       },
       "codex_ui_observation": "One background process was shown for the matching invocation.",
-      "codexdeck_expected": {"confirmed": 1, "ambiguous": 0},
+      "codexdeck_expected": {
+        "confirmed": 1,
+        "ambiguous": 0
+      },
       "adjudication": {
         "semantic": "owned_terminal",
         "basis": "Protocol process identity confirms the association.",
         "invalidates": "Display call IDs are not sufficient when process identity conflicts."
       },
-      "support": {"replay": false, "state_machine": false, "terminal_store": true, "tui": true}
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": true,
+        "tui": true
+      }
     },
     {
       "id": "GT-TERMINAL-AMB-001",
@@ -101,19 +169,35 @@
       "classification": "ambiguous",
       "runner": "terminal",
       "evidence": {
-        "sources": ["rollout"],
+        "sources": [
+          "rollout"
+        ],
         "updates": [
-          {"source_id": "SOURCE_ID", "observed_at": 1, "call_id": "CALL_ID", "terminal_candidate": true, "status": "running"}
+          {
+            "source_id": "SOURCE_ID",
+            "observed_at": 1,
+            "call_id": "CALL_ID",
+            "terminal_candidate": true,
+            "status": "running"
+          }
         ]
       },
       "codex_ui_observation": "The durable record had a call ID but no rollout generation or process identity.",
-      "codexdeck_expected": {"confirmed": 0, "ambiguous": 1},
+      "codexdeck_expected": {
+        "confirmed": 0,
+        "ambiguous": 1
+      },
       "adjudication": {
         "semantic": "ambiguous_owner",
         "basis": "A reused call ID without process or rollout scope cannot prove ownership.",
         "invalidates": "Never upgrade call-id-only correlation to confirmed association."
       },
-      "support": {"replay": false, "state_machine": false, "terminal_store": true, "tui": true}
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": true,
+        "tui": true
+      }
     },
     {
       "id": "GT-OBSERVER-TP-001",
@@ -121,17 +205,31 @@
       "classification": "true_positive",
       "runner": "coverage",
       "evidence": {
-        "sources": ["process", "socket"],
-        "coverage": {"network_probe_complete": false, "silence_probe_complete": false}
+        "sources": [
+          "process",
+          "socket"
+        ],
+        "coverage": {
+          "network_probe_complete": false,
+          "silence_probe_complete": false
+        }
       },
       "codex_ui_observation": "Codex remained visible while current observer probes failed.",
-      "codexdeck_expected": {"network_complete": false, "silence_complete": false},
+      "codexdeck_expected": {
+        "network_complete": false,
+        "silence_complete": false
+      },
       "adjudication": {
         "semantic": "observer_degraded",
         "basis": "A failed current probe is direct evidence about observer quality.",
         "invalidates": "Do not hide probe failure behind an unchanged workload lifecycle."
       },
-      "support": {"replay": false, "state_machine": true, "terminal_store": false, "tui": true}
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
     },
     {
       "id": "GT-OBSERVER-FP-001",
@@ -139,17 +237,31 @@
       "classification": "false_positive",
       "runner": "coverage",
       "evidence": {
-        "sources": ["process", "socket"],
-        "coverage": {"network_probe_complete": true, "silence_probe_complete": true}
+        "sources": [
+          "process",
+          "socket"
+        ],
+        "coverage": {
+          "network_probe_complete": true,
+          "silence_probe_complete": true
+        }
       },
       "codex_ui_observation": "Codex produced no new semantic event, but all observer probes completed.",
-      "codexdeck_expected": {"network_complete": true, "silence_complete": true},
+      "codexdeck_expected": {
+        "network_complete": true,
+        "silence_complete": true
+      },
       "adjudication": {
         "semantic": "observer_healthy_workload_quiet",
         "basis": "Workload silence is distinct from observer scheduling or collector failure.",
         "invalidates": "Do not infer observer degradation solely from lack of Codex events."
       },
-      "support": {"replay": false, "state_machine": true, "terminal_store": false, "tui": true}
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
     },
     {
       "id": "GT-OBSERVER-UNRESOLVED-001",
@@ -157,17 +269,1352 @@
       "classification": "unresolved",
       "runner": "coverage",
       "evidence": {
-        "sources": ["process", "socket", "rollout"],
-        "coverage": {"network_probe_complete": false, "silence_probe_complete": false}
+        "sources": [
+          "process",
+          "socket",
+          "rollout"
+        ],
+        "coverage": {
+          "network_probe_complete": false,
+          "silence_probe_complete": false
+        }
       },
       "codex_ui_observation": "Codex was still visible, while observer probes were stale or unavailable.",
-      "codexdeck_expected": {"network_complete": false, "silence_complete": false},
+      "codexdeck_expected": {
+        "network_complete": false,
+        "silence_complete": false
+      },
       "adjudication": {
         "semantic": "observer_degraded",
         "basis": "Probe failure is observer state and does not prove workload silence or network health.",
         "invalidates": "Do not convert missing socket/process evidence into IDLE, CLOSED, or healthy conclusions."
       },
-      "support": {"replay": false, "state_machine": true, "terminal_store": false, "tui": true}
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-FP-001",
+      "domain": "stall_silence",
+      "classification": "false_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "socket"
+        ],
+        "event": {
+          "timestamp": 370,
+          "kind": "MODEL_PROGRESS"
+        },
+        "now": 500,
+        "network": "ACTIVE",
+        "pulse": {
+          "last_network_progress_at": 498,
+          "network_probe_at": 500,
+          "process_probe_at": 500,
+          "rollout_probe_at": 500,
+          "process_activity": {
+            "available": true
+          }
+        }
+      },
+      "codex_ui_observation": "The UI remained in a long reasoning phase while network counters still advanced.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "silence": "QUIET_ACTIVE"
+      },
+      "adjudication": {
+        "semantic": "long_thinking_active",
+        "basis": "Recent supporting activity prevents a stall conclusion.",
+        "invalidates": "Do not classify long model reasoning as stalled from elapsed time alone."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-FP-002",
+      "domain": "stall_silence",
+      "classification": "false_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "process"
+        ],
+        "event": {
+          "timestamp": 370,
+          "kind": "TOOL_RUNNING"
+        },
+        "now": 500,
+        "pulse": {
+          "last_process_activity_at": 499,
+          "process_probe_at": 500,
+          "rollout_probe_at": 500,
+          "process_activity": {
+            "available": true,
+            "active": true
+          }
+        }
+      },
+      "codex_ui_observation": "A long tool remained alive and showed process activity.",
+      "codexdeck_expected": {
+        "lifecycle": "RUNNING_TOOL",
+        "silence": "QUIET_ACTIVE"
+      },
+      "adjudication": {
+        "semantic": "long_tool_active",
+        "basis": "Process-tree progress is current evidence even when tool output is quiet.",
+        "invalidates": "Do not use a fixed tool duration as proof of a stall."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-FP-003",
+      "domain": "stall_silence",
+      "classification": "false_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "process"
+        ],
+        "event": {
+          "timestamp": 360,
+          "kind": "MODEL_PROGRESS"
+        },
+        "now": 500,
+        "pulse": {
+          "last_process_activity_at": 497,
+          "quiet_full_samples": 2,
+          "process_activity": {
+            "available": true,
+            "active": true
+          }
+        }
+      },
+      "codex_ui_observation": "Rollout did not grow, while a child process continued to perform work.",
+      "codexdeck_expected": {
+        "silence": "QUIET_ACTIVE"
+      },
+      "adjudication": {
+        "semantic": "rollout_quiet_process_active",
+        "basis": "A newer process observation outranks absence of rollout growth.",
+        "invalidates": "Do not equate a quiet rollout with a quiet workload."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-FP-004",
+      "domain": "stall_silence",
+      "classification": "false_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "process"
+        ],
+        "event": {
+          "timestamp": 360,
+          "kind": "TURN_COMPLETED"
+        },
+        "now": 500,
+        "pulse": {
+          "quiet_full_samples": 3,
+          "process_activity": {
+            "available": true
+          }
+        }
+      },
+      "codex_ui_observation": "The turn had already completed and the launcher process was still present.",
+      "codexdeck_expected": {
+        "lifecycle": "COMPLETED",
+        "silence": "NORMAL"
+      },
+      "adjudication": {
+        "semantic": "completed_with_residual_process",
+        "basis": "A structured turn terminal record ends active silence assessment.",
+        "invalidates": "Do not keep stall state alive solely because a process remains."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-TP-001",
+      "domain": "stall_silence",
+      "classification": "true_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "process",
+          "socket"
+        ],
+        "event": {
+          "timestamp": 370,
+          "kind": "MODEL_PROGRESS"
+        },
+        "now": 500,
+        "pulse": {
+          "quiet_full_samples": 2,
+          "process_activity": {
+            "available": true
+          }
+        }
+      },
+      "codex_ui_observation": "The UI remained generating and two full samples found no activity on any observed source.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "silence": "STALL_SUSPECT",
+        "severity": "warning"
+      },
+      "adjudication": {
+        "semantic": "stall_suspect",
+        "basis": "Two complete quiet windows past the phase threshold support a suspicious stall.",
+        "invalidates": "A single old event is insufficient; require repeated current observations."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-TP-002",
+      "domain": "stall_silence",
+      "classification": "true_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "process",
+          "socket"
+        ],
+        "event": {
+          "timestamp": 180,
+          "kind": "MODEL_PROGRESS"
+        },
+        "now": 500,
+        "pulse": {
+          "quiet_full_samples": 2,
+          "process_activity": {
+            "available": true
+          }
+        }
+      },
+      "codex_ui_observation": "The same generating phase stayed quiet beyond the severe threshold.",
+      "codexdeck_expected": {
+        "silence": "STALL_SUSPECT",
+        "severity": "severe"
+      },
+      "adjudication": {
+        "semantic": "severe_stall_suspect",
+        "basis": "Prolonged silence after repeated complete probes raises severity without inventing failure.",
+        "invalidates": "Do not label severe silence as a terminal failure."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-UNRESOLVED-001",
+      "domain": "stall_silence",
+      "classification": "unresolved",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "process"
+        ],
+        "event": {
+          "timestamp": 360,
+          "kind": "MODEL_PROGRESS"
+        },
+        "now": 500,
+        "pulse": {
+          "quiet_full_samples": 2,
+          "collector_stale": true,
+          "collector_stale_reason": "process probe stale",
+          "process_activity": {
+            "available": true
+          }
+        }
+      },
+      "codex_ui_observation": "The UI still showed work, but the process collector was stale.",
+      "codexdeck_expected": {
+        "silence": "OBSERVER_BLIND"
+      },
+      "adjudication": {
+        "semantic": "observer_blind",
+        "basis": "Collector staleness describes observer quality rather than workload state.",
+        "invalidates": "Do not publish quiet, stalled, or healthy workload conclusions from blind probes."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-STALL-FP-005",
+      "domain": "stall_silence",
+      "classification": "false_positive",
+      "runner": "silence",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "historical_baseline"
+        ],
+        "event": {
+          "timestamp": 370,
+          "kind": "MODEL_PROGRESS"
+        },
+        "now": 500,
+        "pulse": {
+          "quiet_full_samples": 2,
+          "silence_baseline_samples": 5,
+          "silence_p95_seconds": 100,
+          "process_activity": {
+            "available": true
+          }
+        }
+      },
+      "codex_ui_observation": "Observed historical phases commonly remained quiet this long.",
+      "codexdeck_expected": {
+        "silence": "QUIET_UNKNOWN"
+      },
+      "adjudication": {
+        "semantic": "baseline_adjusted_quiet",
+        "basis": "A reviewed historical p95 raises the suspicious threshold.",
+        "invalidates": "Do not ignore a sufficient local silence baseline."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-TP-001",
+      "domain": "network",
+      "classification": "true_positive",
+      "runner": "network",
+      "evidence": {
+        "sources": [
+          "socket"
+        ],
+        "before": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external",
+            "bytes_received": 10
+          },
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.11:443",
+            "pid": 42,
+            "fd": 4,
+            "route": "external",
+            "bytes_received": 10
+          }
+        ],
+        "after": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external",
+            "bytes_received": 10,
+            "lastsnd_ms": 60000,
+            "lastrcv_ms": 60000
+          },
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.11:443",
+            "pid": 42,
+            "fd": 4,
+            "route": "external",
+            "bytes_received": 20
+          }
+        ]
+      },
+      "codex_ui_observation": "One connection was idle while another connection for the same process received data.",
+      "codexdeck_expected": {
+        "state": "ACTIVE",
+        "connection_count": 2
+      },
+      "adjudication": {
+        "semantic": "aggregate_active_flow",
+        "basis": "Any current active routed flow keeps the process aggregate active.",
+        "invalidates": "Do not let one idle flow overwrite another active flow."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-TP-002",
+      "domain": "network",
+      "classification": "true_positive",
+      "runner": "network",
+      "evidence": {
+        "sources": [
+          "socket"
+        ],
+        "before": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external",
+            "bytes_sent": 100,
+            "bytes_acked": 50
+          }
+        ],
+        "after": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external",
+            "bytes_sent": 100,
+            "bytes_acked": 90
+          }
+        ]
+      },
+      "codex_ui_observation": "The request had no new payload bytes but TCP acknowledgements advanced.",
+      "codexdeck_expected": {
+        "state": "ACTIVE"
+      },
+      "adjudication": {
+        "semantic": "ack_progress",
+        "basis": "ACK delta is transport progress even when send and receive byte counters are unchanged.",
+        "invalidates": "Do not classify an ACK-progress window as idle or stalled."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-FP-001",
+      "domain": "network",
+      "classification": "false_positive",
+      "runner": "network",
+      "evidence": {
+        "sources": [
+          "socket"
+        ],
+        "before": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external",
+            "retrans_total": 1
+          }
+        ],
+        "after": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external",
+            "retrans_total": 2
+          }
+        ]
+      },
+      "codex_ui_observation": "One sample showed a retransmission with no higher-level failure.",
+      "codexdeck_expected": {
+        "state": "SUSPECT"
+      },
+      "adjudication": {
+        "semantic": "single_retransmit",
+        "basis": "One abnormal transport window supports suspicion, not a confirmed stall.",
+        "invalidates": "Do not promote a single retransmit delta directly to STALLED."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-TP-003",
+      "domain": "network",
+      "classification": "true_positive",
+      "runner": "network",
+      "evidence": {
+        "sources": [
+          "socket"
+        ],
+        "before": [
+          {
+            "state": "ESTAB",
+            "recv_q": 0,
+            "send_q": 0,
+            "local": "127.0.0.1:5000",
+            "peer": "192.0.2.10:443",
+            "pid": 42,
+            "fd": 3,
+            "route": "external"
+          }
+        ],
+        "after": []
+      },
+      "codex_ui_observation": "The routed connection disappeared between complete socket samples.",
+      "codexdeck_expected": {
+        "state": "CLOSED",
+        "connection_count": 0
+      },
+      "adjudication": {
+        "semantic": "connection_closed",
+        "basis": "A complete before/after transition supports transport closure.",
+        "invalidates": "Do not claim an active socket after a verified close."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-FP-002",
+      "domain": "network",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout",
+          "socket"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TURN_COMPLETED"
+          }
+        ],
+        "network": "CLOSED",
+        "now": 100
+      },
+      "codex_ui_observation": "The Codex UI showed a completed turn after its TCP connection closed.",
+      "codexdeck_expected": {
+        "lifecycle": "COMPLETED",
+        "recovery": "NONE"
+      },
+      "adjudication": {
+        "semantic": "closed_after_completion",
+        "basis": "Structured lifecycle remains authoritative over supporting socket state.",
+        "invalidates": "Do not convert socket CLOSED into TURN_FAILED."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-FP-003",
+      "domain": "network",
+      "classification": "false_positive",
+      "runner": "network_window",
+      "evidence": {
+        "sources": [
+          "socket"
+        ],
+        "state": "SUSPECT",
+        "reason": "send queue",
+        "previous_windows": 0,
+        "recent_protocol_progress": false
+      },
+      "codex_ui_observation": "Only the first abnormal transport window had been observed.",
+      "codexdeck_expected": {
+        "state": "SUSPECT",
+        "windows": 1
+      },
+      "adjudication": {
+        "semantic": "first_abnormal_window",
+        "basis": "The confirmation rule requires two consecutive abnormal windows.",
+        "invalidates": "Do not confirm a stall from one window."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-TP-004",
+      "domain": "network",
+      "classification": "true_positive",
+      "runner": "network_window",
+      "evidence": {
+        "sources": [
+          "socket"
+        ],
+        "state": "SUSPECT",
+        "reason": "send queue",
+        "previous_windows": 1,
+        "recent_protocol_progress": false
+      },
+      "codex_ui_observation": "A second consecutive abnormal window arrived without protocol progress.",
+      "codexdeck_expected": {
+        "state": "STALLED",
+        "windows": 2
+      },
+      "adjudication": {
+        "semantic": "confirmed_transport_stall",
+        "basis": "Two consecutive suspect windows satisfy the transport-stall support rule.",
+        "invalidates": "Do not reset consecutive abnormal evidence without progress."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-NETWORK-FP-004",
+      "domain": "network",
+      "classification": "false_positive",
+      "runner": "network_window",
+      "evidence": {
+        "sources": [
+          "socket",
+          "rollout"
+        ],
+        "state": "SUSPECT",
+        "reason": "send queue",
+        "previous_windows": 1,
+        "recent_protocol_progress": true
+      },
+      "codex_ui_observation": "The socket metric looked abnormal while Codex emitted fresh protocol progress.",
+      "codexdeck_expected": {
+        "state": "IDLE",
+        "windows": 0
+      },
+      "adjudication": {
+        "semantic": "protocol_progress_overrides_suspect",
+        "basis": "Fresh authoritative progress clears the supporting stall window.",
+        "invalidates": "Do not let socket suspicion override current semantic progress."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-TP-001",
+      "domain": "discovery",
+      "classification": "true_positive",
+      "runner": "identity",
+      "evidence": {
+        "sources": [
+          "process_environment"
+        ],
+        "kind": "instance",
+        "left": {
+          "codex_home": "/CODEX_HOME_A",
+          "sqlite_home": "/SQLITE_HOME_A"
+        },
+        "right": {
+          "codex_home": "/CODEX_HOME_B",
+          "sqlite_home": "/SQLITE_HOME_B"
+        }
+      },
+      "codex_ui_observation": "Two Codex instances used different home pairs.",
+      "codexdeck_expected": {
+        "equal": false
+      },
+      "adjudication": {
+        "semantic": "multiple_homes",
+        "basis": "The full CODEX_HOME and SQLite-home pair defines instance identity.",
+        "invalidates": "Do not merge instances by workspace or executable name."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-TP-002",
+      "domain": "discovery",
+      "classification": "true_positive",
+      "runner": "identity",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "kind": "session",
+        "left": {
+          "session_id": "SESSION_ID_A"
+        },
+        "right": {
+          "session_id": "SESSION_ID_B"
+        }
+      },
+      "codex_ui_observation": "Two sessions shared one instance and workspace.",
+      "codexdeck_expected": {
+        "equal": false
+      },
+      "adjudication": {
+        "semantic": "parallel_sessions",
+        "basis": "Session/thread identity remains distinct inside the same instance.",
+        "invalidates": "Do not merge sessions solely because workspace and home match."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-TP-003",
+      "domain": "discovery",
+      "classification": "true_positive",
+      "runner": "identity",
+      "evidence": {
+        "sources": [
+          "process"
+        ],
+        "kind": "process",
+        "left": {
+          "pid": 42,
+          "start_time": 100
+        },
+        "right": {
+          "pid": 42,
+          "start_time": 101
+        }
+      },
+      "codex_ui_observation": "The kernel reused a PID after the earlier process exited.",
+      "codexdeck_expected": {
+        "equal": false
+      },
+      "adjudication": {
+        "semantic": "pid_reuse",
+        "basis": "Kernel start time scopes process identity across PID reuse.",
+        "invalidates": "Do not reuse caches keyed only by PID."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-TP-004",
+      "domain": "discovery",
+      "classification": "true_positive",
+      "runner": "candidate",
+      "evidence": {
+        "sources": [
+          "process"
+        ],
+        "command": "node",
+        "args": "node /opt/bin/codex resume SESSION_ID"
+      },
+      "codex_ui_observation": "The process list showed the Node launcher for Codex.",
+      "codexdeck_expected": {
+        "candidate": true,
+        "role": "launcher"
+      },
+      "adjudication": {
+        "semantic": "wrapped_launcher",
+        "basis": "The executable path contains the confirmed Codex launcher form.",
+        "invalidates": "Do not require comm to equal codex for a known launcher wrapper."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-TP-005",
+      "domain": "discovery",
+      "classification": "true_positive",
+      "runner": "candidate",
+      "evidence": {
+        "sources": [
+          "process"
+        ],
+        "command": "worker",
+        "args": "/opt/codex app-server --listen stdio"
+      },
+      "codex_ui_observation": "A renamed process exposed the structured app-server invocation.",
+      "codexdeck_expected": {
+        "candidate": true,
+        "role": "app-server"
+      },
+      "adjudication": {
+        "semantic": "renamed_app_server",
+        "basis": "The bounded command line provides a Codex token and app-server role.",
+        "invalidates": "Do not reject a renamed app-server based on comm alone."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-UNRESOLVED-001",
+      "domain": "discovery",
+      "classification": "unresolved",
+      "runner": "confirmation",
+      "evidence": {
+        "sources": [
+          "process_environment",
+          "open_files"
+        ],
+        "environment": {
+          "CODEX_HOME": "/CODEX_HOME_A"
+        },
+        "targets": [
+          "/CODEX_HOME_B/sessions/2026/08/23/rollout-SESSION_ID.jsonl"
+        ],
+        "cwd": "/workspace-a"
+      },
+      "codex_ui_observation": "Environment and an open rollout descriptor identified different homes.",
+      "codexdeck_expected": {
+        "conflict": "conflicting_codex_home_evidence",
+        "observed": [
+          "official_environment",
+          "active_rollout_file",
+          "session_identity"
+        ]
+      },
+      "adjudication": {
+        "semantic": "conflicting_home_evidence",
+        "basis": "Conflicting direct sources remain visible and unresolved.",
+        "invalidates": "Do not choose whichever home is easier to display."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-DISCOVERY-FP-001",
+      "domain": "discovery",
+      "classification": "false_positive",
+      "runner": "source_location",
+      "evidence": {
+        "sources": [
+          "process"
+        ],
+        "process": {
+          "terminal": "?"
+        }
+      },
+      "codex_ui_observation": "No TTY, tmux, VS Code, or SSH clue was observable.",
+      "codexdeck_expected": {
+        "sufficient": false,
+        "label": "定位线索不足"
+      },
+      "adjudication": {
+        "semantic": "insufficient_terminal_clues",
+        "basis": "PID and cwd help manual correlation but do not identify a terminal.",
+        "invalidates": "Do not invent terminal ownership from workspace proximity."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": false,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-RECOVERY-TP-001",
+      "domain": "recovery",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TURN_STARTED"
+          },
+          {
+            "timestamp": 91,
+            "kind": "RECONNECTING"
+          },
+          {
+            "timestamp": 92,
+            "kind": "MODEL_PROGRESS"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI reconnected and then resumed model output.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "recovery": "RECOVERED"
+      },
+      "adjudication": {
+        "semantic": "reconnect_recovered",
+        "basis": "Fresh semantic progress closes a pending reconnect episode.",
+        "invalidates": "Do not leave recovery stuck at RECONNECTING after progress."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-RECOVERY-TP-002",
+      "domain": "recovery",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TURN_STARTED"
+          },
+          {
+            "timestamp": 91,
+            "kind": "TRANSPORT_FALLBACK"
+          },
+          {
+            "timestamp": 92,
+            "kind": "MODEL_PROGRESS"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI fell back to another transport and resumed output.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "recovery": "RECOVERED"
+      },
+      "adjudication": {
+        "semantic": "fallback_recovered",
+        "basis": "Progress after fallback is direct recovery evidence.",
+        "invalidates": "Do not report fallback as an unresolved failure after resumed progress."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-RECOVERY-TP-003",
+      "domain": "recovery",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TURN_STARTED"
+          },
+          {
+            "timestamp": 92,
+            "kind": "RECONNECTING"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI was actively reconnecting and had not resumed.",
+      "codexdeck_expected": {
+        "recovery": "RECONNECTING"
+      },
+      "adjudication": {
+        "semantic": "reconnecting",
+        "basis": "The latest typed recovery edge is still open.",
+        "invalidates": "Do not infer recovery before a progress or explicit recovered edge."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-RECOVERY-FP-001",
+      "domain": "recovery",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 88,
+            "kind": "TURN_STARTED"
+          },
+          {
+            "timestamp": 89,
+            "kind": "TURN_FAILED"
+          },
+          {
+            "timestamp": 90,
+            "kind": "TURN_STARTED"
+          },
+          {
+            "timestamp": 92,
+            "kind": "MODEL_PROGRESS"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "A newer turn was generating after an older turn failure.",
+      "codexdeck_expected": {
+        "lifecycle": "GENERATING",
+        "recovery": "NONE"
+      },
+      "adjudication": {
+        "semantic": "old_failure_resolved",
+        "basis": "A later turn baseline prevents an old failure from becoming current.",
+        "invalidates": "Do not resurrect historical failure across a newer turn."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-RECOVERY-FP-002",
+      "domain": "recovery",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "TURN_STARTED"
+          },
+          {
+            "timestamp": 91,
+            "kind": "RECONNECTING"
+          },
+          {
+            "timestamp": 92,
+            "kind": "TURN_FAILED"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The reconnect attempt ended in a typed turn failure.",
+      "codexdeck_expected": {
+        "lifecycle": "FAILED",
+        "recovery": "NONE"
+      },
+      "adjudication": {
+        "semantic": "reconnect_failed",
+        "basis": "A terminal failure closes the pending recovery state.",
+        "invalidates": "Do not continue displaying RECONNECTING after terminal failure."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-ATTENTION-TP-002",
+      "domain": "attention",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "ACTION_REQUIRED",
+            "source_id": "permission",
+            "metadata": {
+              "attention_state": "PERMISSIONS"
+            }
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI requested filesystem permission.",
+      "codexdeck_expected": {
+        "attention": "PERMISSIONS"
+      },
+      "adjudication": {
+        "semantic": "permission_required",
+        "basis": "The typed permission request is direct attention evidence.",
+        "invalidates": "Do not collapse permission into generic user input."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-ATTENTION-TP-003",
+      "domain": "attention",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "ACTION_REQUIRED",
+            "source_id": "mcp",
+            "metadata": {
+              "attention_state": "MCP_ELICITATION"
+            }
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "An MCP server displayed an elicitation form.",
+      "codexdeck_expected": {
+        "attention": "MCP_ELICITATION"
+      },
+      "adjudication": {
+        "semantic": "mcp_elicitation",
+        "basis": "The typed MCP elicitation preserves its interaction class.",
+        "invalidates": "Do not report all external prompts as approval."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-ATTENTION-TP-004",
+      "domain": "attention",
+      "classification": "true_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "ACTION_REQUIRED",
+            "source_id": "auth",
+            "metadata": {
+              "attention_state": "AUTH_ELICITATION"
+            }
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI requested authentication input.",
+      "codexdeck_expected": {
+        "attention": "AUTH_ELICITATION"
+      },
+      "adjudication": {
+        "semantic": "auth_elicitation",
+        "basis": "The typed authentication edge requires direct interaction.",
+        "invalidates": "Do not confuse authentication with a transport failure."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-ATTENTION-FP-001",
+      "domain": "attention",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "ACTION_REQUIRED",
+            "source_id": "question",
+            "metadata": {
+              "attention_state": "USER_INPUT"
+            }
+          },
+          {
+            "timestamp": 91,
+            "kind": "MODEL_PROGRESS"
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "The UI continued generating after the earlier question was answered.",
+      "codexdeck_expected": {
+        "attention": "NONE",
+        "lifecycle": "GENERATING"
+      },
+      "adjudication": {
+        "semantic": "progress_resolves_attention",
+        "basis": "Later progress is a trusted resolution baseline for prior attention.",
+        "invalidates": "Do not keep resolved user input in the attention queue."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
+    },
+    {
+      "id": "GT-ATTENTION-FP-002",
+      "domain": "attention",
+      "classification": "false_positive",
+      "runner": "state",
+      "evidence": {
+        "sources": [
+          "rollout"
+        ],
+        "events": [
+          {
+            "timestamp": 90,
+            "kind": "ACTION_REQUIRED",
+            "source_id": "original",
+            "metadata": {
+              "attention_state": "APPROVAL"
+            }
+          },
+          {
+            "timestamp": 92,
+            "kind": "TOOL_RUNNING"
+          },
+          {
+            "timestamp": 91,
+            "kind": "ACTION_REQUIRED",
+            "source_id": "late-duplicate",
+            "metadata": {
+              "attention_state": "APPROVAL"
+            }
+          }
+        ],
+        "now": 100
+      },
+      "codex_ui_observation": "A delayed duplicate approval record arrived after the tool had started.",
+      "codexdeck_expected": {
+        "attention": "NONE",
+        "lifecycle": "RUNNING_TOOL"
+      },
+      "adjudication": {
+        "semantic": "late_attention_does_not_revive",
+        "basis": "Event-time ordering keeps the later progress baseline authoritative.",
+        "invalidates": "Do not revive cleared attention from a late older record."
+      },
+      "support": {
+        "replay": false,
+        "state_machine": true,
+        "terminal_store": false,
+        "tui": true
+      }
     }
   ]
 }

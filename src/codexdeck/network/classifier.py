@@ -2,7 +2,36 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from codexdeck.models import ConnectionAssessment, NetworkEvidence, NetworkState, SocketInfo
+
+
+def confirm_process_stall(
+    network: NetworkEvidence,
+    previous_windows: int,
+    *,
+    recent_protocol_progress: bool,
+    required_windows: int = 2,
+) -> tuple[NetworkEvidence, int]:
+    """Apply the cross-sample stall rule without mutating published evidence."""
+
+    if network.state != NetworkState.SUSPECT:
+        return network, 0
+    if recent_protocol_progress:
+        return replace(network, state=NetworkState.IDLE, reason="TCP 指标异常，但 Codex 协议仍有进展"), 0
+
+    windows = previous_windows + 1
+    if windows < required_windows:
+        return network, windows
+    return (
+        replace(
+            network,
+            state=NetworkState.STALLED,
+            reason=f"连续 {windows} 个窗口异常：{network.reason}",
+        ),
+        windows,
+    )
 
 
 def idle_seconds(socket: SocketInfo) -> float | None:

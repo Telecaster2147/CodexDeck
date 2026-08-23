@@ -8,14 +8,31 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from codexdeck.codex.processes import (  # noqa: E402
+    _confirmation_evidence,
+    classify_role,
+    is_codex_candidate,
+)
 from codexdeck.codex.replay import ProtocolReplayRunner  # noqa: E402
 from codexdeck.codex.terminal import TerminalStore, TerminalUpdate  # noqa: E402
 from codexdeck.models import (  # noqa: E402
     EvidenceCoverage,
+    InstanceIdentity,
     NetworkEvidence,
+    NetworkState,
+    NormalizedEvent,
+    ObservationPulse,
     ProcessIdentity,
     ProcessInfo,
+    ProcessTreeActivity,
+    SessionIdentity,
+    SocketInfo,
 )
+from codexdeck.network.classifier import (  # noqa: E402
+    assess_process_network,
+    confirm_process_stall,
+)
+from codexdeck.presentation.source_location import source_terminal_location  # noqa: E402
 from codexdeck.state_machine import SessionStateMachine  # noqa: E402
 
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
@@ -47,9 +64,20 @@ class GroundTruthTests(unittest.TestCase):
         protocol = self.manifest["adjudication_protocol"]
         self.assertEqual(protocol["authority_order"][0], "codex_ui_direct_observation")
         cases = self.manifest["cases"]
-        self.assertEqual(
-            {case["domain"] for case in cases},
-            {"lifecycle", "attention", "terminal_association", "observer_degradation"},
+        self.assertGreaterEqual(len(cases), 30)
+        domains = {case["domain"] for case in cases}
+        self.assertTrue(
+            {
+                "lifecycle",
+                "attention",
+                "terminal_association",
+                "observer_degradation",
+                "stall_silence",
+                "discovery",
+                "network",
+                "recovery",
+            }
+            <= domains
         )
         classifications = {case["classification"] for case in cases}
         self.assertTrue(
@@ -106,8 +134,153 @@ class GroundTruthTests(unittest.TestCase):
                     }
                     for field, value in expected.items():
                         self.assertEqual(values[field], value)
+                elif runner == "state":
+                    machine = SessionStateMachine(900)
+                    machine.ingest("SESSION_ID", self._events(case["evidence"]["events"]))
+                    network = NetworkEvidence(
+                        NetworkState(case["evidence"].get("network", "IDLE"))
+                    )
+                    state = machine.derive(
+                        "SESSION_ID",
+                        process(),
+                        network,
+                        now=float(case["evidence"].get("now", 100.0)),
+                    )
+                    values = {
+                        "lifecycle": state.lifecycle.value,
+                        "attention": state.attention.value,
+                        "recovery": state.recovery.value,
+                        "process_exited": state.process_exited,
+                        "protocol_uncertain": state.protocol_uncertain,
+                    }
+                    for field, value in expected.items():
+                        self.assertEqual(values[field], value)
+                elif runner == "silence":
+                    machine = SessionStateMachine(900)
+                    machine.ingest("SESSION_ID", self._events([case["evidence"]["event"]]))
+                    pulse_data = dict(case["evidence"].get("pulse", {}))
+                    activity_data = pulse_data.pop("process_activity", {})
+                    pulse = ObservationPulse(
+                        **pulse_data,
+                        process_activity=ProcessTreeActivity(**activity_data),
+                    )
+                    state = machine.derive(
+                        "SESSION_ID",
+                        process(),
+                        NetworkEvidence(NetworkState(case["evidence"].get("network", "IDLE"))),
+                        now=float(case["evidence"]["now"]),
+                        observation=pulse,
+                    )
+                    values = {
+                        "lifecycle": state.lifecycle.value,
+                        "silence": state.silence.state.value,
+                        "severity": state.silence.severity,
+                    }
+                    for field, value in expected.items():
+                        self.assertEqual(values[field], value)
+                elif runner == "network":
+                    before = [SocketInfo(**item) for item in case["evidence"].get("before", [])]
+                    after = [SocketInfo(**item) for item in case["evidence"].get("after", [])]
+                    network = assess_process_network(before, after, idle_threshold=30.0)
+                    values = {
+                        "state": network.state.value,
+                        "connection_count": len(network.connections),
+                    }
+                    for field, value in expected.items():
+                        self.assertEqual(values[field], value)
+                elif runner == "network_window":
+                    evidence = case["evidence"]
+                    network, windows = confirm_process_stall(
+                        NetworkEvidence(NetworkState(evidence["state"]), evidence.get("reason", "")),
+                        int(evidence["previous_windows"]),
+                        recent_protocol_progress=bool(evidence["recent_protocol_progress"]),
+                    )
+                    self.assertEqual(network.state.value, expected["state"])
+                    self.assertEqual(windows, expected["windows"])
+                elif runner == "identity":
+                    left, right = self._identities(case["evidence"])
+                    self.assertEqual(left == right, expected["equal"])
+                elif runner == "candidate":
+                    evidence = case["evidence"]
+                    values = {
+                        "candidate": is_codex_candidate(evidence["command"], evidence["args"]),
+                        "role": classify_role(evidence["command"], evidence["args"]),
+                    }
+                    for field, value in expected.items():
+                        self.assertEqual(values[field], value)
+                elif runner == "confirmation":
+                    evidence = case["evidence"]
+                    observed, conflict = _confirmation_evidence(
+                        evidence.get("environment"),
+                        [Path(item) for item in evidence.get("targets", [])],
+                        Path(evidence.get("cwd", "/workspace-a")),
+                    )
+                    self.assertEqual(conflict, expected["conflict"])
+                    self.assertEqual(set(observed), set(expected["observed"]))
+                elif runner == "source_location":
+                    location = source_terminal_location(
+                        ProcessInfo(
+                            ProcessIdentity(42, 100),
+                            7,
+                            "codex",
+                            10,
+                            0.0,
+                            "S",
+                            "wait",
+                            "codex",
+                            "session",
+                            cwd="/workspace-a",
+                            **case["evidence"].get("process", {}),
+                        )
+                    )
+                    self.assertEqual(location.sufficient, expected["sufficient"])
+                    self.assertEqual(location.label, expected["label"])
                 else:
                     self.fail(f"unknown ground-truth runner: {runner}")
+
+    @staticmethod
+    def _events(records: list[dict[str, object]]) -> list[NormalizedEvent]:
+        events: list[NormalizedEvent] = []
+        for index, record in enumerate(records):
+            values = dict(record)
+            timestamp = float(values.pop("timestamp"))
+            kind = str(values.pop("kind"))
+            events.append(
+                NormalizedEvent(
+                    timestamp,
+                    kind,
+                    str(values.pop("summary", kind)),
+                    source="rollout",
+                    source_id=str(values.pop("source_id", f"GT_EVENT_{index}")),
+                    **values,
+                )
+            )
+        return events
+
+    @staticmethod
+    def _identities(evidence: dict[str, object]) -> tuple[object, object]:
+        kind = evidence["kind"]
+        left = evidence["left"]
+        right = evidence["right"]
+        assert isinstance(left, dict) and isinstance(right, dict)
+
+        if kind == "instance":
+            return (
+                InstanceIdentity(Path(str(left["codex_home"])), Path(str(left["sqlite_home"]))),
+                InstanceIdentity(Path(str(right["codex_home"])), Path(str(right["sqlite_home"]))),
+            )
+        if kind == "session":
+            instance = InstanceIdentity(Path("/CODEX_HOME_A"), Path("/SQLITE_HOME_A"))
+            return (
+                SessionIdentity(instance, str(left["session_id"])),
+                SessionIdentity(instance, str(right["session_id"])),
+            )
+        if kind == "process":
+            return (
+                ProcessIdentity(int(left["pid"]), int(left["start_time"])),
+                ProcessIdentity(int(right["pid"]), int(right["start_time"])),
+            )
+        raise AssertionError(f"unknown identity kind: {kind}")
 
 
 if __name__ == "__main__":
