@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from codexdeck.codex.events import is_compact_command, normalize_rollout_record, parse_timestamp
@@ -53,6 +54,19 @@ from codexdeck.codex.terminal import (
 from codexdeck.config import MAX_SESSION_TAIL
 from codexdeck.models import NormalizedEvent, RolloutIdentity
 from codexdeck.utils import message_text
+
+
+@dataclass(frozen=True)
+class ParsedRecordBatch:
+    events: tuple[NormalizedEvent, ...]
+    terminal_updates: tuple[TerminalUpdate, ...]
+    complete_record_count: int
+    ignored_record_count: int
+    position: int
+    record_count: int
+    budget_exceeded: bool
+    parse_started: float
+
 
 KNOWN_IGNORED_TYPES = {
     "event_msg:image_generation_end",
@@ -151,21 +165,53 @@ class RolloutReader:
     def _refresh_anchor(path: Path, cursor: RolloutCursor) -> None:
         refresh_anchor(path, cursor)
 
-    def read(self, path: Path) -> list[NormalizedEvent]:
-        return list(self.read_with_activity(path).events)
+    def _reset_path_state(self, key: str) -> None:
+        self.unknown_types.pop(key, None)
+        self.shape_types.pop(key, None)
+        self.codex_versions.pop(key, None)
+        self.terminal_metadata_attempted.pop(key, None)
+        self.terminal_metadata_backfills.pop(key, None)
+        self.terminal_metadata_saturated.discard(key)
+        self.terminal_metadata_dropped.pop(key, None)
 
-    def read_with_activity(
+    def _new_generation_cursor(
         self,
-        path: Path,
+        key: str,
+        stat: os.stat_result,
+        previous: RolloutCursor | None,
         *,
-        allow_terminal_metadata_backfill: bool = True,
-    ) -> RolloutReadResult:
-        observed_at = time.time()
-        key = str(path)
-        try:
-            stat = path.stat()
-        except OSError:
-            return RolloutReadResult((), RolloutActivity(key, observed_at))
+        uncertain: bool,
+        reason: str,
+        reset_path_state: bool,
+    ) -> RolloutCursor:
+        if reset_path_state:
+            self._reset_path_state(key)
+        start = max(0, stat.st_size - MAX_SESSION_TAIL)
+        if start:
+            self.bootstrap_truncated.add(key)
+        else:
+            self.bootstrap_truncated.discard(key)
+        cursor = RolloutCursor(
+            stat.st_dev,
+            stat.st_ino,
+            start,
+            generation=previous.generation + 1 if previous is not None else 0,
+            stat_size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            stream_uncertain=uncertain,
+            stream_uncertainty_count=(
+                (previous.stream_uncertainty_count if previous is not None else 0) + int(uncertain)
+            ),
+            stream_uncertainty_reason=reason,
+        )
+        self.cursors[key] = cursor
+        return cursor
+
+    def _prepare_generation(
+        self,
+        key: str,
+        stat: os.stat_result,
+    ) -> tuple[RolloutCursor, bool, bool]:
         cursor = self.cursors.get(key)
         replaced = cursor is not None and (cursor.device, cursor.inode) != (
             stat.st_dev,
@@ -173,217 +219,73 @@ class RolloutReader:
         )
         truncated = cursor is not None and stat.st_size < cursor.offset
         if cursor is None or replaced or truncated:
-            generation = cursor.generation + 1 if cursor is not None else 0
-            uncertainty_count = cursor.stream_uncertainty_count if cursor is not None else 0
-            if replaced or truncated:
-                self.unknown_types.pop(key, None)
-                self.shape_types.pop(key, None)
-                self.codex_versions.pop(key, None)
-                self.terminal_metadata_attempted.pop(key, None)
-                self.terminal_metadata_backfills.pop(key, None)
-                self.terminal_metadata_saturated.discard(key)
-                self.terminal_metadata_dropped.pop(key, None)
-            start = max(0, stat.st_size - MAX_SESSION_TAIL)
-            if start:
-                self.bootstrap_truncated.add(key)
-            else:
-                self.bootstrap_truncated.discard(key)
-            cursor = RolloutCursor(
-                stat.st_dev,
-                stat.st_ino,
-                start,
-                generation=generation,
-                stat_size=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
-                stream_uncertain=bool(truncated),
-                stream_uncertainty_count=uncertainty_count + int(truncated),
-                stream_uncertainty_reason="truncated" if truncated else "",
+            cursor = self._new_generation_cursor(
+                key,
+                stat,
+                cursor,
+                uncertain=bool(truncated),
+                reason="truncated" if truncated else "",
+                reset_path_state=replaced or truncated,
             )
-            self.cursors[key] = cursor
-        copy_truncated = False
-        bytes_read = 0
-        try:
-            with path.open("rb") as handle:
-                if not anchor_matches(handle, cursor):
-                    # Detect copy-truncate even when the writer has already
-                    # grown the new file beyond the previous byte offset.
-                    self.unknown_types.pop(key, None)
-                    self.shape_types.pop(key, None)
-                    self.codex_versions.pop(key, None)
-                    self.terminal_metadata_attempted.pop(key, None)
-                    self.terminal_metadata_backfills.pop(key, None)
-                    self.terminal_metadata_saturated.discard(key)
-                    self.terminal_metadata_dropped.pop(key, None)
-                    start = max(0, stat.st_size - MAX_SESSION_TAIL)
-                    if start:
-                        self.bootstrap_truncated.add(key)
-                    else:
-                        self.bootstrap_truncated.discard(key)
-                    cursor = RolloutCursor(
-                        stat.st_dev,
-                        stat.st_ino,
-                        start,
-                        generation=cursor.generation + 1,
-                        stat_size=stat.st_size,
-                        mtime_ns=stat.st_mtime_ns,
-                        stream_uncertain=True,
-                        stream_uncertainty_count=(cursor.stream_uncertainty_count + 1),
-                        stream_uncertainty_reason="content_anchor_mismatch",
-                    )
-                    self.cursors[key] = cursor
-                    copy_truncated = True
-                elif (
-                    cursor.offset
-                    and stat.st_size == cursor.stat_size
-                    and stat.st_mtime_ns != cursor.mtime_ns
-                ):
-                    cursor.stream_uncertain = True
-                    cursor.stream_uncertainty_count += 1
-                    cursor.stream_uncertainty_reason = "same_size_mtime_change_anchor_unchanged"
-                handle.seek(cursor.offset)
-                if (
-                    cursor.offset
-                    and not cursor.partial
-                    and cursor.offset == max(0, stat.st_size - MAX_SESSION_TAIL)
-                ):
-                    cursor.skipping_oversize = True
-                    cursor.gap_count += 1
-                    cursor.gap_reason = "bootstrap_started_mid_record"
-                read_start = cursor.offset
-                tick_read_start = read_start
-                previous_partial = cursor.partial
-                fresh = handle.read(MAX_INGRESS_BYTES_PER_TICK)
-                bytes_read = len(fresh)
-        except OSError:
-            return RolloutReadResult(
-                (),
-                RolloutActivity(
-                    key,
-                    observed_at,
-                    available=True,
-                    stat_size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    partial_bytes=len(cursor.partial),
-                    last_growth_at=cursor.last_growth_at,
-                    replaced=replaced,
-                    truncated=truncated,
-                    copy_truncated=copy_truncated,
-                ),
-            )
-        if bytes_read:
-            cursor.last_growth_at = observed_at
-        cursor.stat_size = stat.st_size
-        cursor.mtime_ns = stat.st_mtime_ns
-        if cursor.skipping_oversize:
-            newline = fresh.find(b"\n")
-            if newline < 0:
-                self._record_gap(cursor, fresh, cursor.gap_reason or "oversize_jsonl_record")
-                cursor.offset = read_start + len(fresh)
-                self._refresh_anchor(path, cursor)
-                backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
-                return RolloutReadResult(
-                    (),
-                    RolloutActivity(
-                        key,
-                        observed_at,
-                        available=True,
-                        stat_size=stat.st_size,
-                        mtime_ns=stat.st_mtime_ns,
-                        bytes_read=bytes_read,
-                        consumed_bytes=max(0, cursor.offset - tick_read_start),
-                        partial_bytes=0,
-                        last_growth_at=cursor.last_growth_at,
-                        replaced=replaced,
-                        truncated=truncated,
-                        copy_truncated=copy_truncated,
-                        backlog_bytes=backlog_bytes,
-                        backlog_records_lower_bound=int(bool(backlog_bytes)),
-                        backlog_age_seconds=backlog_age,
-                        budget_exceeded=bool(backlog_bytes),
-                        oversize_record_count=cursor.oversize_records,
-                        skipped_bytes=cursor.skipped_bytes,
-                        gap_count=cursor.gap_count,
-                        gap_reason=cursor.gap_reason,
-                        gap_hash=cursor.gap_hash,
-                        metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
-                        metadata_backfill_reason=(
-                            "metadata_backfill_limit"
-                            if key in self.terminal_metadata_saturated
-                            else ""
-                        ),
-                        terminal_parser_evictions=(self.terminal_parser.pending_batch_evictions),
-                        terminal_parser_eviction_reason=(
-                            self.terminal_parser.pending_batch_eviction_reason
-                        ),
-                    ),
-                )
-            skipped = fresh[: newline + 1]
-            self._record_gap(cursor, skipped, cursor.gap_reason or "oversize_jsonl_record")
-            cursor.skipping_oversize = False
-            read_start += newline + 1
-            fresh = fresh[newline + 1 :]
-            previous_partial = b""
+        return cursor, replaced, truncated
 
-        payload = previous_partial + fresh
-        last_newline = payload.rfind(b"\n")
-        if last_newline < 0:
-            if len(payload) > MAX_JSONL_RECORD_BYTES:
-                cursor.partial = b""
-                cursor.skipping_oversize = True
-                cursor.oversize_records += 1
-                cursor.gap_count += 1
-                self._record_gap(cursor, payload, "oversize_jsonl_record")
-            else:
-                cursor.partial = payload
-            cursor.offset = read_start + len(fresh)
-            self._refresh_anchor(path, cursor)
-            backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
-            backfill = self._advance_terminal_metadata_backfill(
-                path,
-                read_start,
-                (),
-                inode=stat.st_ino,
-                generation=cursor.generation,
-                allow=allow_terminal_metadata_backfill and not backlog_bytes,
-                max_bytes=max(0, MAX_INGRESS_BYTES_PER_TICK - bytes_read),
-            )
-            return RolloutReadResult(
-                (),
-                RolloutActivity(
-                    key,
-                    observed_at,
-                    available=True,
-                    stat_size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    bytes_read=bytes_read,
-                    consumed_bytes=max(0, cursor.offset - tick_read_start),
-                    partial_bytes=len(cursor.partial),
-                    last_growth_at=cursor.last_growth_at,
-                    replaced=replaced,
-                    truncated=truncated,
-                    copy_truncated=copy_truncated,
-                    backlog_bytes=backlog_bytes,
-                    backlog_records_lower_bound=int(bool(backlog_bytes)),
-                    backlog_age_seconds=backlog_age,
-                    budget_exceeded=bool(backlog_bytes),
-                    oversize_record_count=cursor.oversize_records,
-                    skipped_bytes=cursor.skipped_bytes,
-                    gap_count=cursor.gap_count,
-                    gap_reason=cursor.gap_reason,
-                    gap_hash=cursor.gap_hash,
-                    metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
-                    metadata_backfill_reason=(
-                        "metadata_backfill_limit" if key in self.terminal_metadata_saturated else ""
-                    ),
-                    terminal_parser_evictions=(self.terminal_parser.pending_batch_evictions),
-                    terminal_parser_eviction_reason=(
-                        self.terminal_parser.pending_batch_eviction_reason
-                    ),
-                ),
-                backfill,
-            )
-        complete = payload[: last_newline + 1]
-        trailing_partial = payload[last_newline + 1 :]
+    def read(self, path: Path) -> list[NormalizedEvent]:
+        return list(self.read_with_activity(path).events)
+
+    def _activity_base(
+        self,
+        *,
+        key: str,
+        observed_at: float,
+        stat: os.stat_result,
+        cursor: RolloutCursor,
+        replaced: bool,
+        truncated: bool,
+        copy_truncated: bool,
+    ) -> RolloutActivity:
+        return RolloutActivity(
+            key,
+            observed_at,
+            available=True,
+            stat_size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            partial_bytes=len(cursor.partial),
+            last_growth_at=cursor.last_growth_at,
+            replaced=replaced,
+            truncated=truncated,
+            copy_truncated=copy_truncated,
+            oversize_record_count=cursor.oversize_records,
+            skipped_bytes=cursor.skipped_bytes,
+            gap_count=cursor.gap_count,
+            gap_reason=cursor.gap_reason,
+            gap_hash=cursor.gap_hash,
+            metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
+            metadata_backfill_reason=(
+                "metadata_backfill_limit" if key in self.terminal_metadata_saturated else ""
+            ),
+            terminal_parser_evictions=self.terminal_parser.pending_batch_evictions,
+            terminal_parser_eviction_reason=self.terminal_parser.pending_batch_eviction_reason,
+            device=cursor.device,
+            inode=cursor.inode,
+            generation=cursor.generation,
+            anchor_hash=anchor_sha256(cursor.anchor),
+            stream_uncertain=cursor.stream_uncertain,
+            stream_uncertainty_count=cursor.stream_uncertainty_count,
+            stream_uncertainty_reason=cursor.stream_uncertainty_reason,
+        )
+
+    def _normalize_records(
+        self,
+        *,
+        path: Path,
+        key: str,
+        stat: os.stat_result,
+        cursor: RolloutCursor,
+        complete: bytes,
+        read_start: int,
+        previous_partial: bytes,
+        observed_at: float,
+    ) -> ParsedRecordBatch:
         events: list[NormalizedEvent] = []
         terminal_updates: list[TerminalUpdate] = []
         complete_record_count = 0
@@ -683,6 +585,185 @@ class RolloutReader:
                     ignored_record_count += 1
             else:
                 ignored_record_count += 1
+        return ParsedRecordBatch(
+            tuple(events),
+            tuple(terminal_updates),
+            complete_record_count,
+            ignored_record_count,
+            position,
+            record_count,
+            budget_exceeded,
+            parse_started,
+        )
+
+    def read_with_activity(
+        self,
+        path: Path,
+        *,
+        allow_terminal_metadata_backfill: bool = True,
+    ) -> RolloutReadResult:
+        observed_at = time.time()
+        key = str(path)
+        try:
+            stat = path.stat()
+        except OSError:
+            return RolloutReadResult((), RolloutActivity(key, observed_at))
+        cursor, replaced, truncated = self._prepare_generation(key, stat)
+        copy_truncated = False
+        bytes_read = 0
+        try:
+            with path.open("rb") as handle:
+                if not anchor_matches(handle, cursor):
+                    # Detect copy-truncate even when the writer has already
+                    # grown the new file beyond the previous byte offset.
+                    cursor = self._new_generation_cursor(
+                        key,
+                        stat,
+                        cursor,
+                        uncertain=True,
+                        reason="content_anchor_mismatch",
+                        reset_path_state=True,
+                    )
+                    copy_truncated = True
+                elif (
+                    cursor.offset
+                    and stat.st_size == cursor.stat_size
+                    and stat.st_mtime_ns != cursor.mtime_ns
+                ):
+                    cursor.stream_uncertain = True
+                    cursor.stream_uncertainty_count += 1
+                    cursor.stream_uncertainty_reason = "same_size_mtime_change_anchor_unchanged"
+                handle.seek(cursor.offset)
+                if (
+                    cursor.offset
+                    and not cursor.partial
+                    and cursor.offset == max(0, stat.st_size - MAX_SESSION_TAIL)
+                ):
+                    cursor.skipping_oversize = True
+                    cursor.gap_count += 1
+                    cursor.gap_reason = "bootstrap_started_mid_record"
+                read_start = cursor.offset
+                tick_read_start = read_start
+                previous_partial = cursor.partial
+                fresh = handle.read(MAX_INGRESS_BYTES_PER_TICK)
+                bytes_read = len(fresh)
+        except OSError:
+            return RolloutReadResult(
+                (),
+                self._activity_base(
+                    key=key,
+                    observed_at=observed_at,
+                    stat=stat,
+                    cursor=cursor,
+                    replaced=replaced,
+                    truncated=truncated,
+                    copy_truncated=copy_truncated,
+                ),
+            )
+        if bytes_read:
+            cursor.last_growth_at = observed_at
+        cursor.stat_size = stat.st_size
+        cursor.mtime_ns = stat.st_mtime_ns
+        if cursor.skipping_oversize:
+            newline = fresh.find(b"\n")
+            if newline < 0:
+                self._record_gap(cursor, fresh, cursor.gap_reason or "oversize_jsonl_record")
+                cursor.offset = read_start + len(fresh)
+                self._refresh_anchor(path, cursor)
+                backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
+                return RolloutReadResult(
+                    (),
+                    replace(
+                        self._activity_base(
+                            key=key,
+                            observed_at=observed_at,
+                            stat=stat,
+                            cursor=cursor,
+                            replaced=replaced,
+                            truncated=truncated,
+                            copy_truncated=copy_truncated,
+                        ),
+                        bytes_read=bytes_read,
+                        consumed_bytes=max(0, cursor.offset - tick_read_start),
+                        partial_bytes=0,
+                        backlog_bytes=backlog_bytes,
+                        backlog_records_lower_bound=int(bool(backlog_bytes)),
+                        backlog_age_seconds=backlog_age,
+                        budget_exceeded=bool(backlog_bytes),
+                    ),
+                )
+            skipped = fresh[: newline + 1]
+            self._record_gap(cursor, skipped, cursor.gap_reason or "oversize_jsonl_record")
+            cursor.skipping_oversize = False
+            read_start += newline + 1
+            fresh = fresh[newline + 1 :]
+            previous_partial = b""
+
+        payload = previous_partial + fresh
+        last_newline = payload.rfind(b"\n")
+        if last_newline < 0:
+            if len(payload) > MAX_JSONL_RECORD_BYTES:
+                cursor.partial = b""
+                cursor.skipping_oversize = True
+                cursor.oversize_records += 1
+                cursor.gap_count += 1
+                self._record_gap(cursor, payload, "oversize_jsonl_record")
+            else:
+                cursor.partial = payload
+            cursor.offset = read_start + len(fresh)
+            self._refresh_anchor(path, cursor)
+            backlog_bytes, backlog_age = self._update_backlog(cursor, stat.st_size, observed_at)
+            backfill = self._advance_terminal_metadata_backfill(
+                path,
+                read_start,
+                (),
+                inode=stat.st_ino,
+                generation=cursor.generation,
+                allow=allow_terminal_metadata_backfill and not backlog_bytes,
+                max_bytes=max(0, MAX_INGRESS_BYTES_PER_TICK - bytes_read),
+            )
+            return RolloutReadResult(
+                (),
+                replace(
+                    self._activity_base(
+                        key=key,
+                        observed_at=observed_at,
+                        stat=stat,
+                        cursor=cursor,
+                        replaced=replaced,
+                        truncated=truncated,
+                        copy_truncated=copy_truncated,
+                    ),
+                    bytes_read=bytes_read,
+                    consumed_bytes=max(0, cursor.offset - tick_read_start),
+                    partial_bytes=len(cursor.partial),
+                    backlog_bytes=backlog_bytes,
+                    backlog_records_lower_bound=int(bool(backlog_bytes)),
+                    backlog_age_seconds=backlog_age,
+                    budget_exceeded=bool(backlog_bytes),
+                ),
+                backfill,
+            )
+        complete = payload[: last_newline + 1]
+        trailing_partial = payload[last_newline + 1 :]
+        batch = self._normalize_records(
+            path=path,
+            key=key,
+            stat=stat,
+            cursor=cursor,
+            complete=complete,
+            read_start=read_start,
+            previous_partial=previous_partial,
+            observed_at=observed_at,
+        )
+        events = list(batch.events)
+        terminal_updates = list(batch.terminal_updates)
+        complete_record_count = batch.complete_record_count
+        ignored_record_count = batch.ignored_record_count
+        position = batch.position
+        record_count = batch.record_count
+        budget_exceeded = batch.budget_exceeded
+        parse_started = batch.parse_started
         if budget_exceeded:
             cursor.offset = position
             cursor.partial = b""
@@ -711,12 +792,16 @@ class RolloutReader:
         terminal_updates = [*backfill, *terminal_updates]
         return RolloutReadResult(
             tuple(events),
-            RolloutActivity(
-                key,
-                observed_at,
-                available=True,
-                stat_size=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
+            replace(
+                self._activity_base(
+                    key=key,
+                    observed_at=observed_at,
+                    stat=stat,
+                    cursor=cursor,
+                    replaced=replaced,
+                    truncated=truncated,
+                    copy_truncated=copy_truncated,
+                ),
                 bytes_read=bytes_read,
                 consumed_bytes=max(0, cursor.offset - tick_read_start),
                 complete_record_count=complete_record_count,
@@ -724,10 +809,6 @@ class RolloutReader:
                 ignored_record_count=ignored_record_count,
                 normalized_count=len(events),
                 partial_bytes=len(cursor.partial),
-                last_growth_at=cursor.last_growth_at,
-                replaced=replaced,
-                truncated=truncated,
-                copy_truncated=copy_truncated,
                 backlog_bytes=backlog_bytes,
                 backlog_records_lower_bound=(
                     max(0, complete.count(b"\n") - record_count) + int(bool(trailing_partial))
@@ -736,27 +817,7 @@ class RolloutReader:
                 ),
                 backlog_age_seconds=backlog_age,
                 budget_exceeded=budget_exceeded,
-                oversize_record_count=cursor.oversize_records,
-                skipped_bytes=cursor.skipped_bytes,
-                gap_count=cursor.gap_count,
-                gap_reason=cursor.gap_reason,
-                gap_hash=cursor.gap_hash,
                 parse_duration_seconds=time.monotonic() - parse_started,
-                metadata_backfill_dropped=self.terminal_metadata_dropped.get(key, 0),
-                metadata_backfill_reason=(
-                    "metadata_backfill_limit" if key in self.terminal_metadata_saturated else ""
-                ),
-                terminal_parser_evictions=self.terminal_parser.pending_batch_evictions,
-                terminal_parser_eviction_reason=(
-                    self.terminal_parser.pending_batch_eviction_reason
-                ),
-                device=cursor.device,
-                inode=cursor.inode,
-                generation=cursor.generation,
-                anchor_hash=anchor_sha256(cursor.anchor),
-                stream_uncertain=cursor.stream_uncertain,
-                stream_uncertainty_count=cursor.stream_uncertainty_count,
-                stream_uncertainty_reason=cursor.stream_uncertainty_reason,
             ),
             tuple(terminal_updates),
         )

@@ -6,7 +6,6 @@
   },
   "complex_functions": [
     "codexdeck.codex.events.normalize_rollout_record",
-    "codexdeck.codex.rollout.RolloutReader.read_with_activity",
     "codexdeck.codex.rollout.RolloutReader._terminal_metadata_backfill_step",
     "codexdeck.codex.terminal.TerminalStore.apply",
     "codexdeck.codex.terminal.TerminalStore.reconcile_children",
