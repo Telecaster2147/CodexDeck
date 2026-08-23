@@ -7,5 +7,5 @@ README 使用固定像素图片，避免不同平台缺少 SVG 字体时出现�
 - `settings.png`：`120x30` 设置界面
 - `narrow.png`：`72x24` 窄屏 Diagnosis 下钻
 
-截图内容仅使用 `CODEX_HOME`、`workspace-a`、`session-1` 等文档占位符，六个会话分别展示
-生成、待审批、后台终端、恢复、网络停顿和采集盲区。
+截图内容仅使用 `CODEX_HOME`、`workspace-a`、`session-1` 等文档占位符。overview 中导航、
+header 与 Diagnosis 使用同一个待审批会话状态。

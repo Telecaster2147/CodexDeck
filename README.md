@@ -24,12 +24,16 @@
 <img src="assets/screenshots/overview.png" alt="CodexDeck 六会话宽屏工作台，左侧按工作区组织会话，右侧显示待审批会话的 Diagnosis 证据" width="100%">
 
 <p align="center">
-  <sub>六个匿名会话同时覆盖生成、待审批、后台终端、恢复、网络停顿和采集盲区。</sub>
+  <sub>匿名会话示例：导航与 Inspector 对同一个待审批状态给出一致结论。</sub>
 </p>
 
 Codex CLI 擅长完成单个会话中的交互，但当多个工作区、后台命令和 Codex Home 同时运行时，
 运行状态会分散在不同终端和数据源中。CodexDeck 不接管任务，而是汇总当前用户可读的
 协议、进程、终端和网络证据，集中回答三个问题：
+
+**最适合 CodexDeck 的用户：** 经常在 Linux、WSL 或 SSH 环境中并行运行多个 Codex 会话，
+需要集中判断哪些会话仍在工作、等待处理或出现异常的开发者。只运行单个会话时，直接查看原
+Codex 终端通常更简单。
 
 - **谁还在工作？** 当前是在生成、compact、运行具体工具，还是等待上游响应？
 - **谁需要处理？** 哪个会话正在等待审批、权限、输入或登录，哪个会话刚刚失败？
@@ -48,7 +52,15 @@ Codex CLI 擅长完成单个会话中的交互，但当多个工作区、后台�
 > [!IMPORTANT]
 > CodexDeck 只观察。它不修改 Codex 配置、rollout、SQLite、进程、PTY 或网络流量。
 
-## 快速开始
+## 30 秒快速开始
+
+1. 在多个终端、workspace 或 worktree 中照常启动 Codex。
+2. 在同一个 Linux/WSL/SSH 环境中运行 `codexdeck`。
+3. 按 `]` 跳到下一个等待处理或异常的会话。
+4. 按 `2` 查看 Diagnosis，按 `3` 查看已持久化的 Terminal 证据。
+5. 根据 Diagnosis 中的 workspace、PID、TTY 和当前目录线索返回原 Codex 终端处理任务。
+
+CodexDeck 负责定位和解释，不接管源终端；Terminal 页也不是 Codex PTY 的实时镜像。
 
 ### 一键安装
 
@@ -264,8 +276,8 @@ flowchart LR
 
 | 节奏 | 负责内容 | 明确不做的事 |
 | --- | --- | --- |
-| **完整采样 · 默认 2 秒** | 进程发现、SQLite、socket、采集器健康、stale 状态、普通文件 tail、历史快照入队 | 不改变 Codex 运行状态，不等待历史库写入 |
-| **快速刷新 · 100 毫秒** | 增量读取已知活动 rollout，更新协议事件与持久化 terminal 记录 | 不重扫进程，不调用 `ss`，不查 SQLite，不抓包，不写历史 |
+| **完整采样 · 默认 2 秒** | 进程发现、SQLite、socket、采集器健康、stale 状态与普通文件 tail | 不改变 Codex 运行状态，不读取或消费 PTY |
+| **快速刷新 · 100 毫秒** | 增量读取已知活动 rollout，更新协议事件与持久化 terminal 记录 | 不重扫进程，不调用 `ss`，不查 SQLite，不执行普通文件 tail |
 
 完整采样中的 `ps` 与 `ss` 使用流式硬预算，不会先把全量主机输出读入内存。`ps` 优先按当前 UID
 或显式 PID 选择，并在保留前逐行丢弃非 Codex candidate；`ss` 逐行只保留目标 Codex PID 的 socket
@@ -342,6 +354,22 @@ retention 只限制公开时间线，状态机用有界轴基线保留当前 lif
 `tests/fixtures/ground_truth_manifest.json`。反例分为 true positive、false positive、false negative、
 ambiguous 和 unresolved；可复现误判先进入匿名语料，再修改识别逻辑。
 
+### Codex 兼容范围
+
+CI 当前用真实观察并匿名化的 Codex CLI `0.144.x` 与 `0.145.x` rollout、SQLite schema 和结构化日志
+fixture 验证生产 reader、normalizer、状态机和 TerminalStore。`codexdeck doctor` 会报告实际观察到的
+Codex 版本、schema family、unknown family 摘要与这两个已验证 minor；“已验证”表示仓库 fixture
+覆盖，不是对 Codex 内部格式稳定性的承诺。
+
+遇到新的上游 shape 时，维护流程固定为：复制最小记录结构并删除正文、路径、标识符和凭据 →
+记录产生它的 Codex CLI 版本 → 先加入 compatibility fixture → 裁决 lifecycle/attention/Terminal
+语义 → 用生产 replay 验证全部下游投影 → 最后更新 normalizer。兼容问题请附 Codex 版本，以及人工
+检查并进一步脱敏后的 `codexdeck doctor --format json`。
+
+0.3.x 发布后的安装、兼容、准确性、Terminal 关联、性能和 TUI 信号按
+[`RELEASE_OBSERVABILITY.md`](RELEASE_OBSERVABILITY.md) 的无遥测流程复盘；空 issue 数只表示
+“未收到报告”，不包装成成功率。
+
 ## Terminal 可观测性
 
 CodexDeck 不把 `NormalizedEvent.detail` 拼成伪终端，而是维护独立、有界、可搜索的 transcript 域。
@@ -368,6 +396,17 @@ session/workspace/command/tool/status/failure 等操作判断字段会把 bidi c
 default-ignorable 字符可视化为 `<U+XXXX>`，并按 display-cell width 截断；连续 combining marks 有独立
 上限。Terminal 的 `OUT`、`ERR`、`TTY`、`SYS` 列由 CodexDeck 固定生成，transcript 内容不能伪造或
 改变相邻行 provenance。检测到关键字段含不可见字符时发布 `UNICODE_INVISIBLE` diagnostic。
+
+### 返回源终端
+
+Diagnosis 会保守展示进程已经提供的定位证据：PID、父 PID、controlling TTY、当前 cwd，以及
+环境中明确存在的 tmux pane、`TERM_PROGRAM=vscode` 或 `SSH_TTY`。帮助页分别说明如何在 tmux、
+VS Code Remote、普通 terminal 和 SSH 中人工核对这些线索。进程没有 TTY/pane 证据时显示
+“定位线索不足”，只保留 workspace、当前 cwd 和 PID，不猜测归属。
+
+`/proc/PID/cwd` 表示采样时的当前目录，并不等同于可证明的启动 cwd；父进程也可能已经退出。因此
+CodexDeck 不把它们包装成精确跳转能力，仍然不接管 PTY、不写 stdin、不发送 signal、不自动切换
+terminal 或 pane。
 
 ## CLI 工作流
 
@@ -533,7 +572,8 @@ $XDG_CONFIG_HOME/codexdeck/preferences.json
 
 ### 本地性能证据
 
-`uv run python tools/benchmark_core.py` 是可复核、非门禁测量，不是产品 SLO。rollout 结果分别标记
+`uv run python tools/benchmark_core.py` 是可复核的探索性测量，不是产品 SLO；
+`uv run python tools/check_performance.py` 则用版本化宽松阈值执行 CI 回归门禁。rollout 结果分别标记
 `rollout_full_small`、`rollout_cold_start_tail`、`rollout_incremental_append`、
 `rollout_copy_truncate` 和 `multi_rollout_burst`，同时报告文件总大小、reader 实际读取字节、解析/忽略
 记录、保留事件与 ingress ticks。MiB/s 只以实际读取字节为分子；无 tracemalloc 的 runtime 与开启
@@ -562,17 +602,20 @@ src/
 ├── engine.py                # 采样编排、temporal cut 与 snapshot publication
 ├── engine_collectors.py     # 有界进程与 socket collector stages
 ├── engine_refresh.py        # 100ms rollout/terminal 快速刷新
+├── engine_state.py          # MonitorEngine cache/store owner 与生命周期登记
 ├── state_machine.py         # session ledger、事件时间与推导入口
 ├── state_axes.py            # lifecycle/attention/failure/completeness axes
 ├── state_summaries.py       # turn/tool/agent 与 capability 有界摘要
 ├── models.py                # 领域模型和 immutable snapshot
-├── codex/                   # 进程、路径、SQLite、rollout、事件与 terminal 读取器
+├── codex/                   # 进程、路径、SQLite、协议 family、rollout 与 terminal 子域
 ├── network/                 # ss 与 TCP 状态分类
 └── presentation/            # text、JSON、doctor、export 与 Textual TUI
 
 tests/                       # unittest 与 Textual Pilot 行为测试
 assets/screenshots/          # 预渲染的匿名 Textual README 截图
 codexdeck                    # 开发 checkout launcher
+ARCHITECTURE.md              # snapshot 边界、模型层次与运行态 state ownership
+RELEASE_OBSERVABILITY.md     # 0.3.x 无遥测发布健康复盘
 ```
 
 依赖方向保持为 `cli/presentation → app → engine → codex/network → models`。底层采集器不依赖 TUI。
