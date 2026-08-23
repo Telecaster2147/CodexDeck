@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from codex.file_tail import RegularFileTailCollector
 from codex.rollout import RolloutReader, TerminalMetadataBackfillCursor
 from codex.terminal import (
-    RegularFileTailCollector,
     TerminalProtocolParser,
     TerminalStore,
     TerminalUpdate,
@@ -2206,7 +2206,7 @@ const results = await Promise.all([
             workspace = root / "workspace-a"
             workspace.mkdir()
             log = workspace / "server.log"
-            log.write_bytes("好".encode("utf-8"))
+            log.write_bytes("好".encode())
             fd_dir = root / "proc" / "42" / "fd"
             fd_dir.mkdir(parents=True)
             (fd_dir / "1").symlink_to(log)

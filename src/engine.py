@@ -16,7 +16,8 @@ from codex.process_activity import ProcessActivityCollector
 from codex.processes import DiscoveryResult, ProcessDiscovery
 from codex.rollout import RolloutActivity, RolloutReader, latest_user_task, rollout_identity
 from codex.state_store import StateStore
-from codex.terminal import RegularFileTailCollector, TerminalStore
+from codex.file_tail import RegularFileTailCollector
+from codex.terminal import TerminalStore
 from diagnostics import CollectorTracker, make_diagnostic
 from engine_collectors import CollectorStagesMixin
 from engine_refresh import FastRefreshMixin
