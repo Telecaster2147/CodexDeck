@@ -35,6 +35,7 @@ class ResponsivenessReport:
     cadence_seconds: float
     correctness_passed: bool
     samples: tuple[ResponsivenessSample, ...]
+    failure_multiplier: float = 5.0
 
     @property
     def degraded_reasons(self) -> tuple[str, ...]:
@@ -56,6 +57,20 @@ class ResponsivenessReport:
 
     @property
     def responsiveness_status(self) -> str:
+        if not self.correctness_passed:
+            return "FAIL"
+        failure_threshold = self.cadence_seconds * self.failure_multiplier
+        if any(
+            value is not None and value > failure_threshold
+            for sample in self.samples
+            for value in (
+                sample.callback_latency_seconds,
+                sample.event_loop_lag_seconds,
+                sample.screen_update_seconds,
+                sample.key_to_visible_seconds,
+            )
+        ):
+            return "FAIL"
         return "DEGRADED" if self.degraded_reasons else "PASS"
 
     def as_dict(self) -> dict[str, object]:
@@ -63,6 +78,7 @@ class ResponsivenessReport:
             "correctness": "PASS" if self.correctness_passed else "FAIL",
             "responsiveness": self.responsiveness_status,
             "cadence_seconds": self.cadence_seconds,
+            "failure_threshold_seconds": self.cadence_seconds * self.failure_multiplier,
             "degraded_reasons": list(self.degraded_reasons),
             "samples": [
                 {

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from tools.verify_pty import run_fixture
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,9 +18,9 @@ class PtyEvidenceTests(unittest.TestCase):
 
     def test_manifest_covers_replayable_wide_and_narrow_records(self) -> None:
         self.assertEqual(self.manifest["schema_version"], 1)
-        self.assertEqual(
-            {case["fixture_id"] for case in self.manifest["cases"]},
-            {"PTY-WIDE-001", "PTY-NARROW-001"},
+        self.assertTrue(
+            {"PTY-WIDE-001", "PTY-NARROW-001", "PTY-RESIZE-001", "PTY-SEARCH-001"}
+            <= {case["fixture_id"] for case in self.manifest["cases"]}
         )
         required = set(self.manifest["record_contract"]["required"])
         self.assertIn("actual_state", required)

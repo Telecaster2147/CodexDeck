@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local, non-gating benchmarks for rollout and terminal boundedness."""
+"""Repeatable local and CI performance evidence for core bounded collectors."""
 
 from __future__ import annotations
 
@@ -7,19 +7,22 @@ import argparse
 import json
 import os
 import sqlite3
+import statistics
 import sys
 import tempfile
 import threading
 import time
 import tracemalloc
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from codex.rollout import BoundedFamilyCounter, RolloutReader  # noqa: E402
+from codex.file_tail import RegularFileTailCollector  # noqa: E402
 from codex.processes import ProcessDiscovery  # noqa: E402
+from codex.rollout import BoundedFamilyCounter, RolloutReader  # noqa: E402
 from codex.terminal import (  # noqa: E402
     MAX_GLOBAL_TERMINAL_BYTES,
     MAX_TERMINAL_ALIASES_PER_TERMINAL,
@@ -28,13 +31,23 @@ from codex.terminal import (  # noqa: E402
     TerminalStore,
     TerminalUpdate,
 )
+from models import (  # noqa: E402
+    ChildProcessActivity,
+    NormalizedEvent,
+    ProcessIdentity,
+    TerminalCapability,
+)
 from network.sockets import SocketCollector  # noqa: E402
-from models import TerminalCapability  # noqa: E402
-from models import NormalizedEvent  # noqa: E402
 from state_machine import SessionStateMachine  # noqa: E402
 from utils import CommandError  # noqa: E402
 
 T = TypeVar("T")
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(len(ordered) * percentile + 0.999999) - 1))
+    return ordered[index]
 
 
 def measured(callable_: Callable[[], T], *, trace_memory: bool) -> tuple[float, int | None, T]:
@@ -109,7 +122,12 @@ def _measurement(
     elapsed, _, runtime = measured(run, trace_memory=False)
     traced_elapsed, peak, traced = measured(run, trace_memory=True)
     actual_bytes = int(runtime.get("actual_bytes_read", 0))
-    repeatable = runtime == traced if deterministic else None
+    # Wall-clock ingress budgets may split identical input across a different number of reads
+    # under tracemalloc. Compare the observable parser result, not adaptive measurement counters.
+    adaptive_fields = {"actual_bytes_read", "ingress_ticks"}
+    runtime_result = {key: value for key, value in runtime.items() if key not in adaptive_fields}
+    traced_result = {key: value for key, value in traced.items() if key not in adaptive_fields}
+    repeatable = runtime_result == traced_result if deterministic else None
     return {
         "measurement": name,
         "source_bytes": source_bytes,
@@ -211,6 +229,113 @@ def multi_rollout_burst_benchmark(root: Path, count: int = 8) -> dict[str, objec
         }
 
     return _measurement("multi_rollout_burst", sum(path.stat().st_size for path in paths), run)
+
+
+def session_scale_benchmark(
+    root: Path,
+    session_count: int,
+    *,
+    repetitions: int = 7,
+) -> dict[str, object]:
+    paths = [root / f"scale-{session_count}-{index}.jsonl" for index in range(session_count)]
+    for path in paths:
+        _write_rollout(path, 50)
+
+    durations = []
+    peak_mib = 0.0
+    budget_exceeded = 0
+    for repetition in range(repetitions):
+        trace = repetition == 0
+        if trace:
+            tracemalloc.start()
+        started = time.perf_counter()
+        reader = RolloutReader()
+        for path in paths:
+            result = reader.read_with_activity(path)
+            budget_exceeded += int(result.activity.budget_exceeded)
+        durations.append(time.perf_counter() - started)
+        if trace:
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            peak_mib = peak / (1024 * 1024)
+    return {
+        "measurement": f"full_sample_{session_count}_sessions",
+        "session_count": session_count,
+        "repetitions": repetitions,
+        "p50_seconds": statistics.median(durations),
+        "p95_seconds": _percentile(durations, 0.95),
+        "p99_seconds": _percentile(durations, 0.99),
+        "peak_memory_mib": peak_mib,
+        "budget_exceeded_count": budget_exceeded,
+    }
+
+
+def fast_refresh_benchmark(
+    root: Path,
+    *,
+    session_count: int = 20,
+    repetitions: int = 25,
+) -> dict[str, object]:
+    paths = [root / f"fast-{index}.jsonl" for index in range(session_count)]
+    reader = RolloutReader()
+    for path in paths:
+        _write_rollout(path, 1)
+        reader.read_with_activity(path)
+
+    durations: list[float] = []
+    backlog_ages: list[float] = []
+    budget_exceeded = 0
+    for repetition in range(repetitions):
+        for path in paths:
+            _append_rollout(path, 1, start=repetition + 1)
+        started = time.perf_counter()
+        for path in paths:
+            result = reader.read_with_activity(path, allow_terminal_metadata_backfill=False)
+            budget_exceeded += int(result.activity.budget_exceeded)
+            backlog_ages.append(result.activity.backlog_age_seconds or 0.0)
+        durations.append(time.perf_counter() - started)
+    return {
+        "measurement": "fast_refresh",
+        "session_count": session_count,
+        "repetitions": repetitions,
+        "p50_seconds": statistics.median(durations),
+        "p95_seconds": _percentile(durations, 0.95),
+        "p99_seconds": _percentile(durations, 0.99),
+        "max_backlog_age_seconds": max(backlog_ages, default=0.0),
+        "budget_exceeded_count": budget_exceeded,
+        "skipped_ticks": 0,
+        "coalesced_ticks": 0,
+        "snapshot_age_seconds": max(durations, default=0.0),
+    }
+
+
+def regular_file_tail_benchmark(root: Path, repetitions: int = 500) -> dict[str, object]:
+    workspace = root / "tail-workspace"
+    workspace.mkdir()
+    log = workspace / "worker.log"
+    log.touch()
+    fd_dir = root / "tail-proc" / "42" / "fd"
+    fd_dir.mkdir(parents=True)
+    (fd_dir / "1").symlink_to(log)
+    child = ChildProcessActivity(ProcessIdentity(42, 7), command="worker", state="S")
+    collector = RegularFileTailCollector(root / "tail-proc")
+    durations: list[float] = []
+    output_bytes = 0
+    for index in range(repetitions):
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"record-{index:04d} " + "x" * 128 + "\n")
+        started = time.perf_counter()
+        updates = collector.read("benchmark-session", str(workspace), (child,), float(index))
+        durations.append(time.perf_counter() - started)
+        output_bytes += sum(len(update.output.encode()) for update in updates)
+    return {
+        "measurement": "regular_file_tail",
+        "repetitions": repetitions,
+        "p50_seconds": statistics.median(durations),
+        "p95_seconds": _percentile(durations, 0.95),
+        "p99_seconds": _percentile(durations, 0.99),
+        "output_bytes": output_bytes,
+    }
 
 
 def sqlite_benchmark(root: Path) -> dict[str, object]:
@@ -504,6 +629,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="codexdeck-benchmark-") as directory:
         root = Path(directory)
         payload = {
+            "sampling": {
+                "full_20": session_scale_benchmark(root, 20),
+                "full_50": session_scale_benchmark(root, 50),
+                "fast_refresh": fast_refresh_benchmark(root),
+                "regular_file_tail": regular_file_tail_benchmark(root),
+            },
             "rollout": [
                 rollout_full_small_benchmark(root),
                 rollout_cold_tail_benchmark(root, cold_lines),

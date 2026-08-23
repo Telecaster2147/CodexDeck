@@ -7,16 +7,16 @@ import argparse
 import fcntl
 import json
 import os
-from pathlib import Path
 import pty
 import re
 import select
+import signal
 import struct
 import subprocess
 import sys
 import termios
 import time
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ANSI_RE = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
@@ -73,6 +73,16 @@ def run_fixture(case: dict[str, object]) -> dict[str, object]:
         time.monotonic() + 5.0,
         stop_tokens=(expected_tokens[0],),
     )
+    for resize in case.get("resize_sequence", []):
+        resize_width = int(resize["width"])
+        resize_height = int(resize["height"])
+        fcntl.ioctl(
+            master,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", resize_height, resize_width, 0, 0),
+        )
+        process.send_signal(signal.SIGWINCH)
+        captured += _read_available(master, time.monotonic() + 0.5)
     for value in case["input_bytes"]:
         os.write(master, bytes.fromhex(str(value)))
         captured += _read_available(master, time.monotonic() + 0.5)
@@ -98,6 +108,7 @@ def run_fixture(case: dict[str, object]) -> dict[str, object]:
         "fixture_id": case["fixture_id"],
         "observed_at": time.time(),
         "terminal": {"width": width, "height": height, "term": "xterm-256color"},
+        "resize_sequence": case.get("resize_sequence", []),
         "input_bytes": list(case["input_bytes"]),
         "expected_terminal_identity": case["expected_terminal_identity"],
         "expected_state": case["expected_state"],
@@ -122,11 +133,15 @@ def main() -> int:
         type=Path,
         default=PROJECT_ROOT / "tests/fixtures/pty_manifest.json",
     )
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     results = [run_fixture(case) for case in manifest["cases"]]
     payload = {"schema_version": 1, "results": results}
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    print(rendered)
+    if args.output:
+        args.output.write_text(rendered + "\n", encoding="utf-8")
     return 0 if all(result["valid"] for result in results) else 1
 
 

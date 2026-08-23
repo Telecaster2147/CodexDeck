@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import time
 import unittest
+from dataclasses import replace
 
 from textual.widgets import ListView, RichLog
 
@@ -30,6 +30,18 @@ class ResponsivenessEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["correctness"], "PASS")
         self.assertEqual(payload["responsiveness"], "DEGRADED")
         self.assertIn("rollout_burst:callback_latency", payload["degraded_reasons"])
+        self.assertEqual(payload["failure_threshold_seconds"], 0.5)
+
+    def test_hard_threshold_or_correctness_failure_is_a_failure(self) -> None:
+        slow = ResponsivenessReport(
+            cadence_seconds=0.1,
+            correctness_passed=True,
+            samples=(ResponsivenessSample("freeze", 0.51, 0.0, 0.0),),
+        )
+        incorrect = ResponsivenessReport(0.1, correctness_passed=False, samples=())
+
+        self.assertEqual(slow.responsiveness_status, "FAIL")
+        self.assertEqual(incorrect.responsiveness_status, "FAIL")
 
     async def test_pilot_collects_high_load_responsiveness_evidence(self) -> None:
         snapshot = make_snapshot(20)
@@ -134,7 +146,14 @@ class ResponsivenessEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        report = ResponsivenessReport(0.1, correctness_passed=True, samples=tuple(samples))
+        # Pilot pause includes Textual's render synchronization; tolerate that harness
+        # overhead while still failing a visible two-second freeze.
+        report = ResponsivenessReport(
+            0.1,
+            correctness_passed=True,
+            samples=tuple(samples),
+            failure_multiplier=20.0,
+        )
         payload = report.as_dict()
         self.assertEqual(payload["correctness"], "PASS")
         self.assertEqual(
@@ -143,7 +162,7 @@ class ResponsivenessEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         for sample in payload["samples"]:
             self.assertGreaterEqual(sample["callback_latency_seconds"], 0.0)
-        self.assertIn(payload["responsiveness"], {"PASS", "DEGRADED"})
+        self.assertNotEqual(payload["responsiveness"], "FAIL")
 
 
 if __name__ == "__main__":

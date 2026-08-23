@@ -1,0 +1,35 @@
+{
+  "full_20": {
+    "p95_seconds": 1.0,
+    "p99_seconds": 1.5,
+    "peak_memory_mib": 128.0,
+    "budget_exceeded_count": 0
+  },
+  "full_50": {
+    "p95_seconds": 2.0,
+    "p99_seconds": 3.0,
+    "peak_memory_mib": 256.0,
+    "budget_exceeded_count": 0
+  },
+  "fast_refresh": {
+    "p95_seconds": 0.25,
+    "p99_seconds": 0.5,
+    "max_backlog_age_seconds": 0.1,
+    "budget_exceeded_count": 0,
+    "skipped_ticks": 0,
+    "coalesced_ticks": 0,
+    "snapshot_age_seconds": 0.5
+  },
+  "regular_file_tail": {
+    "p95_seconds": 0.02,
+    "p99_seconds": 0.05
+  },
+  "rollout_burst": {
+    "runtime_seconds": 2.0,
+    "tracemalloc_peak_mib": 128.0
+  },
+  "terminal_identity_churn": {
+    "runtime_seconds": 5.0,
+    "tracemalloc_peak_mib": 128.0
+  }
+}

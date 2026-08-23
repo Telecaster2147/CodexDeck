@@ -29,6 +29,12 @@ from state_machine import SessionStateMachine  # noqa: E402
 class FixtureEngine:
     interval = 2.0
 
+    def baseline(self) -> None:
+        return None
+
+    def prepare_initial_snapshot(self) -> MonitorSnapshot:
+        return fixture_snapshot()
+
     def sample(self) -> MonitorSnapshot:
         return fixture_snapshot()
 
@@ -128,7 +134,7 @@ def main() -> int:
     app = CodexDeckApp(
         FixtureEngine(),
         fixture_snapshot(),
-        sampling=False,
+        sampling=True,
         preferences=preferences,
     )
     app.run()
