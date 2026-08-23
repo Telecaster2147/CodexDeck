@@ -352,14 +352,17 @@ retention 只限制公开时间线，状态机用有界轴基线保留当前 lif
 
 协议或关联判定的独立反例集位于 `tests/fixtures/ground_truth_manifest.json`，裁决流程见
 `tests/fixtures/ground_truth_manifest.json`。反例分为 true positive、false positive、false negative、
-ambiguous 和 unresolved；可复现误判先进入匿名语料，再修改识别逻辑。
+ambiguous 和 unresolved；当前 42 个独立案例覆盖 lifecycle、attention、terminal association、
+observer degradation、stall/silence、discovery、network 和 recovery。可复现误判先进入匿名语料，
+再修改识别逻辑。
 
 ### Codex 兼容范围
 
 CI 当前用真实观察并匿名化的 Codex CLI `0.144.x` 与 `0.145.x` rollout、SQLite schema 和结构化日志
 fixture 验证生产 reader、normalizer、状态机和 TerminalStore。`codexdeck doctor` 会报告实际观察到的
 Codex 版本、schema family、unknown family 摘要与这两个已验证 minor；“已验证”表示仓库 fixture
-覆盖，不是对 Codex 内部格式稳定性的承诺。
+覆盖，不是对 Codex 内部格式稳定性的承诺。兼容 registry 将 `0.145` 标为当前已验证窗口、`0.144`
+标为上一已验证窗口；这里的 current/previous 是本仓库 fixture 窗口，不表示上游最新版本。
 
 遇到新的上游 shape 时，维护流程固定为：复制最小记录结构并删除正文、路径、标识符和凭据 →
 记录产生它的 Codex CLI 版本 → 先加入 compatibility fixture → 裁决 lifecycle/attention/Terminal
