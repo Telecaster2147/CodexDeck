@@ -1063,7 +1063,11 @@ class RolloutTests(unittest.TestCase):
             ]
             path.write_text("".join(json.dumps(record) + "\n" for record in records))
             reader = RolloutReader()
-            reader.read(path)
+            for _ in range(8):
+                result = reader.read_with_activity(path)
+                if not result.activity.backlog_bytes:
+                    break
+            self.assertEqual(result.activity.backlog_bytes, 0)
 
             unknown = reader.unknown_counts({str(path)})
             summary = reader.family_counter_summary({str(path)})
