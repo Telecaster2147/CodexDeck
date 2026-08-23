@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from codexdeck.codex.rollout import RolloutActivity
+from codexdeck.immutable import freeze_value
 from codexdeck.models import (
     InstanceSnapshot,
     MonitorSnapshot,
@@ -155,11 +156,13 @@ class FastRefreshMixin:
             fast=True,
         )
         refreshed_instances = apply_temporal_completeness(refreshed_instances, temporal)
-        return replace(
-            snapshot,
-            generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-            instances=refreshed_instances,
-            collection_duration_seconds=time.monotonic() - started,
-            diagnostics=diagnostics,
-            temporal=temporal,
+        return freeze_value(
+            replace(
+                snapshot,
+                generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                instances=refreshed_instances,
+                collection_duration_seconds=time.monotonic() - started,
+                diagnostics=diagnostics,
+                temporal=temporal,
+            )
         )

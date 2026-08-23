@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from codexdeck.diagnostics import CollectorTracker
+from codexdeck.immutable import freeze_value
 from codexdeck.models import (
     Diagnostic,
     DiscoverySummary,
@@ -76,4 +77,4 @@ class SnapshotPublisher:
             ),
             temporal=temporal,
         )
-        return snapshot
+        return freeze_value(snapshot)

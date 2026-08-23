@@ -669,7 +669,7 @@ class EngineTests(unittest.TestCase):
 
             self.assertEqual(len(visible), 1)
             self.assertTrue(visible[0].process_active)
-            self.assertEqual(hidden, [])
+            self.assertEqual(hidden, ())
             self.assertEqual(len(recovered), 1)
             self.assertTrue(recovered[0].process_active)
             self.assertEqual(
@@ -1141,7 +1141,7 @@ class EngineTests(unittest.TestCase):
             )
             running = engine.refresh_events(snapshot)
 
-            self.assertEqual(running.sessions[0].terminal_sessions, [])
+            self.assertEqual(running.sessions[0].terminal_sessions, ())
             store_key = running.sessions[0].session_identity
             retained = engine.terminals.summaries(store_key)
             self.assertEqual(retained[0].process_id, "777")
@@ -1401,7 +1401,7 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(
                 any(event.kind == "PROCESS_EXITED" for event in exited.sessions[0].events)
             )
-            self.assertEqual(exited.sessions[0].terminal_sessions, [])
+            self.assertEqual(exited.sessions[0].terminal_sessions, ())
             store_key = active_snapshot.sessions[0].session_identity
             retained = engine.terminals.summaries(store_key)
             self.assertEqual(retained[0].process_id, "888")

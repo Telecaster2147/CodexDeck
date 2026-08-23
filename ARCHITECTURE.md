@@ -4,6 +4,12 @@ CodexDeck keeps collection, interpretation, publication, and presentation separa
 `MonitorSnapshot` is the boundary: readers and stores remain mutable and bounded, while every value
 reachable from an older snapshot remains stable.
 
+`SnapshotPublisher` and the fast-refresh publication path both call the same structural freezer.
+Mutable collector/state-machine builders are cloned; reachable sequences become tuples, mappings
+become mutation-blocking dict-compatible values, and mutable domain DTOs reject field assignment
+after publication. Already-published unchanged branches are reused by identity, so freezing enforces
+the contract without turning every incremental collector cache into an immutable structure.
+
 ## Runtime state ownership
 
 `src/codexdeck/engine_state.py` is the checked ownership registry for every field created by

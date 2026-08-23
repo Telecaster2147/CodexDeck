@@ -8,6 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from codexdeck.immutable import PublishedGuard
+
 
 class StringEnum(str, Enum):
     """Python 3.10 compatible string enum."""
@@ -564,7 +566,7 @@ class SilenceAssessment:
 
 
 @dataclass
-class ProcessInfo:
+class ProcessInfo(PublishedGuard):
     identity: ProcessIdentity
     ppid: int
     command: str
@@ -623,7 +625,7 @@ class ProcessInfo:
 
 
 @dataclass
-class SocketInfo:
+class SocketInfo(PublishedGuard):
     state: str
     recv_q: int
     send_q: int
@@ -651,7 +653,7 @@ class SocketInfo:
 
 
 @dataclass
-class ConnectionAssessment:
+class ConnectionAssessment(PublishedGuard):
     key: str
     state: str
     local: str
@@ -686,7 +688,7 @@ class AlertTransition:
 
 
 @dataclass
-class AlertOccurrence:
+class AlertOccurrence(PublishedGuard):
     id: str
     kind: str
     severity: str
@@ -1030,7 +1032,7 @@ class CompactionSummary:
 
 
 @dataclass
-class AgentNode:
+class AgentNode(PublishedGuard):
     thread_id: str
     parent_thread_id: str = ""
     agent_path: str = ""
@@ -1057,7 +1059,7 @@ class AgentNode:
 
 
 @dataclass
-class NetworkEvidence:
+class NetworkEvidence(PublishedGuard):
     state: NetworkState = NetworkState.UNKNOWN
     reason: str = ""
     stale: bool = False
@@ -1066,7 +1068,7 @@ class NetworkEvidence:
 
 
 @dataclass
-class SessionHealth:
+class SessionHealth(PublishedGuard):
     instance_id: str
     session_id: str
     process: ProcessInfo
@@ -1138,7 +1140,7 @@ class SessionHealth:
 
 
 @dataclass
-class InstanceSnapshot:
+class InstanceSnapshot(PublishedGuard):
     instance_id: str
     paths: CodexPaths
     display_codex_home: str
@@ -1198,7 +1200,7 @@ class DiscoverySummary:
 
 
 @dataclass
-class MonitorSnapshot:
+class MonitorSnapshot(PublishedGuard):
     generated_at: str
     interval_seconds: float
     instances: list[InstanceSnapshot] = field(default_factory=list)
@@ -1212,8 +1214,8 @@ class MonitorSnapshot:
     discovery: DiscoverySummary = field(default_factory=lambda: DiscoverySummary())
 
     @property
-    def sessions(self) -> list[SessionHealth]:
-        return [session for instance in self.instances for session in instance.sessions]
+    def sessions(self) -> tuple[SessionHealth, ...]:
+        return tuple(session for instance in self.instances for session in instance.sessions)
 
     def summary(self) -> dict[str, int]:
         sessions = self.sessions
