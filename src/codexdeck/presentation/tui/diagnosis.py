@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.text import Text
 
 from codexdeck.config import NETWORK_LABELS
@@ -19,14 +19,14 @@ from codexdeck.utils import format_duration
 def _diagnosis_renderable(
     session: SessionHealth,
     instance: InstanceSnapshot | None,
-) -> object:
+) -> RenderableType:
     confidence_labels = {"high": "高", "medium": "中", "low": "低"}
 
     def confidence_label(value: object) -> str:
         raw = str(getattr(value, "value", value) or "").lower()
         return confidence_labels.get(raw, raw or "未知")
 
-    blocks: list[object] = []
+    blocks: list[RenderableType] = []
     now = time.time()
 
     findings = session.diagnosis[:3]
@@ -179,10 +179,10 @@ def _diagnosis_renderable(
 def _diagnosis_details_renderable(
     session: SessionHealth,
     instance: InstanceSnapshot | None,
-) -> tuple[int, object]:
+) -> tuple[int, RenderableType]:
     """Render complete, redacted diagnostic evidence behind a collapsed disclosure."""
 
-    blocks: list[object] = []
+    blocks: list[RenderableType] = []
     count = 0
 
     for finding in session.diagnosis:

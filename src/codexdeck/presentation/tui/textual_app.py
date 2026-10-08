@@ -6,14 +6,17 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
+from typing import ClassVar, Literal, cast
 
 from rich.console import Console
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
+from textual.timer import Timer
 from textual.widgets import (
     Collapsible,
     ContentSwitcher,
@@ -123,6 +126,9 @@ class SampleCompleted(Message):
 
 class SessionInspector(Vertical):
     """Persistent session status and tabbed diagnostic content."""
+
+    _session_title_value: Text | None = None
+    _health_strip_value: Text | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("选择一个会话查看实时状态", id="session-title")
@@ -266,7 +272,10 @@ class SessionInspector(Vertical):
         )
         row_console = Console(
             width=render_width,
-            color_system=self.app.console.color_system,
+            color_system=cast(
+                Literal["standard", "256", "truecolor", "windows"] | None,
+                self.app.console.color_system,
+            ),
         )
         signatures = tuple(_timeline_signature(event) for event in entries)
         render_options: tuple[object, ...] = (render_width,)
@@ -385,7 +394,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
 
     CSS_PATH = "codexdeck.tcss"
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = APP_BINDINGS
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = list(APP_BINDINGS)
     STARTUP_FRAME_INTERVAL = STARTUP_FRAME_INTERVAL
     STARTUP_DURATION = STARTUP_DURATION
 
@@ -448,8 +457,8 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self._startup_animation_complete = not self.startup_animation_enabled
         self._startup_data_ready = not prepare_on_start
         self._initial_preparing = prepare_on_start
-        self._startup_interval = None
-        self._startup_timer = None
+        self._startup_interval: Timer | None = None
+        self._startup_timer: Timer | None = None
         self.theme = preferences.theme
 
     def compose(self) -> ComposeResult:
@@ -552,7 +561,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._render_startup()
-        if self.is_mounted and self.selected_session and self._resize_timer is None:
+        if self._is_mounted and self.selected_session and self._resize_timer is None:
             try:
                 log = self.query_one("#activity-panel", RichLog)
             except NoMatches:
@@ -567,7 +576,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
         self.screen.set_class(self.compact and self.compact_detail, "detail-open")
         self.screen.set_class(too_small, "too-small")
         self._update_shortcut_footer()
-        if not self.is_mounted or not self.selected_session:
+        if not self._is_mounted or not self.selected_session:
             return
         if self._resize_timer is not None:
             self._resize_timer.stop()
@@ -695,7 +704,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
     def _set_status_message(self, message: str, duration: float = 3.0) -> None:
         self._status_message = message
         self._status_message_until = time.monotonic() + duration
-        if self.is_mounted:
+        if self._is_mounted:
             self._update_status_line()
 
     def _footer_context(self) -> str:
@@ -717,7 +726,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
         return "activity"
 
     def _update_shortcut_footer(self) -> None:
-        if not self.is_mounted:
+        if not self._is_mounted:
             return
         try:
             self.query_one(ShortcutFooter).show_context(
@@ -1092,7 +1101,7 @@ class CodexDeckApp(App[MonitorSnapshot]):
                 )
                 break
 
-    def action_back(self) -> None:
+    async def action_back(self) -> None:
         if self.zoom_mode:
             self._set_zoom("")
             self._set_status_message("ZOOM · RESTORED")

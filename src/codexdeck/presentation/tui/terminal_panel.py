@@ -310,7 +310,7 @@ class TerminalPanel(Vertical):
         if event.data_table.id != "terminal-list" or event.row_key is None:
             return
         self._selected_terminal_id = str(event.row_key.value)
-        self._render_selected(self.app.follow)
+        self._render_selected(bool(getattr(self.app, "follow", True)))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "terminal-list":
@@ -327,7 +327,7 @@ class TerminalPanel(Vertical):
         self._search_query = event.value
         self._match_index = -1
         self._output_signatures = ()
-        self._render_selected(self.app.follow)
+        self._render_selected(bool(getattr(self.app, "follow", True)))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "terminal-search":
