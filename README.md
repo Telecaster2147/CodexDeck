@@ -168,7 +168,7 @@ CodexDeck 不使用一个含糊的总健康枚举：
 
 协议 phase 是 lifecycle 权威；进程、Terminal、socket 和 SQLite 只补充各自领域。缺失、截断、
 陈旧、冲突或 unknown 表示“没有观察全”，不等价于“确认不存在”。详细规则见
-[`EVIDENCE_MODEL.md`](EVIDENCE_MODEL.md) 与 [`STATE_MODEL.md`](STATE_MODEL.md)。
+[`EVIDENCE_MODEL.md`](docs/reference/evidence-model.md) 与 [`STATE_MODEL.md`](docs/reference/state-model.md)。
 
 ### 双采样路径
 
@@ -237,16 +237,20 @@ $XDG_CONFIG_HOME/codexdeck/preferences.json
 
 ## 文档索引
 
-| 文档 | Ownership |
+文档按用户参考、贡献者指南和维护流程分类，见 [`docs/`](docs/README.md)。
+
+| 文档 | 内容 |
 | --- | --- |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 模块边界、依赖方向、state ownership、published snapshot |
-| [`EVIDENCE_MODEL.md`](EVIDENCE_MODEL.md) | 证据权威、身份、时序、完整性、reason 与 publication |
-| [`STATE_MODEL.md`](STATE_MODEL.md) | lifecycle、attention、recovery、silence 与推导顺序 |
-| [`PROTOCOL_COMPATIBILITY.md`](PROTOCOL_COMPATIBILITY.md) | Codex family registry、rolling fixture window、schema policy |
-| [`TERMINAL_OBSERVABILITY.md`](TERMINAL_OBSERVABILITY.md) | 关联、capability、retention、file tail 与隐私 |
-| [`NETWORK_MODEL.md`](NETWORK_MODEL.md) | socket 聚合、stall、stale 与采集边界 |
-| [`TESTING.md`](TESTING.md) | 单测、ground truth、replay、性能、真实 PTY 与 RC gates |
-| [`RELEASE_OBSERVABILITY.md`](RELEASE_OBSERVABILITY.md) | 无遥测发布后 24h/72h/周度健康复盘 |
+| [`ARCHITECTURE.md`](docs/development/architecture.md) | 模块边界、依赖方向、state ownership、published snapshot |
+| [`EVIDENCE_MODEL.md`](docs/reference/evidence-model.md) | 证据权威、身份、时序、完整性、reason 与 publication |
+| [`STATE_MODEL.md`](docs/reference/state-model.md) | lifecycle、attention、recovery、silence 与推导顺序 |
+| [`PROTOCOL_COMPATIBILITY.md`](docs/reference/protocol-compatibility.md) | Codex family registry、rolling fixture window、schema policy |
+| [`TERMINAL_OBSERVABILITY.md`](docs/reference/terminal-observability.md) | 关联、capability、retention、file tail 与隐私 |
+| [`NETWORK_MODEL.md`](docs/reference/network-model.md) | socket 聚合、stall、stale 与采集边界 |
+| [`TESTING.md`](docs/development/testing.md) | 单测、ground truth、replay、性能、真实 PTY 与 RC gates |
+| [`RELEASE_OBSERVABILITY.md`](docs/maintainers/release-observability.md) | 无遥测发布后 24h/72h/周度健康复盘 |
+
+公开文件与本地工作材料的边界见[仓库规范](docs/development/repository-policy.md)。
 
 ## 许可证
 

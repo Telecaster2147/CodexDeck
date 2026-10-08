@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -155,19 +156,43 @@ class CompatibilityBudgetTests(unittest.TestCase):
 
 
 class StaticQualityBudgetTests(unittest.TestCase):
+    def test_private_material_is_ignored_and_public_release_docs_are_not(self) -> None:
+        private_paths = (
+            "AGENTS.md", "DESIGN_DECISIONS.md", "TODO.md", ".env.local",
+            ".local/notes.md", ".planning-with-skills/progress.md",
+            ".aws/credentials", "publish-v9.8.7.sh", "release-notes-v9.8.7.md",
+        )
+        for name in private_paths:
+            with self.subTest(path=name):
+                result = subprocess.run(
+                    ["git", "check-ignore", "--no-index", "-q", name], cwd=PROJECT_ROOT,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0)
+        for name in (
+            "docs/releases/v9.8.7.md", "docs/development/repository-policy.md",
+            "tools/release.sh", "tests/fixtures/replay_manifest.json", ".env.example",
+        ):
+            with self.subTest(path=name):
+                result = subprocess.run(
+                    ["git", "check-ignore", "--no-index", "-q", name], cwd=PROJECT_ROOT,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+
     def test_readme_is_task_oriented_and_indexes_owned_design_docs(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text()
         self.assertLessEqual(len(readme.splitlines()), 350)
         self.assertGreaterEqual(len(readme.splitlines()), 250)
         required_docs = (
-            "ARCHITECTURE.md",
-            "EVIDENCE_MODEL.md",
-            "STATE_MODEL.md",
-            "PROTOCOL_COMPATIBILITY.md",
-            "TERMINAL_OBSERVABILITY.md",
-            "NETWORK_MODEL.md",
-            "TESTING.md",
-            "RELEASE_OBSERVABILITY.md",
+            "docs/development/architecture.md",
+            "docs/reference/evidence-model.md",
+            "docs/reference/state-model.md",
+            "docs/reference/protocol-compatibility.md",
+            "docs/reference/terminal-observability.md",
+            "docs/reference/network-model.md",
+            "docs/development/testing.md",
+            "docs/maintainers/release-observability.md",
         )
         for name in required_docs:
             with self.subTest(document=name):
@@ -177,7 +202,7 @@ class StaticQualityBudgetTests(unittest.TestCase):
         self.assertTrue((PROJECT_ROOT / "assets" / "screenshots" / "overview.png").is_file())
 
     def test_release_observability_maps_every_required_signal_to_evidence(self) -> None:
-        runbook = (PROJECT_ROOT / "RELEASE_OBSERVABILITY.md").read_text()
+        runbook = (PROJECT_ROOT / "docs/maintainers/release-observability.md").read_text()
         required_signals = (
             "Install, dependency and upgrade outcomes",
             "discovered candidate / confirmed / rejected / unresolved",
