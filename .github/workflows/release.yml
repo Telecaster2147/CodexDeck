@@ -1,60 +1,45 @@
-name: Release checks
+name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
-  checks: read
+
+concurrency:
+  group: codexdeck-release
+  cancel-in-progress: false
 
 jobs:
-  release-checks:
+  publish:
+    if: github.repository == 'Telecaster2147/CodexDeck' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
           enable-cache: true
-      - run: uv sync --locked
-      - name: Verify main CI for tagged commit
+      - name: Verify CI on manual retry
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          verified=$(
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
-              --jq '
-                [.check_runs[]
-                  | select(.name == "lint-types" or .name == "test")
-                  | .conclusion] as $required
-                | ($required | length) == 2
-                  and all($required[]; . == "success")
-              '
-          )
-          test "${verified}" = true
-      - name: Verify release version
-        run: |
-          version=$(uv run python -c 'from codexdeck.config import VERSION; print(VERSION)')
-          test "v${version}" = "${GITHUB_REF_NAME}"
-      - name: Build and checksum
-        run: |
-          uv build
-          cd dist
-          sha256sum codexdeck-*-py3-none-any.whl > codexdeck-${GITHUB_REF_NAME#v}-py3-none-any.whl.sha256
-          sha256sum -c codexdeck-${GITHUB_REF_NAME#v}-py3-none-any.whl.sha256
-      - name: Install smoke
-        run: |
-          uv venv --clear .release-smoke
-          uv pip install --python .release-smoke/bin/python dist/codexdeck-*-py3-none-any.whl
-          .release-smoke/bin/codexdeck --version
-      - name: Retain verified distributions
-        uses: actions/upload-artifact@v4
-        with:
-          name: codexdeck-${{ github.ref_name }}
-          path: |
-            dist/codexdeck-*.whl
-            dist/codexdeck-*.whl.sha256
-            dist/codexdeck-*.tar.gz
-          if-no-files-found: error
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --event push --commit "$GITHUB_SHA" --status completed --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          test -n "$run_id"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+            --jq '.jobs | [ .[] | select(.name == "lint-types" or .name == "test" or .name == "latest-smoke" or .name == "performance-pty" or .name == "supply-chain" or .name == "build") ] | length == 6 and all(.[]; .conclusion == "success")' \
+            | grep -Fx true
+      - name: Build, verify and publish new version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/release.sh

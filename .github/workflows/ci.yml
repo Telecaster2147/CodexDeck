@@ -86,8 +86,8 @@ jobs:
           python-version: "3.11"
           enable-cache: true
       - run: uv lock --check
-      - run: uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt
-      - run: uvx pip-audit -r /tmp/requirements.txt
+      - run: mkdir -p build && uv export --frozen --no-dev --no-emit-project -o build/requirements.txt
+      - run: uvx pip-audit -r build/requirements.txt
       - if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@v4
 
@@ -117,3 +117,11 @@ jobs:
           python-version: "3.11"
           enable-cache: true
       - run: uv build
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Telecaster2147/CodexDeck'
+    needs: [lint-types, test, latest-smoke, performance-pty, supply-chain, build]
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release.yml
