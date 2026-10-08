@@ -44,7 +44,7 @@ class FastRefreshMixin:
         changed = False
         for instance in snapshot.instances:
             refreshed_sessions: list[SessionHealth] = []
-            refreshed_processes: dict[str, ProcessInfo] = {}
+            refreshed_processes: dict[tuple[str, str], ProcessInfo] = {}
             rollout_paths: set[str] = set()
             rollout_activity_values: list[dict[str, object]] = []
             for session in instance.sessions:
@@ -56,16 +56,31 @@ class FastRefreshMixin:
                 rollout_events: tuple[NormalizedEvent, ...] = ()
                 terminal_changed = False
                 key = session.session_identity
+                source_paths = {
+                    candidate.rollout_path
+                    for candidate in instance.processes
+                    if candidate.session_id == session.session_id and candidate.rollout_path
+                }
                 if process.rollout_path:
-                    rollout_paths.add(process.rollout_path)
+                    source_paths.add(process.rollout_path)
+                activities = []
+                for source_path in sorted(source_paths):
+                    rollout_paths.add(source_path)
                     rollout_result = self.rollouts.read_with_activity(
-                        Path(process.rollout_path),
+                        Path(source_path),
                         allow_terminal_metadata_backfill=False,
                     )
-                    rollout_activity = rollout_result.activity
-                    rollout_events = rollout_result.events
-                    terminal_changed = self.terminals.apply(key, rollout_result.terminal_updates)
-                rollout_activity_values.append(self._rollout_activity_value(rollout_activity))
+                    activities.append(rollout_result.activity)
+                    rollout_events += rollout_result.events
+                    terminal_changed |= self.terminals.apply(key, rollout_result.terminal_updates)
+                if activities:
+                    rollout_activity = max(activities, key=lambda activity: (
+                        activity.changed, activity.last_growth_at or 0.0, activity.observed_at,
+                    ))
+                rollout_activity_values.extend(
+                    self._rollout_activity_value(activity)
+                    for activity in activities or [rollout_activity]
+                )
                 incoming = list(rollout_events)
                 if incoming or rollout_activity.changed or terminal_changed:
                     changed = True
@@ -121,10 +136,13 @@ class FastRefreshMixin:
                     session = self._attach_terminal_snapshot(session, key)
                     session = self._attach_ingress_diagnosis(session, rollout_activity)
                 refreshed_sessions.append(session)
-                refreshed_processes[process.stable_key] = session.process
+                refreshed_processes[(process.stable_key, process.session_id)] = session.process
 
             processes = [
-                refreshed_processes.get(process.stable_key, process)
+                replace(
+                    refreshed_processes[(process.stable_key, process.session_id)],
+                    rollout_path=process.rollout_path,
+                ) if (process.stable_key, process.session_id) in refreshed_processes else process
                 for process in instance.processes
             ]
             refreshed_instances.append(

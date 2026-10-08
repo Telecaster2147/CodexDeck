@@ -26,6 +26,21 @@ from codexdeck.models import (
 
 
 class TerminalTranscriptTests(unittest.TestCase):
+    def test_shared_daemon_does_not_assign_an_ambiguous_child_to_parallel_sessions(self):
+        store = TerminalStore()
+        instance = InstanceIdentity(Path("/home-a"), Path("/home-a"))
+        keys = tuple(SessionIdentity(instance, name) for name in ("session-a", "session-b"))
+        for key in keys:
+            store.apply(key, (TerminalUpdate(
+                "start", 1.0, call_id="call-a", process_id="73001", command="sleep 30",
+                status="running", terminal_candidate=True,
+            ),))
+        store.reconcile_shared_children(keys, (
+            ChildProcessActivity(ProcessIdentity(900, 100), command="sleep 30", state="S"),
+        ), 2.0)
+        self.assertTrue(all(not store.current_summaries(key) for key in keys))
+        self.assertTrue(all(len(store.summaries(key)) == 1 for key in keys))
+
     def test_terminal_private_state_bounds_fail_closed_and_recover_by_scope(self) -> None:
         store = TerminalStore()
         old_scope = RolloutIdentity(Path("/workspace-a/old.jsonl"), 1, 10, 0)

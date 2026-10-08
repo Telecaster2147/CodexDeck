@@ -966,6 +966,7 @@ class TerminalStore:
         *,
         evidence_cutoff: float | None = None,
         workspace: str = "",
+        discover_unclaimed: bool = True,
     ) -> bool:
         """Close previously confirmed rollout terminals after stable OS absence."""
 
@@ -1114,18 +1115,48 @@ class TerminalStore:
             terminal.completed_at = observed_at
             terminal.last_state_at = max(terminal.last_state_at, observed_at)
             changed = True
-        changed |= self._reconcile_os_jobs(
-            session_key,
-            children,
-            all_live_children,
-            claimed_job_roots,
-            observed_at,
-            workspace,
-        )
+        if discover_unclaimed:
+            changed |= self._reconcile_os_jobs(
+                session_key,
+                children,
+                all_live_children,
+                claimed_job_roots,
+                observed_at,
+                workspace,
+            )
         self._trim_sessions(session_key)
         self._prune_indices(session_key)
         self._trim_global()
         return changed
+
+    def reconcile_shared_children(
+        self,
+        session_keys: tuple[SessionIdentity, ...],
+        children: tuple[object, ...],
+        observed_at: float,
+    ) -> dict[SessionIdentity, tuple[object, ...]]:
+        """Attribute shared-daemon children only to one exact protocol-command owner."""
+
+        owned: dict[SessionIdentity, list[object]] = {key: [] for key in session_keys}
+        for child in children:
+            owners = {
+                key for key in session_keys
+                if any(
+                    terminal.source == "rollout"
+                    and terminal.status in RUNNING_TERMINAL_STATUSES
+                    and self._command_matches_child(
+                        terminal.command, str(getattr(child, "command", "")), exact_only=True,
+                    )
+                    for terminal in self.sessions.get(key, {}).values()
+                )
+            }
+            if len(owners) == 1:
+                owned[next(iter(owners))].append(child)
+        for key, matching_children in owned.items():
+            self.reconcile_children(
+                key, tuple(matching_children), observed_at, discover_unclaimed=False,
+            )
+        return {key: tuple(matching_children) for key, matching_children in owned.items()}
 
     def prune_scopes(
         self,

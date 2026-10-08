@@ -302,6 +302,110 @@ def create_instance(
 
 
 class EngineTests(unittest.TestCase):
+    def test_shared_app_server_matches_only_protocol_owned_background_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            instance, process = create_instance(Path(temp) / "home", 102, "session-a", False)
+            path = instance.paths.sessions_dir / "rollout-session-a.jsonl"
+            timestamp = datetime.now(timezone.utc).isoformat()
+            records = [
+                {"timestamp": timestamp, "type": "response_item", "payload": {
+                    "type": "function_call", "name": "exec_command", "call_id": "call-a",
+                    "arguments": json.dumps({"cmd": "printf fixture-output", "workdir": "workspace-a"}),
+                }},
+                {"timestamp": timestamp, "type": "response_item", "payload": {
+                    "type": "function_call_output", "call_id": "call-a",
+                    "output": {"wall_time_seconds": 0.1, "session_id": 73001,
+                               "output": "fixture-output\n"},
+                }},
+            ]
+            with path.open("a") as handle:
+                handle.write("".join(json.dumps(record) + "\n" for record in records))
+            engine = MonitorEngine(
+                2.0, 30, 900,
+                discovery=FakeDiscovery(DiscoveryResult(
+                    [replace(process, role="app-server")], {instance.instance_id: instance},
+                )),
+                sockets=FakeSockets([{}]), proc=SharedRolloutProc(path),
+                process_activity=FixedProcessActivity(ProcessTreeActivity(
+                    available=True, sampled_at=time.time(), children=(
+                        ChildProcessActivity(
+                            ProcessIdentity(73002, 10), command="printf fixture-output", state="S",
+                        ),
+                        ChildProcessActivity(
+                            ProcessIdentity(73003, 10), command="unrelated-command", state="S",
+                        ),
+                    ),
+                )),
+            )
+            snapshot = engine.prepare_initial_snapshot()
+            terminal = snapshot.sessions[0].terminal_sessions[0]
+            self.assertEqual(terminal.process_id, "73001")
+            self.assertTrue(terminal.process_active)
+            self.assertEqual(terminal.command, "printf fixture-output")
+            self.assertEqual(len(engine.sample().sessions[0].terminal_sessions), 1)
+
+    def test_shared_app_server_keeps_parallel_sessions_and_fast_refresh_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            instance, process = create_instance(root / "home", 101, "session-a", False)
+            path_a = instance.paths.sessions_dir / "rollout-session-a.jsonl"
+            path_b = instance.paths.sessions_dir / "rollout-session-b.jsonl"
+            path_b.write_text(path_a.read_text().replace("session-a", "session-b"))
+            older_path_a = instance.paths.sessions_dir / "rollout-older-session-a.jsonl"
+            older_path_a.write_text(path_a.read_text())
+            process = replace(process, role="app-server", args="codex app-server")
+            proc = SwitchingRolloutProc([path_a, path_b, older_path_a])
+            engine = MonitorEngine(
+                2.0, 30, 900,
+                discovery=FakeDiscovery(DiscoveryResult(
+                    [process], {instance.instance_id: instance},
+                )),
+                sockets=FakeSockets([{}]), proc=proc,
+            )
+            first = engine.prepare_initial_snapshot()
+            self.assertEqual(
+                {session.session_id for session in first.sessions},
+                {"session-a", "session-b"},
+            )
+            self.assertTrue(all(session.events for session in first.sessions))
+            self.assertTrue(all(
+                session.network.state == NetworkState.UNKNOWN for session in first.sessions
+            ))
+            timestamp = datetime.now(timezone.utc).isoformat()
+            with path_b.open("a") as handle:
+                handle.write(json.dumps({
+                    "timestamp": timestamp, "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "turn-session-b"},
+                }) + "\n")
+            second = engine.refresh_events(first)
+            self.assertEqual(len(second.sessions), 2)
+            self.assertEqual(
+                {p.session_id for p in second.instances[0].processes},
+                {"session-a", "session-b"},
+            )
+            by_id = {session.session_id: session for session in second.sessions}
+            self.assertEqual(by_id["session-b"].lifecycle, LifecycleState.COMPLETED)
+            self.assertNotEqual(by_id["session-a"].lifecycle, LifecycleState.COMPLETED)
+            self.assertEqual(len({p.rollout_path for p in second.instances[0].processes}), 3)
+            self.assertNotEqual(
+                next(s for s in first.sessions if s.session_id == "session-b").lifecycle,
+                LifecycleState.COMPLETED,
+            )
+            secondary = next(
+                path for path in (path_a, older_path_a)
+                if str(path) != by_id["session-a"].process.rollout_path
+            )
+            with secondary.open("a") as handle:
+                handle.write(json.dumps({
+                    "timestamp": datetime.now(timezone.utc).isoformat(), "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "turn-session-a"},
+                }) + "\n")
+            third = engine.refresh_events(second)
+            self.assertEqual(
+                next(s for s in third.sessions if s.session_id == "session-a").lifecycle,
+                LifecycleState.COMPLETED,
+            )
+
     def test_prepare_initial_snapshot_drains_rollout_backlog_before_publication(self) -> None:
         engine = MonitorEngine(2.0, 30, 900)
         session = SessionHealth("instance", "session", ProcessInfo(

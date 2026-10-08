@@ -11,8 +11,8 @@ from typing import Any
 
 from codexdeck.codex.config_reader import CodexConfigSnapshot
 from codexdeck.codex.events import normalize_log
-from codexdeck.codex.paths import ResolvedInstance
-from codexdeck.codex.rollout import RolloutActivity
+from codexdeck.codex.paths import ResolvedInstance, open_rollout_paths
+from codexdeck.codex.rollout import RolloutActivity, rollout_identity
 from codexdeck.codex.state_store import StateStore, ThreadRecord
 from codexdeck.diagnostics import make_diagnostic
 from codexdeck.engine_collectors import DiscoveryStage, SocketStage
@@ -106,6 +106,27 @@ class InstanceSamplingMixin:
     _attach_terminal_snapshot: Any
     _attach_ingress_diagnosis: Any
     _merge_protocol_capabilities: Any
+    proc: Any
+
+    def _expand_session_owners(
+        self, processes: list[ProcessInfo], sessions_dir: Path,
+    ) -> list[ProcessInfo]:
+        """Keep every open thread of a shared app-server, not just its newest file."""
+
+        expanded: list[ProcessInfo] = []
+        for process in processes:
+            if process.role != "app-server":
+                expanded.append(process)
+                continue
+            owners = []
+            for path in open_rollout_paths(process.pid, sessions_dir, self.proc):
+                session_id, _ = rollout_identity(path)
+                if session_id:
+                    owners.append(replace(
+                        process, session_id=session_id, rollout_path=str(path),
+                    ))
+            expanded.extend(owners or [process])
+        return expanded
 
     def _resolve_instance_identity(
         self,
@@ -201,10 +222,20 @@ class InstanceSamplingMixin:
         records = identity_stage.records
         names = identity_stage.names
         enriched: list[ProcessInfo] = []
-        for process in processes:
-            session_id = sessions_by_pid.get(process.pid, "")
+        for process in self._expand_session_owners(processes, resolved.paths.sessions_dir):
+            if process.role == "app-server" and not process.session_id:
+                enriched.append(process)
+                continue
+            session_id = process.session_id or sessions_by_pid.get(process.pid, "")
             record = records.get(session_id)
-            rollout_path = rollout_by_pid.get(process.pid)
+            rollout_path = (
+                Path(process.rollout_path) if process.rollout_path
+                else rollout_by_pid.get(process.pid)
+            )
+            if session_id and record is None:
+                thread_result = store.threads_result([session_id])
+                adapter_results.append(thread_result)
+                record = dict(thread_result.value or {}).get(session_id)
             if not rollout_path and record and record.rollout_path:
                 rollout_path = Path(record.rollout_path)
             if not rollout_path:
@@ -403,7 +434,7 @@ class InstanceSamplingMixin:
                 evidence_cutoff=(min(process_tree_sampled_at) if process_tree_sampled_at else None),
                 workspace=process.cwd,
             )
-        else:
+        elif any(candidate.role == "session" for candidate in candidates):
             self.terminals.mark_process_unavailable(session_key)
         rollout_activity = max(
             rollout_activities,
@@ -430,6 +461,11 @@ class InstanceSamplingMixin:
         socket_stage: SocketStage,
         now_monotonic: float,
     ) -> NetworkEvidence:
+        if all(candidate.role == "app-server" for candidate in candidates):
+            return NetworkEvidence(
+                state=NetworkState.UNKNOWN,
+                reason="共享 app-server 的 TCP 连接尚未关联到具体会话",
+            )
         socket_by_pid = socket_stage.by_pid
         sockets_stale = socket_stage.stale
         before = [
@@ -600,7 +636,7 @@ class InstanceSamplingMixin:
         sockets_stale = socket_stage.stale
         session_processes: dict[str, list[ProcessInfo]] = defaultdict(list)
         for process in processes:
-            if process.role == "session" and process.session_id:
+            if process.role in {"session", "app-server"} and process.session_id:
                 session_processes[process.session_id].append(process)
 
         sessions = []
@@ -618,10 +654,11 @@ class InstanceSamplingMixin:
                     item.pid,
                 ),
             )
-            if len(candidates) > 1:
-                pids = ", ".join(str(item.pid) for item in sorted(candidates, key=lambda p: p.pid))
+            distinct_pids = sorted({item.pid for item in candidates})
+            if len(distinct_pids) > 1:
+                pids = ", ".join(str(pid) for pid in distinct_pids)
                 instance_diagnostics.append(
-                    f"检测到同一会话由 {len(candidates)} 个 Codex 进程打开；"
+                    f"检测到同一会话由 {len(distinct_pids)} 个 Codex 进程打开；"
                     f"列表已合并，当前显示 PID {process.pid}（进程 {pids}）"
                 )
 
@@ -754,6 +791,31 @@ class InstanceSamplingMixin:
             now_monotonic=now_monotonic,
         )
         sessions = session_stage.sessions
+        shared_owners: dict[str, list[SessionHealth]] = defaultdict(list)
+        for session in sessions:
+            if session.process.role == "app-server":
+                shared_owners[session.process.stable_key].append(session)
+        for owners in shared_owners.values():
+            activity = self.process_activity.snapshot(owners[0].process.identity)
+            if activity.available:
+                owned_children = self.terminals.reconcile_shared_children(
+                    tuple(session.session_identity for session in owners),
+                    activity.children, activity.sampled_at or time.time(),
+                )
+                for session in owners:
+                    key = session.session_identity
+                    updates = self.terminal_files.read(
+                        key, session.process.cwd, owned_children[key], time.time(),
+                    )
+                    self.terminals.apply(key, updates)
+            else:
+                for session in owners:
+                    self.terminals.mark_process_unavailable(session.session_identity)
+        sessions = [
+            self._attach_terminal_snapshot(session, session.session_identity)
+            if session.process.role == "app-server" else session
+            for session in sessions
+        ]
         instance_rollout_activity = session_stage.rollout_activity
         active_session_keys = session_stage.active_session_keys
 
