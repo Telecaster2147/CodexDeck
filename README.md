@@ -4,7 +4,7 @@
 
 ### 所有本地 Codex 会话，一块准确、只读的运行态观测控制台
 
-[![Version](https://img.shields.io/badge/version-0.4.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
+[![Version](https://img.shields.io/badge/version-0.5.0-2f81f7?style=flat-square)](https://github.com/Telecaster2147/CodexDeck)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Textual](https://img.shields.io/badge/Textual-8.2.8-111827?style=flat-square)](https://textual.textualize.io/)
 [![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square&logo=linux&logoColor=111827)](#运行要求)
@@ -14,7 +14,7 @@
 </div>
 
 > [!NOTE]
-> **项目状态：** `0.4.0`。CodexDeck 面向 Linux 上同时运行多个 Codex 会话的开发者，集中显示
+> **项目状态：** `0.5.0`。CodexDeck 面向 Linux 上同时运行多个 Codex 会话的开发者，集中显示
 > 哪些会话仍在工作、正在等你、已经失败，或只是缺少足够证据。
 
 <img src="assets/screenshots/overview.png" alt="CodexDeck 宽屏工作台：匿名会话导航与 Inspector 同时突出 Needs You — Approval required" width="100%">
@@ -55,7 +55,7 @@ Terminal 页不是 Codex PTY 的实时镜像；它只展示已持久化或符合
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.4.0/install.sh \
+  https://raw.githubusercontent.com/Telecaster2147/CodexDeck/v0.5.0/install.sh \
   -o /tmp/codexdeck-install.sh
 less /tmp/codexdeck-install.sh
 sh /tmp/codexdeck-install.sh
@@ -69,7 +69,7 @@ codexdeck
 固定版本或关闭颜色：
 
 ```bash
-sh /tmp/codexdeck-install.sh --version 0.4.0
+sh /tmp/codexdeck-install.sh --version 0.5.0
 sh /tmp/codexdeck-install.sh --no-color
 ```
 
@@ -88,7 +88,7 @@ uv run codexdeck
 `uninstall.sh --help`。
 
 本地 wheel 安装需要同时提供校验文件，例如
-`dist/codexdeck-0.4.0-py3-none-any.whl.sha256`；安装器会先验证摘要再创建环境。
+`dist/codexdeck-0.5.0-py3-none-any.whl.sha256`；安装器会先验证摘要再创建环境。
 
 ## 常用工作流
 
